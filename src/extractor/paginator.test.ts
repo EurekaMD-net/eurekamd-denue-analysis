@@ -36,8 +36,8 @@ const MOCK_ESTABLISHMENT = {
 function makeConfig(outputDir: string): ExtractorConfig {
   return {
     token: "test-token",
-    pageSize: 2,   // pequeño para probar paginación en tests
-    delayMs: 0,    // sin espera en tests
+    pageSize: 2, // pequeño para probar paginación en tests
+    delayMs: 0, // sin espera en tests
     maxRetries: 1,
     outputDir,
   };
@@ -51,23 +51,25 @@ function makeConfig(outputDir: string): ExtractorConfig {
 
 vi.mock("./denue-client.js", () => {
   const TOTAL_RECORDS = 5;
-  const mockBuscar = vi.fn().mockImplementation(function(
-    _entidad: string, inicio: number, fin: number
+  const mockBuscar = vi.fn().mockImplementation(function (
+    _entidad: string,
+    inicio: number,
+    fin: number,
   ) {
     // Return records that fall within [inicio, fin], stop at TOTAL_RECORDS
-    const start = inicio - 1;                         // convert to 0-based
+    const start = inicio - 1; // convert to 0-based
     const end = Math.min(fin - 1, TOTAL_RECORDS - 1); // cap at last real record
-    if (start > end) return Promise.resolve([]);       // past the end → empty page
+    if (start > end) return Promise.resolve([]); // past the end → empty page
     return Promise.resolve(
       Array.from({ length: end - start + 1 }, (_, i) => ({
         ...MOCK_ESTABLISHMENT,
         Id: String(inicio + i),
-      }))
+      })),
     );
   });
 
   return {
-    DenueClient: vi.fn().mockImplementation(function() {
+    DenueClient: vi.fn().mockImplementation(function () {
       return { buscarEntidad: mockBuscar };
     }),
     DenueApiError: class DenueApiError extends Error {
@@ -114,7 +116,9 @@ describe("Paginator", () => {
     expect(result.outputFile).toBeTruthy();
     expect(fs.existsSync(result.outputFile)).toBe(true);
 
-    const content = JSON.parse(fs.readFileSync(result.outputFile, "utf-8")) as unknown[];
+    const content = JSON.parse(
+      fs.readFileSync(result.outputFile, "utf-8"),
+    ) as unknown[];
     expect(Array.isArray(content)).toBe(true);
     expect(content).toHaveLength(5);
   });
@@ -137,7 +141,7 @@ describe("Paginator", () => {
 
   it("retorna 0 registros si la primera página devuelve vacío", async () => {
     // Override buscarEntidad to always return [] (simulates estado with no data)
-    const mod = await import("./denue-client.js") as unknown as {
+    const mod = (await import("./denue-client.js")) as unknown as {
       __mockBuscar: ReturnType<typeof vi.fn>;
     };
     mod.__mockBuscar.mockResolvedValueOnce([]);
@@ -148,9 +152,40 @@ describe("Paginator", () => {
     const result = await paginator.extractEstado("01");
 
     expect(result.totalExtraido).toBe(0);
-    expect(result.paginas).toBe(1);   // tried page 1, got [], stopped
+    expect(result.paginas).toBe(1); // tried page 1, got [], stopped
     // outputFile is still created (empty JSON array [])
     expect(result.outputFile).toBeTruthy();
     expect(fs.existsSync(result.outputFile)).toBe(true);
+  });
+
+  it("M1: lanza error si una página falla mid-extracción (no silent break)", async () => {
+    // Mock: page 1 succeeds with full pageSize, page 2 throws.
+    // Pre-fix behavior: silently breaks, returns success with partial data.
+    // Post-fix: throws so orchestrator marks estado failed and operator can --retry-failed.
+    const mod = (await import("./denue-client.js")) as unknown as {
+      __mockBuscar: ReturnType<typeof vi.fn>;
+    };
+    mod.__mockBuscar.mockReset();
+    mod.__mockBuscar
+      .mockResolvedValueOnce([
+        { ...MOCK_ESTABLISHMENT, Id: "1" },
+        { ...MOCK_ESTABLISHMENT, Id: "2" },
+      ])
+      .mockRejectedValueOnce(new Error("simulated network blip on page 2"));
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "denue-test-"));
+    const paginator = new Paginator(makeConfig(tmpDir));
+
+    await expect(paginator.extractEstado("01")).rejects.toThrow(
+      /Extracción interrumpida/,
+    );
+
+    // Output file is still left on disk as a closed JSON array (partial but valid)
+    const outputFile = path.join(tmpDir, "01_aguascalientes.json");
+    expect(fs.existsSync(outputFile)).toBe(true);
+    const content = JSON.parse(
+      fs.readFileSync(outputFile, "utf-8"),
+    ) as unknown[];
+    expect(content).toHaveLength(2); // page 1's 2 records
   });
 });

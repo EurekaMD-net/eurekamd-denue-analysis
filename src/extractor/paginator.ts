@@ -5,7 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { DenueRawRecord, ExtractorConfig, EstadoClave } from "./types.js";
+import type { ExtractorConfig, EstadoClave } from "./types.js";
 import { ESTADOS } from "./types.js";
 import { DenueClient, DenueApiError } from "./denue-client.js";
 
@@ -57,7 +57,7 @@ export class Paginator {
    */
   async extractEstado(
     clave: EstadoClave,
-    condicion: string = "todos"
+    condicion: string = "todos",
   ): Promise<PaginatorResult> {
     const nombre = ESTADOS[clave];
     const startTime = Date.now();
@@ -84,9 +84,9 @@ export class Paginator {
         clave,
         nombre,
         pagina,
-        totalPaginas: -1,             // unknown until the loop ends
+        totalPaginas: -1, // unknown until the loop ends
         registrosExtraidos: totalExtraido,
-        totalEsperado: 0,             // unknown — Cuantificar is broken
+        totalEsperado: 0, // unknown — Cuantificar is broken
       });
 
       try {
@@ -94,7 +94,7 @@ export class Paginator {
           clave,
           registroInicial,
           registroFinal,
-          condicion
+          condicion,
         );
 
         if (records.length === 0) {
@@ -117,16 +117,24 @@ export class Paginator {
         errores++;
         const msg = err instanceof DenueApiError ? err.message : String(err);
         console.error(
-          `[Paginator] Error en ${nombre} página ${pagina}: ${msg}`
+          `[Paginator] Error en ${nombre} página ${pagina}: ${msg}`,
         );
 
-        // Structural error (invalid token) — abort immediately
-        if (err instanceof DenueApiError && err.statusCode === 401) {
-          stream.end("\n]");
-          throw err;
-        }
-        // For transient errors, stop the loop (we can't know if there's more data)
-        break;
+        // Close the stream cleanly before propagating — leaves a valid
+        // (partial) JSON file on disk that can be inspected.
+        await new Promise<void>((resolve) =>
+          stream.end("\n]", () => resolve()),
+        );
+
+        // Throw on ANY error (not just 401). Silently breaking here was the
+        // M1 trap — orchestrator would mark the estado `done` with partial
+        // data because it only checks validation, not `errores`. Throwing
+        // means `processEstado` catches it, marks the estado `failed`, and
+        // operator can `--retry-failed` to re-extract from page 1.
+        if (err instanceof DenueApiError) throw err;
+        throw new DenueApiError(
+          `Extracción interrumpida en ${nombre} página ${pagina}: ${msg}`,
+        );
       }
 
       // Rate limiting between requests
@@ -142,7 +150,7 @@ export class Paginator {
     return {
       estado: nombre,
       clave,
-      totalEsperado: 0,   // Cuantificar is broken — always 0
+      totalEsperado: 0, // Cuantificar is broken — always 0
       totalExtraido,
       paginas: pagina,
       errores,

@@ -59,7 +59,8 @@ export class StateManager {
         if (estado.status === "running") {
           estado.status = "pending";
           estado.started_at = null;
-          estado.error = "reset: crash recovery (status was 'running' on startup)";
+          estado.error =
+            "reset: crash recovery (status was 'running' on startup)";
         }
       }
       loaded.updated_at = new Date().toISOString();
@@ -85,7 +86,12 @@ export class StateManager {
       };
     }
 
-    return { version: STATE_VERSION, created_at: now, updated_at: now, estados };
+    return {
+      version: STATE_VERSION,
+      created_at: now,
+      updated_at: now,
+      estados,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -93,9 +99,17 @@ export class StateManager {
   // ---------------------------------------------------------------------------
 
   private persist(): void {
+    // Atomic write via temp+rename: a crashed process leaves the .tmp file behind
+    // but the real state file is never partially written. POSIX rename is atomic,
+    // so if two processes ever write concurrently (e.g. two `pipeline.ts` runs
+    // sharing the same stateDir), the last rename wins — no torn JSON.
+    // The PID suffix on the temp file prevents the two processes from clobbering
+    // each other's intermediate write.
     this.state.updated_at = new Date().toISOString();
     fs.mkdirSync(path.dirname(this.stateFile), { recursive: true });
-    fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2), "utf-8");
+    const tmpFile = `${this.stateFile}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpFile, JSON.stringify(this.state, null, 2), "utf-8");
+    fs.renameSync(tmpFile, this.stateFile);
   }
 
   // ---------------------------------------------------------------------------
@@ -115,7 +129,7 @@ export class StateManager {
   /** Todos los estados en orden de clave */
   getAll(): EstadoState[] {
     return Object.values(this.state.estados).sort((a, b) =>
-      a.clave.localeCompare(b.clave)
+      a.clave.localeCompare(b.clave),
     );
   }
 
@@ -161,7 +175,13 @@ export class StateManager {
   }
 
   /** Resumen del progreso actual */
-  summary(): { pending: number; running: number; done: number; failed: number; total: number } {
+  summary(): {
+    pending: number;
+    running: number;
+    done: number;
+    failed: number;
+    total: number;
+  } {
     const counts = { pending: 0, running: 0, done: 0, failed: 0, total: 32 };
     for (const e of Object.values(this.state.estados)) {
       counts[e.status]++;
