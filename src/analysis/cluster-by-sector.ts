@@ -25,7 +25,7 @@ export interface ClusterCentroid {
   member_clees: string[];
 }
 
-export interface ClusterByaSectorParams {
+export interface ClusterBySectorParams {
   entidad: string;
   scianPrefix: string;
   k: number;
@@ -40,7 +40,7 @@ const SCIAN_RE = /^[0-9]{2}$/;
  */
 export async function clusterBySector(
   config: AnalysisConfig,
-  params: ClusterByaSectorParams,
+  params: ClusterBySectorParams,
 ): Promise<ClusterCentroid[]> {
   if (!ENTIDAD_RE.test(params.entidad)) {
     throw new Error(
