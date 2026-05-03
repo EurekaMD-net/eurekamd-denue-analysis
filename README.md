@@ -8,13 +8,13 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ## Estado del proyecto
 
-| Fase | Descripción | Estado |
-|------|-------------|--------|
-| 1 | Extractor paginado — cliente HTTP, reintentos, streaming | ✅ Completado |
-| 2 | Schema PostgreSQL + PostGIS, loader con upsert | ✅ Completado |
-| 3 | Extracción nacional completa | ⏳ Pendiente |
-| 4 | Pipeline de análisis y reportes | ⏳ Pendiente |
-| 5 | API interna queryable | ⏳ Pendiente |
+| Fase | Descripción                                              | Estado        |
+| ---- | -------------------------------------------------------- | ------------- |
+| 1    | Extractor paginado — cliente HTTP, reintentos, streaming | ✅ Completado |
+| 2    | Schema PostgreSQL + PostGIS, loader con upsert           | ✅ Completado |
+| 3    | Extracción nacional completa                             | ⏳ Pendiente  |
+| 4    | Pipeline de análisis y reportes                          | ⏳ Pendiente  |
+| 5    | API interna queryable                                    | ⏳ Pendiente  |
 
 ---
 
@@ -46,7 +46,7 @@ denue-data-analysis/
 │   └── db/
 │       ├── schema.sql            # DDL: tabla establecimientos + 6 índices (GIST, FTS, SCIAN) + trigger + vista geo
 │       ├── loader.ts             # transform() + loadRecords() — upsert vía PostgREST
-│       └── loader.test.ts        # 22 tests
+│       └── loader.test.ts        # 23 tests
 ├── scripts/
 │   ├── extract.ts                # CLI: --estado, --sector, --condicion, --all
 │   └── load.ts                   # CLI: --file=<path> --batch=<n>
@@ -137,7 +137,7 @@ npx tsx scripts/load.ts --file=output/09_2026-05-03.json --batch=200
 
 ```bash
 npm run typecheck   # tsc --noEmit — debe dar 0 errores
-npm test            # vitest run — 40 tests
+npm test            # vitest run — 45 tests
 ```
 
 ---
@@ -178,6 +178,7 @@ Sin esto, las llamadas a la tabla nueva devuelven 404 aunque la tabla exista en 
 ### Filtro por municipio
 
 El endpoint `buscarEntidad` **no soporta filtro por municipio directamente** — filtra por entidad federativa completa. Para obtener registros de una delegación específica:
+
 1. Extrae el estado completo
 2. Filtra localmente por el campo `municipio` del registro (extraído de `Ubicacion`)
 
