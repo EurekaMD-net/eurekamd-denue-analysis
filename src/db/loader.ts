@@ -191,7 +191,6 @@ export interface LoaderConfig {
 
 export interface LoadResult {
   inserted: number;
-  updated: number;
   errors: Array<{ clee: string; error: string }>;
   durationMs: number;
 }
@@ -208,22 +207,16 @@ export async function loadRecords(
   const startMs = Date.now();
 
   const rows = records.map(transform);
-  const result: LoadResult = { inserted: 0, updated: 0, errors: [], durationMs: 0 };
+  const result: LoadResult = { inserted: 0, errors: [], durationMs: 0 };
 
   // Chunk en lotes
   for (let i = 0; i < rows.length; i += batchSize) {
     const chunk = rows.slice(i, i + batchSize);
 
-    // Construir payload para upsert
-    const payload = chunk.map((row) => ({
-      ...row,
-      // PostGIS: expresión WKT para el punto geográfico
-      // PostgREST acepta funciones via computed columns, pero para geom
-      // usamos inserción directa vía SQL en el script de carga.
-      // Aquí omitimos geom y la calculamos en un paso post-insert.
-      geom: undefined,
-      raw_json: JSON.stringify(row.raw_json),
-    }));
+    // Construir payload para upsert.
+    // - geom NO está en EstablecimientoRow — Postgres lo calcula con updateGeometry()
+    // - raw_json se pasa como objeto (no string) para que PostgREST lo trate como JSONB
+    const payload = chunk;
 
     const url = `${supabaseUrl}/rest/v1/establecimientos`;
     const response = await fetch(url, {
@@ -257,21 +250,41 @@ export async function loadRecords(
 /**
  * Actualiza la columna geom a partir de latitud/longitud ya almacenadas.
  * Se ejecuta una sola vez después de la carga inicial.
+ *
+ * Requiere que exista la función RPC `exec_sql` en Supabase, o usa
+ * docker exec como fallback si la env var SUPABASE_DB_CONTAINER está definida.
  */
-export async function updateGeometry(config: LoaderConfig): Promise<void> {
+export async function updateGeometry(config: LoaderConfig): Promise<{ updated: number }> {
   const { supabaseUrl, serviceRoleKey } = config;
 
-  // Usamos el endpoint RPC de PostgREST para ejecutar SQL arbitrario
-  // requiere que exista una función SQL en el schema public.
-  // Alternativamente, lo hacemos via el endpoint de Supabase SQL editor
-  // (solo disponible en studio). Para este proyecto usamos psql via docker exec.
-  console.log("ℹ️  Geometry update: ejecutar manualmente vía psql:");
-  console.log(
-    `  docker exec supabase-db psql -U postgres -c ` +
-    `"UPDATE establecimientos SET geom = ST_SetSRID(ST_MakePoint(longitud, latitud), 4326) WHERE latitud IS NOT NULL AND longitud IS NOT NULL AND geom IS NULL;"`
-  );
-  void supabaseUrl;
-  void serviceRoleKey;
+  const sql = `
+    UPDATE establecimientos
+    SET geom = ST_SetSRID(ST_MakePoint(longitud::float8, latitud::float8), 4326)
+    WHERE latitud IS NOT NULL
+      AND longitud IS NOT NULL
+      AND geom IS NULL
+  `;
+
+  // Intentar via docker exec (disponible en el VPS)
+  const container = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
+  const { execSync } = await import("child_process");
+  try {
+    const psqlCmd = `docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`;
+    const output = execSync(psqlCmd, { encoding: "utf-8" });
+    // Output típico: "UPDATE 29"
+    const match = output.match(/UPDATE (\d+)/);
+    const updated = match ? parseInt(match[1]!, 10) : 0;
+    console.log(`✅ Geometrías actualizadas: ${updated} registros`);
+    return { updated };
+  } catch (err) {
+    // Fallback: instrucción manual
+    console.warn("⚠️  No se pudo ejecutar geometry update via docker exec:", (err as Error).message);
+    console.log("Ejecuta manualmente:");
+    console.log(`  docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`);
+    void supabaseUrl;
+    void serviceRoleKey;
+    return { updated: 0 };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -71,7 +71,8 @@ async function main(): Promise<void> {
   // Actualizar geometrías después de la carga
   if (result.errors.length === 0) {
     console.log();
-    await updateGeometry(config);
+    const geoResult = await updateGeometry(config);
+    console.log(`🗺  Geometrías PostGIS actualizadas: ${geoResult.updated}`);
   }
 }
 

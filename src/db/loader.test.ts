@@ -198,6 +198,24 @@ describe("loadRecords()", () => {
     const result = await loadRecords([BASE_RECORD, BASE_RECORD], config);
     expect(result.inserted).toBe(2);
     expect(result.errors).toHaveLength(0);
+    // LoadResult no expone campo "updated" — eliminado para evitar confusión
+    expect("updated" in result).toBe(false);
+  });
+
+  it("raw_json llega como objeto (no string) en el payload enviado a fetch", async () => {
+    let capturedBody: unknown;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+      capturedBody = JSON.parse(opts.body as string);
+      return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+    }));
+
+    await loadRecords([BASE_RECORD], config);
+
+    const body = capturedBody as Array<Record<string, unknown>>;
+    // raw_json debe ser objeto, no string serializado
+    expect(typeof body[0]!["raw_json"]).toBe("object");
+    // geom no debe estar en el payload
+    expect("geom" in body[0]!).toBe(false);
   });
 
   it("registra error si la API retorna !ok", async () => {
