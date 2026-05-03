@@ -2,7 +2,7 @@
 
 Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidades Económicas (DENUE)** del INEGI, implementado en TypeScript.
 
-> **Última actualización de datos fuente:** DENUE Interactivo 05/2025 (Marzo 2025, Censos Económicos 2024) — 6,097,675 establecimientos.
+> **Fuente:** API live INEGI DENUE v1 — `/app/api/denue/v1/consulta/`. La API no expone metadatos de versión/snapshot; siempre devuelve la publicación corriente. Validado contra el conteo oficial de INEGI por estado (verificación manual vía https://www.inegi.org.mx/app/mapa/denue/).
 
 ---
 
@@ -30,7 +30,16 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 - Carga a Supabase con geometría PostGIS y upsert idempotente por `CLEE`
 - Consultas por radio geográfico (`ST_DWithin`)
 
-**Demo ejecutado:** 29 hospitales (SCIAN 622x) en Tlalpan, CDMX — cargados en Supabase con coords validadas.
+### Validación end-to-end (2026-05-03)
+
+| Estado   | Extraídos | Cargados | Conteo INEGI | Cobertura     |
+| -------- | --------- | -------- | ------------ | ------------- |
+| Tlaxcala | 98,711    | 98,692   | 98,711       | 100% (\*)     |
+| Colima   | 41,756    | 41,745   | —            | (verificable) |
+
+(\*) ~0.02% de los registros queda asignado a su entidad canónica por prefijo CLEE
+(sucursales que operan en X pero registradas en otra entidad — comportamiento por
+diseño, ver `extractEntidad` en `src/db/loader.ts`).
 
 ---
 
@@ -239,12 +248,12 @@ El endpoint `buscarEntidad` **no soporta filtro por municipio directamente** —
 
 ## Estimaciones de volumen (extracción nacional)
 
-| Métrica | Estimado |
-|---|---|
-| Registros totales | ~6.1M |
-| Tiempo extracción CDMX (09) | ~30 min |
+| Métrica                                                | Estimado |
+| ------------------------------------------------------ | -------- |
+| Registros totales                                      | ~6.1M    |
+| Tiempo extracción CDMX (09)                            | ~30 min  |
 | Tiempo extracción completa (32 estados, concurrency=1) | ~18-24 h |
-| Tamaño JSON crudo estimado | ~8-12 GB |
+| Tamaño JSON crudo estimado                             | ~8-12 GB |
 
 ---
 

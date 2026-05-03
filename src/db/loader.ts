@@ -58,7 +58,8 @@ export interface EstablecimientoRow {
 
 /** Convierte string vacío o "null" a null */
 function clean(val: string | undefined | null): string | null {
-  if (!val || val.trim() === "" || val.trim().toLowerCase() === "null") return null;
+  if (!val || val.trim() === "" || val.trim().toLowerCase() === "null")
+    return null;
   return val.trim();
 }
 
@@ -84,6 +85,18 @@ function parseDate(val: string | undefined | null): string | null {
  * Extrae la clave de entidad (2 dígitos) del CLEE.
  * CLEE format: 2-digit entidad + 3-digit municipio + ... (always present in real API).
  * AreaGeo is NOT returned by buscarEntidad — do not use it for entidad extraction.
+ *
+ * IMPORTANTE — comportamiento por diseño (verificado 2026-05-03):
+ * BuscarEntidad/<X>/... puede devolver registros cuyo CLEE NO empieza con X.
+ * Son sucursales que OPERAN físicamente en X pero cuya registración canónica
+ * (CLEE primary key) está en otra entidad. Ejemplos en producción:
+ * - "CAC NANACAMILPA" (sucursal CFE en Tlaxcala, CLEE 21... = Puebla)
+ * - "FIRST CASH SUCURSAL 827 GTO" (sucursal en Tlaxcala, CLEE 01... = Aguascalientes)
+ *
+ * Extraemos por prefijo CLEE (no por la entidad consultada) para que la entidad
+ * almacenada sea la canónica. Resultado: ~0.02-0.03% de cada extracción
+ * estatal queda asignado a otra entidad. Esto es CORRECTO, no un bug.
+ * Verificado: Tlaxcala 19/98,711 (0.019%), Colima 11/41,756 (0.026%).
  */
 function extractEntidad(clee: string | undefined | null): string | null {
   if (!clee || clee.length < 2) return null;
@@ -149,9 +162,9 @@ function extractMunicipio(ubicacion: string | null): string | null {
 // ---------------------------------------------------------------------------
 
 export interface LoaderConfig {
-  supabaseUrl: string;       // ej. "http://localhost:8100"
-  serviceRoleKey: string;    // JWT service_role
-  batchSize?: number;        // registros por batch (default: 100)
+  supabaseUrl: string; // ej. "http://localhost:8100"
+  serviceRoleKey: string; // JWT service_role
+  batchSize?: number; // registros por batch (default: 100)
 }
 
 export interface LoadResult {
@@ -166,7 +179,7 @@ export interface LoadResult {
  */
 export async function loadRecords(
   records: DenueRawRecord[],
-  config: LoaderConfig
+  config: LoaderConfig,
 ): Promise<LoadResult> {
   const { supabaseUrl, serviceRoleKey, batchSize = 100 } = config;
   const startMs = Date.now();
@@ -175,7 +188,9 @@ export async function loadRecords(
   // and poison the entire batch. Log and skip so one bad row doesn't abort a 100-row chunk.
   const validRecords = records.filter((r) => {
     if (!r.CLEE || r.CLEE.trim() === "") {
-      console.warn(`[Loader] Skipping record with empty CLEE: Id=${r.Id ?? "(unknown)"}`);
+      console.warn(
+        `[Loader] Skipping record with empty CLEE: Id=${r.Id ?? "(unknown)"}`,
+      );
       return false;
     }
     return true;
@@ -218,7 +233,7 @@ export async function loadRecords(
       continue;
     }
 
-    const returned = await response.json() as unknown[];
+    const returned = (await response.json()) as unknown[];
     result.inserted += returned.length;
   }
 
@@ -233,7 +248,9 @@ export async function loadRecords(
  * Requiere que exista la función RPC `exec_sql` en Supabase, o usa
  * docker exec como fallback si la env var SUPABASE_DB_CONTAINER está definida.
  */
-export async function updateGeometry(config: LoaderConfig): Promise<{ updated: number }> {
+export async function updateGeometry(
+  config: LoaderConfig,
+): Promise<{ updated: number }> {
   const { supabaseUrl, serviceRoleKey } = config;
 
   const sql = `
@@ -257,9 +274,14 @@ export async function updateGeometry(config: LoaderConfig): Promise<{ updated: n
     return { updated };
   } catch (err) {
     // Fallback: instrucción manual
-    console.warn("⚠️  No se pudo ejecutar geometry update via docker exec:", (err as Error).message);
+    console.warn(
+      "⚠️  No se pudo ejecutar geometry update via docker exec:",
+      (err as Error).message,
+    );
     console.log("Ejecuta manualmente:");
-    console.log(`  docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`);
+    console.log(
+      `  docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`,
+    );
     void supabaseUrl;
     void serviceRoleKey;
     return { updated: 0 };
