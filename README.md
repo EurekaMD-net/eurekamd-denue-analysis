@@ -1,6 +1,6 @@
 # DENUE Data Analysis
 
-Proyecto para extraer y analizar datos del **Directorio Estadístico Nacional de Unidades Económicas (DENUE)** del INEGI, utilizando Python y la API oficial.
+Proyecto para extraer y analizar datos del **Directorio Estadístico Nacional de Unidades Económicas (DENUE)** del INEGI, utilizando TypeScript y la API oficial.
 
 ---
 
@@ -27,50 +27,57 @@ Este proyecto automatiza la extracción, transformación y análisis de esos dat
 ```
 eurekamd-denue-analysis/
 ├── README.md
-├── requirements.txt
+├── package.json
+├── tsconfig.json
 ├── .env.example
-├── extractor/
-│   ├── __init__.py
-│   ├── client.py          # Cliente HTTP para la API DENUE
-│   ├── paginator.py       # Lógica de paginación por estado/sector
-│   └── models.py          # Modelos de datos (dataclasses / Pydantic)
-├── loader/
-│   ├── __init__.py
-│   ├── schema.sql         # DDL de la tabla destino
-│   └── loader.py          # Carga a PostgreSQL/Supabase
-├── analysis/
-│   ├── __init__.py
-│   ├── sector_summary.py  # Resúmenes por sector SCIAN
-│   └── geo_analysis.py    # Análisis geoespacial básico
-├── notebooks/
-│   └── exploratory.ipynb  # Exploración inicial de datos
-└── scripts/
-    ├── run_extraction.py  # Entry point: extracción completa
-    └── run_analysis.py    # Entry point: pipeline de análisis
+├── src/
+│   ├── client/
+│   │   └── denue.ts          # Cliente HTTP para la API DENUE
+│   ├── extractor/
+│   │   ├── paginator.ts      # Lógica de paginación por estado/sector
+│   │   └── types.ts          # Tipos e interfaces (Establecimiento, etc.)
+│   ├── loader/
+│   │   ├── schema.sql        # DDL de la tabla destino
+│   │   └── loader.ts         # Carga a PostgreSQL/Supabase
+│   ├── analysis/
+│   │   └── sectorSummary.ts  # Resúmenes por sector SCIAN
+│   └── scripts/
+│       ├── extract.ts        # Entry point: extracción completa
+│       └── analyze.ts        # Entry point: pipeline de análisis
+└── dist/                     # Compilado (gitignored)
 ```
 
 ---
 
 ## Requisitos previos
 
-### Python
-- Python 3.10+
-- pip o conda
+### Runtime
+- Node.js 20+
+- npm 10+
 
-### Librerías principales
+### Instalación
 
 ```bash
-pip install -r requirements.txt
+npm install
 ```
 
-```
-requests>=2.31.0        # Llamadas HTTP a la API DENUE
-pydantic>=2.0.0         # Validación y modelos de datos
-psycopg2-binary>=2.9    # Conector PostgreSQL
-pandas>=2.0.0           # Transformación y análisis tabular
-geopandas>=0.14.0       # Análisis geoespacial (opcional)
-python-dotenv>=1.0.0    # Variables de entorno
-tqdm>=4.65.0            # Barra de progreso en extracción
+### Dependencias principales
+
+```json
+{
+  "dependencies": {
+    "zod": "^3.22.0",
+    "pg": "^8.11.0",
+    "dotenv": "^16.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.7.0",
+    "vitest": "^1.6.0"
+  }
+}
 ```
 
 ### Credenciales
@@ -94,14 +101,20 @@ DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ## Uso rápido
 
 ```bash
-# 1. Extracción piloto — CDMX, todos los sectores, primeros 1000 registros
-python scripts/run_extraction.py --estado 09 --limit 1000
+# Extracción piloto — CDMX, todos los sectores, primeros 1000 registros
+npx tsx src/scripts/extract.ts --estado 09 --limit 1000
 
-# 2. Extracción completa nacional (tarda varias horas)
-python scripts/run_extraction.py --all-states
+# Extracción completa nacional (tarda varias horas)
+npx tsx src/scripts/extract.ts --all-states
 
-# 3. Análisis básico
-python scripts/run_analysis.py --report sector_summary
+# Análisis básico
+npx tsx src/scripts/analyze.ts --report sector_summary
+
+# Compilar
+npm run build
+
+# Tests
+npm test
 ```
 
 ---
