@@ -56,8 +56,16 @@ denue-data-analysis/
 │   │   └── paginator.test.ts     # 4 tests
 │   ├── db/
 │   │   ├── schema.sql            # DDL: tabla establecimientos + 6 índices (GIST, FTS, SCIAN) + trigger + vista geo
+│   │   ├── materialized-views.sql  # mv_sector_summary + mv_coverage (REFRESH CONCURRENTLY)
 │   │   ├── loader.ts             # transform() + loadRecords() — upsert vía PostgREST
 │   │   └── loader.test.ts        # 23 tests
+│   ├── analysis/
+│   │   ├── types.ts              # Interfaces compartidas: AnalysisConfig, SectorCount, CoverageRow...
+│   │   ├── sector-summary.ts     # Agrupa establecimientos por clase_actividad_id (paginado en JS)
+│   │   ├── top-municipios.ts     # Ranking de municipios por número de establecimientos
+│   │   ├── geojson-export.ts     # Exporta establecimientos como GeoJSON FeatureCollection
+│   │   ├── coverage-report.ts    # Lee mv_coverage y formatea tabla de cobertura por entidad
+│   │   └── coverage-report.test.ts  # 3 tests
 │   └── pipeline/
 │       ├── state-manager.ts      # Progreso por estado en JSON local — crash recovery
 │       ├── state-manager.test.ts # 14 tests
@@ -68,7 +76,9 @@ denue-data-analysis/
 ├── scripts/
 │   ├── extract.ts                # CLI single-state: --estado, --sector, --condicion
 │   ├── load.ts                   # CLI single-file: --file=<path> --batch=<n>
-│   └── pipeline.ts               # CLI pipeline nacional: --all, --estados=, --retry-failed, --status
+│   ├── pipeline.ts               # CLI pipeline nacional: --all, --estados=, --retry-failed, --status
+│   ├── analyze.ts                # CLI análisis: sector-summary, top-municipios, export geojson
+│   └── coverage.ts               # CLI cobertura: lee mv_coverage y muestra tabla por entidad
 ├── tests/
 │   ├── fixtures/
 │   │   └── denue-real-09-sample.json  # 5 registros reales CDMX (ground truth, 2026-05-03)
