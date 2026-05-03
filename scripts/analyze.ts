@@ -13,10 +13,25 @@
  */
 
 import { writeFileSync } from "fs";
+import { execSync } from "node:child_process";
 import { sectorSummary } from "../src/analysis/sector-summary.js";
 import { topMunicipios } from "../src/analysis/top-municipios.js";
 import { exportGeoJson } from "../src/analysis/geojson-export.js";
+import {
+  clusterBySector,
+  formatClusters,
+} from "../src/analysis/cluster-by-sector.js";
+import {
+  coverageReport,
+  formatCoverageReport,
+} from "../src/analysis/coverage-report.js";
 import type { AnalysisConfig } from "../src/analysis/types.js";
+
+const MATERIALIZED_VIEWS = [
+  "mv_sector_summary",
+  "mv_coverage",
+  "mv_estrato_por_entidad",
+];
 
 // ---------------------------------------------------------------------------
 // Parse CLI args
@@ -91,7 +106,8 @@ if (command === "sector-summary") {
   console.log(`\nTop ${result.rows.length} municipios:\n`);
   for (const row of result.rows) {
     console.log(
-      `  [${row.entidad ?? "??"
+      `  [${
+        row.entidad ?? "??"
       }] ${(row.municipio ?? "(sin municipio)").padEnd(40)} ${String(row.count).padStart(8)}`,
     );
   }
@@ -103,7 +119,9 @@ if (command === "sector-summary") {
   const withGeomOnly = !hasFlag("include-no-geom");
 
   if (!output) {
-    console.error("❌  --output=<archivo.geojson> es requerido para export geojson");
+    console.error(
+      "❌  --output=<archivo.geojson> es requerido para export geojson",
+    );
     process.exit(1);
   }
 
@@ -117,10 +135,64 @@ if (command === "sector-summary") {
 
   writeFileSync(output, JSON.stringify(result.collection, null, 2), "utf-8");
 
-  console.log(`\n✅ ${result.total.toLocaleString()} features exportadas → ${output}`);
+  console.log(
+    `\n✅ ${result.total.toLocaleString()} features exportadas → ${output}`,
+  );
   if (result.withoutGeometry > 0) {
-    console.log(`   ⚠️  ${result.withoutGeometry} sin geometría (geometry: null)`);
+    console.log(
+      `   ⚠️  ${result.withoutGeometry} sin geometría (geometry: null)`,
+    );
   }
+} else if (command === "clusters") {
+  const entidad = getFlag("entidad");
+  const scian = getFlag("scian");
+  const k = parseInt(getFlag("k") ?? "5", 10);
+  if (!entidad || !scian) {
+    console.error("❌  clusters: --entidad=NN y --scian=NN son requeridos.");
+    process.exit(1);
+  }
+  console.log(
+    `🌐  Clusters — entidad ${entidad}, sector SCIAN ${scian}, k=${k}`,
+  );
+  const result = await clusterBySector(config, {
+    entidad,
+    scianPrefix: scian,
+    k,
+  });
+  console.log("\n" + formatClusters(result));
+} else if (command === "coverage") {
+  console.log("📋  Coverage report (entidades cargadas vs INEGI)\n");
+  const report = await coverageReport(config);
+  console.log(formatCoverageReport(report));
+} else if (command === "refresh-views") {
+  console.log("🔄  Refrescando materialized views...");
+  for (const view of MATERIALIZED_VIEWS) {
+    process.stdout.write(`  ${view}... `);
+    try {
+      // CONCURRENTLY allows reads during refresh; requires a UNIQUE INDEX (we have one)
+      execSync(
+        `docker exec ${config.dbContainer} psql -U postgres -d postgres -c "REFRESH MATERIALIZED VIEW CONCURRENTLY ${view};"`,
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      console.log("✅");
+    } catch (err) {
+      const msg =
+        (err as { stderr?: Buffer | string }).stderr?.toString() ?? String(err);
+      // CONCURRENTLY can fail on first refresh after WITH NO DATA — fall back to non-concurrent
+      if (/cannot refresh materialized view.*concurrently/i.test(msg)) {
+        process.stdout.write("(first refresh, no concurrency)... ");
+        execSync(
+          `docker exec ${config.dbContainer} psql -U postgres -d postgres -c "REFRESH MATERIALIZED VIEW ${view};"`,
+          { encoding: "utf-8" },
+        );
+        console.log("✅");
+      } else {
+        console.log(`❌  ${msg.slice(0, 200)}`);
+        process.exit(1);
+      }
+    }
+  }
+  console.log("\n✅ Todos los views refrescados.");
 } else {
   console.log(`
 DENUE Analyze CLI
@@ -129,9 +201,14 @@ Comandos:
   sector-summary   Agrupa establecimientos por clase de actividad económica
   top-municipios   Ranking de municipios por número de establecimientos
   export geojson   Exporta establecimientos como GeoJSON FeatureCollection
+  clusters         PostGIS ST_ClusterKMeans por entidad + sector SCIAN
+  coverage         Reporte de cobertura: cargado vs INEGI autoritativo
+  refresh-views    REFRESH MATERIALIZED VIEW (CONCURRENTLY) para los 3 mv_*
 
 Opciones:
   --entidad=<código>   Filtrar por clave de entidad (ej. 09, 06, 15). Sin = nacional.
+  --scian=<NN>         Prefijo SCIAN de 2 dígitos (para clusters)
+  --k=<n>              Número de clusters K-Means (para clusters, default 5)
   --limit=<n>          Máximo de filas a mostrar/exportar (default: 20 / 10)
   --output=<archivo>   Archivo de salida (requerido para export geojson)
   --include-no-geom    Incluir establecimientos sin coordenadas en el GeoJSON
