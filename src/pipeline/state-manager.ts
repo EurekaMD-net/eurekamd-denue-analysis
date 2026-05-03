@@ -2,7 +2,7 @@
  * StateManager — Fase 3
  *
  * Persiste el progreso de la extracción nacional en un archivo JSON local
- * (pipeline-state.json en el outputDir). Sin dependencias adicionales.
+ * (pipeline-state.json en stateDir — separado de outputDir). Sin dependencias adicionales.
  *
  * Invariante de reanudabilidad: si el proceso muere a mitad, el próximo
  * run salta estados "done" y retoma desde "running" → "pending".
