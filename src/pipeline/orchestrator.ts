@@ -8,6 +8,7 @@
  * omiten en ejecución normal (usar --retry-failed para reintentarlos).
  */
 
+import { resolve } from "node:path";
 import type { EstadoClave, ExtractorConfig } from "../extractor/types.js";
 import { Paginator } from "../extractor/paginator.js";
 import { loadRecords, readExtractorOutput, updateGeometry } from "../db/loader.js";
@@ -26,6 +27,12 @@ export interface OrchestratorConfig {
   retryFailed?: boolean;
   /** Si true, actualiza geometrías PostGIS al final del pipeline */
   updateGeomAtEnd?: boolean;
+  /**
+   * Directorio donde se guarda pipeline-state.json.
+   * Defaults to ./data/state/ — separate from outputDir (extracted JSON files)
+   * so state and data files don't co-locate.
+   */
+  stateDir?: string;
 }
 
 export interface OrchestratorResult {
@@ -48,7 +55,10 @@ export class Orchestrator {
   private readonly stateManager: StateManager;
 
   constructor(private readonly config: OrchestratorConfig) {
-    this.stateManager = new StateManager(config.extractorConfig.outputDir);
+    // Use stateDir if provided, otherwise default to ./data/state/ relative to outputDir's parent.
+    // This keeps pipeline-state.json separate from the extracted JSON data files.
+    const stateDir = config.stateDir ?? resolve(config.extractorConfig.outputDir, "../state");
+    this.stateManager = new StateManager(stateDir);
   }
 
   /**

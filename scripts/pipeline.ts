@@ -10,7 +10,7 @@
  * Variables de entorno requeridas (en .env):
  *   DENUE_TOKEN=<token INEGI>
  *   SUPABASE_URL=http://localhost:8100
- *   SUPABASE_SERVICE_ROLE_KEY=<jwt>
+ *   SUPABASE_SERVICE_KEY=<jwt>   ← mismo nombre que scripts/load.ts y README
  */
 
 import { readFileSync } from "node:fs";
@@ -104,7 +104,8 @@ async function main(): Promise<void> {
   const outputDir = env["OUTPUT_DIR"] ?? resolve(process.cwd(), "data");
 
   if (args.command === "status") {
-    const sm = new StateManager(outputDir);
+    const stateDir = env["STATE_DIR"] ?? resolve(process.cwd(), "data/state");
+    const sm = new StateManager(stateDir);
     const summary = sm.summary();
     console.log("\n📊 Pipeline Status");
     console.log("==================");
@@ -125,7 +126,7 @@ async function main(): Promise<void> {
   // Run
   const token = requireEnv(env, "DENUE_TOKEN");
   const supabaseUrl = env["SUPABASE_URL"] ?? "http://localhost:8100";
-  const serviceRoleKey = requireEnv(env, "SUPABASE_SERVICE_ROLE_KEY");
+  const serviceRoleKey = requireEnv(env, "SUPABASE_SERVICE_KEY");
 
   console.log("\n🚀 Pipeline DENUE — Extracción Nacional");
   console.log(`   Estados: ${args.estados?.join(", ") ?? "todos (32)"}`);
@@ -134,10 +135,17 @@ async function main(): Promise<void> {
   console.log(`   Output dir: ${outputDir}`);
   console.log("");
 
+  const stateDir = env["STATE_DIR"] ?? resolve(process.cwd(), "data/state");
+
   const orchestrator = new Orchestrator({
+    stateDir,
     extractorConfig: {
       token,
-      pageSize: 1000,
+      // pageSize=500 matches scripts/extract.ts conservative default.
+      // Attempted live verification of 1000 on 2026-05-03 but the INEGI
+      // v1 API endpoint returned 404 from this VPS IP (load-balancer routing).
+      // Keeping 500 until pageSize=1000 can be confirmed end-to-end.
+      pageSize: 500,
       delayMs: 500,
       maxRetries: 3,
       outputDir,

@@ -28,9 +28,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Config mínima para tests — apunta a tmpDir para estado */
+/** Config mínima para tests — stateDir apunta a tmpDir para estado */
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
+    stateDir: tmpDir,
     extractorConfig: {
       token: "test-token",
       pageSize: 10,

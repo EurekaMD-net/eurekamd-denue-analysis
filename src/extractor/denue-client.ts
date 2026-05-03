@@ -8,6 +8,48 @@ import type { DenueRawRecord, DenueCountResponse } from "./types.js";
 
 const BASE_URL = "https://www.inegi.org.mx/app/api/denue/v1/consulta";
 
+// ---------------------------------------------------------------------------
+// Global rate throttle — shared across ALL DenueClient instances so that
+// concurrent orchestrator workers don't multiply API hit rate.
+// Each call waits until at least `delayMs` has passed since the last call.
+// ---------------------------------------------------------------------------
+let _lastCallAt = 0;
+let _globalDelayMs = 300; // default; overridden by first client constructed
+// Promise chain that serializes concurrent callers — each new call queues behind the last.
+let _throttleChain: Promise<void> = Promise.resolve();
+
+/** Override the global inter-request delay (ms). Call before constructing clients. */
+export function setGlobalDelay(ms: number): void {
+  _globalDelayMs = ms;
+}
+
+/**
+ * Serializes all fetch calls through a shared promise chain so that
+ * regardless of orchestrator concurrency, total DENUE API request rate
+ * is bounded to one call per _globalDelayMs.
+ */
+async function globalThrottle(): Promise<void> {
+  // Append our wait to the end of the chain. Each caller takes the current
+  // chain tail, then schedules its own slot _globalDelayMs later.
+  const myTurn = _throttleChain.then(async () => {
+    const now = Date.now();
+    const elapsed = now - _lastCallAt;
+    if (elapsed < _globalDelayMs) {
+      await sleep(_globalDelayMs - elapsed);
+    }
+    _lastCallAt = Date.now();
+  });
+  // Advance the chain tail — next caller waits for myTurn to finish
+  _throttleChain = myTurn;
+  return myTurn;
+}
+
+/** Reset throttle state (for tests) */
+export function resetThrottle(): void {
+  _lastCallAt = 0;
+  _throttleChain = Promise.resolve();
+}
+
 export class DenueApiError extends Error {
   constructor(
     message: string,
@@ -22,11 +64,20 @@ export class DenueApiError extends Error {
 export class DenueClient {
   private readonly token: string;
 
-  constructor(token: string) {
+  /**
+   * @param token   - INEGI API token
+   * @param delayMs - Inter-request delay in ms. Sets the GLOBAL delay shared by
+   *                  all DenueClient instances, so concurrent orchestrator workers
+   *                  are bounded to one API call per delayMs regardless of concurrency.
+   */
+  constructor(token: string, delayMs?: number) {
     if (!token || token.trim().length === 0) {
       throw new DenueApiError("Token de DENUE no puede estar vacío");
     }
     this.token = token.trim();
+    if (delayMs !== undefined) {
+      setGlobalDelay(delayMs);
+    }
   }
 
   /**
@@ -127,6 +178,10 @@ export class DenueClient {
     maxRetries: number,
     attempt = 1
   ): Promise<Response> {
+    // Throttle ALL requests through the global rate limiter so that
+    // concurrent callers (multiple orchestrator workers) share the delay.
+    await globalThrottle();
+
     try {
       const response = await fetch(url, {
         headers: { Accept: "application/json" },

@@ -36,7 +36,8 @@ export class Paginator {
 
   constructor(config: ExtractorConfig) {
     this.config = config;
-    this.client = new DenueClient(config.token);
+    // Pass delayMs to set the global HTTP throttle shared across all instances
+    this.client = new DenueClient(config.token, config.delayMs);
   }
 
   setProgressCallback(cb: (progress: PaginatorProgress) => void): void {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { DenueClient, DenueApiError } from "./denue-client.js";
+import { DenueClient, DenueApiError, setGlobalDelay, resetThrottle } from "./denue-client.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -48,6 +48,7 @@ function mockFetch(body: unknown, status = 200): void {
 describe("DenueClient", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    resetThrottle();
   });
 
   describe("constructor", () => {
@@ -179,6 +180,42 @@ describe("DenueClient", () => {
       const result = await client.ficha("99999999");
 
       expect(result).toBeNull();
+    });
+  });
+
+  describe("global rate throttle", () => {
+    afterEach(() => {
+      // Reset global throttle state so other tests aren't affected
+      resetThrottle();
+      setGlobalDelay(0);
+      vi.restoreAllMocks();
+    });
+
+    it("spaces two parallel buscarEntidad calls by at least delayMs", async () => {
+      const delayMs = 50; // small enough for fast tests, large enough to be measurable
+      mockFetch([MOCK_ESTABLISHMENT]);
+
+      // Create two clients sharing the same global throttle at delayMs
+      const client1 = new DenueClient(MOCK_TOKEN, delayMs);
+      const client2 = new DenueClient(MOCK_TOKEN, delayMs);
+
+      const timestamps: number[] = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockImplementation((...args: Parameters<typeof fetch>) => {
+        timestamps.push(Date.now());
+        return origFetch(...args);
+      });
+
+      // Fire both in parallel — throttle should serialize them
+      await Promise.all([
+        client1.buscarEntidad("09", 1, 5),
+        client2.buscarEntidad("09", 1, 5),
+      ]);
+
+      expect(timestamps).toHaveLength(2);
+      const gap = timestamps[1]! - timestamps[0]!;
+      // The second call must be at least delayMs after the first
+      expect(gap).toBeGreaterThanOrEqual(delayMs - 5); // 5ms tolerance for timer precision
     });
   });
 });
