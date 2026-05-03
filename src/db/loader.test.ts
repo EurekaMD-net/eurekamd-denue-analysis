@@ -263,6 +263,20 @@ describe("loadRecords()", () => {
     expect(capturedHeaders["apikey"]).toBe("fake-service-key");
   });
 
+  it("URL incluye ?on_conflict=clee para upsert correcto en PostgREST", async () => {
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: unknown, _opts: RequestInit) => {
+      capturedUrl = url as string;
+      return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+    }));
+
+    await loadRecords([BASE_RECORD], config);
+
+    // PostgREST requires ?on_conflict=clee when clee is UNIQUE but not PK.
+    // Without it, Prefer: resolution=merge-duplicates is silently ignored → HTTP 409 on duplicates.
+    expect(capturedUrl).toContain("?on_conflict=clee");
+  });
+
   it("retorna durationMs > 0", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,

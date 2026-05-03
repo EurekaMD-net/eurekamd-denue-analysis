@@ -193,7 +193,11 @@ export async function loadRecords(
     // - raw_json se pasa como objeto (no string) para que PostgREST lo trate como JSONB
     const payload = chunk;
 
-    const url = `${supabaseUrl}/rest/v1/establecimientos`;
+    // ?on_conflict=clee is required for PostgREST upsert on a non-PK unique column.
+    // The table uses id (bigserial) as PK and clee as UNIQUE. Without this param,
+    // PostgREST ignores Prefer: resolution=merge-duplicates and issues a plain INSERT,
+    // returning HTTP 409 on duplicate CLEE. Verified on PostgREST 12.2.3.
+    const url = `${supabaseUrl}/rest/v1/establecimientos?on_conflict=clee`;
     const response = await fetch(url, {
       method: "POST",
       headers: {
