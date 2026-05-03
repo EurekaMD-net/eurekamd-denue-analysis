@@ -1,0 +1,31 @@
+{
+  "name": "denue-data-analysis",
+  "version": "1.0.0",
+  "description": "Proyecto para extraer y analizar datos del **Directorio Estadístico Nacional de Unidades Económicas (DENUE)** del INEGI, utilizando TypeScript y la API oficial.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc",
+    "extract": "tsx scripts/extract.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EurekaMD-net/eurekamd-denue-analysis.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/EurekaMD-net/eurekamd-denue-analysis/issues"
+  },
+  "homepage": "https://github.com/EurekaMD-net/eurekamd-denue-analysis#readme",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  }
+}
