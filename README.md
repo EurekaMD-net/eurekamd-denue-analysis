@@ -14,7 +14,7 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 | 2    | Schema PostgreSQL + PostGIS, loader con upsert           | ✅ Completado |
 | 3    | Pipeline nacional reanudable (32 estados)                | ✅ Completado |
 | 4    | Pipeline de análisis y reportes                          | ⏳ Pendiente  |
-| 5    | API interna queryable                                    | ⏳ Pendiente  |
+| 5    | API interna queryable (Hono, X-Api-Key auth)             | ✅ Completado |
 
 ---
 
@@ -66,19 +66,33 @@ denue-data-analysis/
 │   │   ├── geojson-export.ts     # Exporta establecimientos como GeoJSON FeatureCollection
 │   │   ├── coverage-report.ts    # Lee mv_coverage y formatea tabla de cobertura por entidad
 │   │   └── coverage-report.test.ts  # 3 tests
-│   └── pipeline/
-│       ├── state-manager.ts      # Progreso por estado en JSON local — crash recovery
-│       ├── state-manager.test.ts # 14 tests
-│       ├── validator.ts          # Valida shape del archivo antes de cargar (sampling determinístico)
-│       ├── validator.test.ts     # 10 tests
-│       ├── orchestrator.ts       # Loop concurrente: extract → validate → load → mark
-│       └── orchestrator.test.ts  # 6 tests
+│   ├── pipeline/
+│   │   ├── state-manager.ts      # Progreso por estado en JSON local — crash recovery
+│   │   ├── state-manager.test.ts # 14 tests
+│   │   ├── validator.ts          # Valida shape del archivo antes de cargar (sampling determinístico)
+│   │   ├── validator.test.ts     # 10 tests
+│   │   ├── orchestrator.ts       # Loop concurrente: extract → validate → load → mark
+│   │   └── orchestrator.test.ts  # 6 tests
+│   └── api/                      # Fase 5 — HTTP API queryable
+│       ├── server.ts             # createServer(config) — Hono factory
+│       ├── types.ts              # Shapes + validation regex (compartidas con runners)
+│       ├── middleware/
+│       │   ├── auth.ts           # X-Api-Key check (timingSafeEqual)
+│       │   ├── error.ts          # HttpError + onError handler
+│       │   └── log.ts            # Per-request stderr log line
+│       └── handlers/
+│           ├── search.ts         # GET /search (PostgREST + ST_DWithin radius via execFileSync)
+│           ├── establishment.ts  # GET /establishment/:clee
+│           ├── summary-sector.ts # GET /summary/sector/:scian
+│           ├── summary-entidad.ts# GET /summary/entidad/:clave
+│           └── clusters.ts       # GET /clusters (wraps cluster-by-sector runner)
 ├── scripts/
 │   ├── extract.ts                # CLI single-state: --estado, --sector, --condicion
 │   ├── load.ts                   # CLI single-file: --file=<path> --batch=<n>
 │   ├── pipeline.ts               # CLI pipeline nacional: --all, --estados=, --retry-failed, --status
-│   ├── analyze.ts                # CLI análisis: sector-summary, top-municipios, export geojson
-│   └── coverage.ts               # CLI cobertura: lee mv_coverage y muestra tabla por entidad
+│   ├── analyze.ts                # CLI análisis: sector-summary, top-municipios, clusters, refresh-views
+│   ├── coverage.ts               # CLI cobertura: lee mv_coverage y muestra tabla por entidad
+│   └── serve.ts                  # CLI HTTP API: --env-file=.env, listens on API_PORT (default 3030)
 ├── tests/
 │   ├── fixtures/
 │   │   └── denue-real-09-sample.json  # 5 registros reales CDMX (ground truth, 2026-05-03)
@@ -193,11 +207,49 @@ npx tsx scripts/load.ts --file=data/raw/09_2026-05-03.json
 npx tsx scripts/load.ts --file=data/raw/09_2026-05-03.json --batch=200
 ```
 
+### API HTTP (Fase 5)
+
+```bash
+# Iniciar servidor (puerto 3030 por default)
+npx tsx --env-file=.env scripts/serve.ts
+
+# Variables de entorno:
+#   API_KEY        — clave que clientes envían en X-Api-Key (REQUERIDO)
+#   API_PORT       — puerto de escucha (default 3030)
+#   SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_DB_CONTAINER
+```
+
+Endpoints (todos requieren `X-Api-Key` excepto `/health`):
+
+```bash
+# Liveness (sin auth)
+curl http://localhost:3030/health
+
+# Lookup por CLEE
+curl -H "X-Api-Key: <clave>" http://localhost:3030/establishment/06001114119000013102000000U6
+
+# Búsqueda paginada (q + entidad + radio geográfico)
+curl -H "X-Api-Key: <clave>" \
+  "http://localhost:3030/search?q=hospital&entidad=09&page=1&limit=50"
+curl -H "X-Api-Key: <clave>" \
+  "http://localhost:3030/search?from=19.4326,-99.1332&radius_km=5&entidad=09"
+
+# Resumen sectorial nacional (top 10 entidades)
+curl -H "X-Api-Key: <clave>" http://localhost:3030/summary/sector/46
+
+# Resumen por entidad (cobertura + top sectores + estrato)
+curl -H "X-Api-Key: <clave>" http://localhost:3030/summary/entidad/06
+
+# Clusters K-Means por entidad + sector SCIAN
+curl -H "X-Api-Key: <clave>" \
+  "http://localhost:3030/clusters?entidad=09&scian=46&k=10"
+```
+
 ### Tests
 
 ```bash
 npm run typecheck   # tsc --noEmit — debe dar 0 errores
-npm test            # vitest run — 82 tests
+npm test            # vitest run — 171 tests
 ```
 
 ---

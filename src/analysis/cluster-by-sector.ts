@@ -86,9 +86,12 @@ export async function clusterBySector(
     .replace(/\n\s+/g, " ")
     .trim();
 
-  // Use -t -A so psql returns just the JSON value (no headers, no padding)
+  // Use -t -A so psql returns just the JSON value (no headers, no padding).
+  // timeout: 60_000 ms — clustering on a large bank+sector can take a while
+  // but must be bounded so the API handler that wraps this can't be hung
+  // indefinitely (audit C2 from Phase 5: never shell-out without a timeout).
   const cmd = `docker exec ${container} psql -U postgres -d postgres -t -A -c "${sql}"`;
-  const output = execSync(cmd, { encoding: "utf-8" }).trim();
+  const output = execSync(cmd, { encoding: "utf-8", timeout: 60_000 }).trim();
 
   if (!output || output === "" || output === "null") {
     return [];
