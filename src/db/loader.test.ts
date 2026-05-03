@@ -22,8 +22,11 @@ import {
 // ---------------------------------------------------------------------------
 // Fixture base
 // ---------------------------------------------------------------------------
+// BASE_RECORD uses only the 22 fields guaranteed by the real API
+// (verified 2026-05-03, tests/fixtures/denue-real-09-sample.json).
+// Optional fields are included where needed by specific tests.
 const BASE_RECORD: DenueRawRecord = {
-  CLEE: "0900012345678",
+  CLEE: "09012345678901234567890000U0",  // starts with "09" → entidad = "09"
   Id: "12345678",
   Nombre: "HOSPITAL GENERAL SUR",
   Razon_social: "SERVICIOS DE SALUD CDMX",
@@ -35,7 +38,7 @@ const BASE_RECORD: DenueRawRecord = {
   Num_Interior: "",
   Colonia: "Insurgentes Cuicuilco",
   CP: "04530",
-  Ubicacion: "TLALPAN, CIUDAD DE MEXICO",
+  Ubicacion: "TLALPAN, Tlalpan, CIUDAD DE MÉXICO",
   Telefono: "5512345678",
   Correo_e: "info@hospital.gob.mx",
   Sitio_internet: "www.hospital.gob.mx",
@@ -45,6 +48,7 @@ const BASE_RECORD: DenueRawRecord = {
   tipo_corredor_industrial: "",
   nom_corredor_industrial: "",
   numero_local: "",
+  // Optional fields — present only in some endpoints, not in buscarEntidad
   AGEB: "0123",
   Manzana: "001",
   CLASE_ACTIVIDAD_ID: "622111",
@@ -65,7 +69,7 @@ const BASE_RECORD: DenueRawRecord = {
 describe("transform()", () => {
   it("mapea campos directos correctamente", () => {
     const row = transform(BASE_RECORD);
-    expect(row.clee).toBe("0900012345678");
+    expect(row.clee).toBe(BASE_RECORD.CLEE);
     expect(row.denue_id).toBe("12345678");
     expect(row.nombre).toBe("HOSPITAL GENERAL SUR");
     expect(row.razon_social).toBe("SERVICIOS DE SALUD CDMX");
@@ -89,7 +93,7 @@ describe("transform()", () => {
     expect(row.fecha_alta).toBe("2020-01-01");
   });
 
-  it("extrae entidad de AreaGeo (2 primeros dígitos)", () => {
+  it("extrae entidad de los 2 primeros dígitos del CLEE (AreaGeo no disponible en buscarEntidad)", () => {
     const row = transform(BASE_RECORD);
     expect(row.entidad).toBe("09");
   });
@@ -161,7 +165,7 @@ describe("readExtractorOutput()", () => {
     writeFileSync(tmpFile, JSON.stringify([BASE_RECORD]));
     const result = readExtractorOutput(tmpFile);
     expect(result).toHaveLength(1);
-    expect(result[0]!.CLEE).toBe("0900012345678");
+    expect(result[0]!.CLEE).toBe(BASE_RECORD.CLEE);
   });
 
   it("lanza error si el archivo no contiene un array", () => {
@@ -227,7 +231,7 @@ describe("loadRecords()", () => {
     const result = await loadRecords([BASE_RECORD], config);
     expect(result.inserted).toBe(0);
     expect(result.errors).toHaveLength(1);
-    expect(result.errors[0]!.clee).toBe("0900012345678");
+    expect(result.errors[0]!.clee).toBe(BASE_RECORD.CLEE);
   });
 
   it("procesa en batches — llama fetch una vez por batch", async () => {

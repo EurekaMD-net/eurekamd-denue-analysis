@@ -1,49 +1,61 @@
 /**
  * Tipos para la API DENUE de INEGI
  * Documentación: https://www.inegi.org.mx/servicios/api_denue.html
+ *
+ * Source of truth: real API response captured 2026-05-03 in
+ * tests/fixtures/denue-real-09-sample.json (22 fields guaranteed present).
+ *
+ * NOTE: DenueEstablishment was deleted — it used fabricated field names
+ * (Nom_vialidad, Nom_colonia, Nom_municipio, Codigo_actividad, etc.) that
+ * do NOT exist in real API responses. Use DenueRawRecord everywhere.
  */
 
-export interface DenueEstablishment {
-  /** ID único del establecimiento en DENUE */
+/**
+ * Verbatim shape returned by buscarEntidad / BuscarAreaAct endpoints.
+ * Fields present in every real response are required. Fields that appeared
+ * in older documentation but are absent from the real API are optional.
+ */
+export interface DenueRawRecord {
+  /** Clave Única de Establecimiento Económico (always present) */
+  CLEE: string;
   Id: string;
-  /** Nombre comercial del establecimiento */
   Nombre: string;
-  /** Razón social registrada */
   Razon_social: string;
-  /** Clase de actividad económica (SCIAN descriptivo) */
+  /** Descripción textual de la clase SCIAN */
   Clase_actividad: string;
-  /** Código SCIAN de 6 dígitos */
-  Codigo_actividad: string;
-  /** Estrato por número de empleados */
   Estrato: string;
-  /** Tipo de vialidad (CALLE, AVENIDA, etc.) */
   Tipo_vialidad: string;
-  /** Nombre de la vialidad */
-  Nom_vialidad: string;
-  /** Número exterior */
-  Num_exterior: string;
-  /** Número interior */
-  Num_interior: string;
-  /** Nombre de la colonia */
-  Nom_colonia: string;
-  /** Nombre del municipio */
-  Nom_municipio: string;
-  /** Nombre del estado */
-  Nom_estado: string;
-  /** Código postal */
-  Codigo_postal: string;
-  /** Ubicación geográfica completa */
+  Calle: string;
+  Num_Exterior: string;
+  Num_Interior: string;
+  Colonia: string;
+  CP: string;
+  /** Format: "MUNICIPIO, Municipio, ESTADO" */
   Ubicacion: string;
-  /** Teléfono (cuando disponible) */
   Telefono: string;
-  /** Correo electrónico (cuando disponible) */
   Correo_e: string;
-  /** Sitio web (cuando disponible) */
-  Www: string;
-  /** Longitud geográfica */
+  Sitio_internet: string;
+  /** Tipo de unidad económica: "Fijo" | "Semifijo" | "En via publica" */
+  Tipo: string;
   Longitud: string;
-  /** Latitud geográfica */
   Latitud: string;
+  tipo_corredor_industrial: string;
+  nom_corredor_industrial: string;
+  numero_local: string;
+  // Fields NOT present in buscarEntidad responses (may appear in other endpoints)
+  AGEB?: string;
+  Manzana?: string;
+  CLASE_ACTIVIDAD_ID?: string;
+  EDIFICIO_PISO?: string;
+  SECTOR_ACTIVIDAD_ID?: string;
+  SUBSECTOR_ACTIVIDAD_ID?: string;
+  RAMA_ACTIVIDAD_ID?: string;
+  SUBRAMA_ACTIVIDAD_ID?: string;
+  EDIFICIO?: string;
+  Tipo_Asentamiento?: string;
+  Fecha_Alta?: string;
+  /** Geographic area code — first 2 chars = entidad clave. NOT present in buscarEntidad. */
+  AreaGeo?: string;
 }
 
 export interface DenueCountResponse {

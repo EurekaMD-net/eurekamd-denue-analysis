@@ -5,7 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { DenueEstablishment, ExtractorConfig, EstadoClave } from "./types.js";
+import type { DenueRawRecord, ExtractorConfig, EstadoClave } from "./types.js";
 import { ESTADOS } from "./types.js";
 import { DenueClient, DenueApiError } from "./denue-client.js";
 

@@ -4,7 +4,7 @@
  * Documentación: https://www.inegi.org.mx/servicios/api_denue.html
  */
 
-import type { DenueEstablishment, DenueCountResponse } from "./types.js";
+import type { DenueRawRecord, DenueCountResponse } from "./types.js";
 
 const BASE_URL = "https://www.inegi.org.mx/app/api/denue/v1/consulta";
 
@@ -45,7 +45,7 @@ export class DenueClient {
     registroFinal: number,
     condicion: string = "",
     sector: string = "todos"
-  ): Promise<DenueEstablishment[]> {
+  ): Promise<DenueRawRecord[]> {
     const url = `${BASE_URL}/BuscarEntidad/${condicion}/${sector}/${entidad}/${registroInicial}/${registroFinal}/${this.token}/`;
 
     const response = await this.fetchWithRetry(url, 3);
@@ -59,7 +59,7 @@ export class DenueClient {
     try {
       const parsed = JSON.parse(text);
       if (!Array.isArray(parsed)) return [];
-      return parsed as DenueEstablishment[];
+      return parsed as DenueRawRecord[];
     } catch {
       throw new DenueApiError(
         `Respuesta inesperada de la API: ${text.slice(0, 200)}`,
@@ -99,7 +99,7 @@ export class DenueClient {
   /**
    * Obtiene la ficha completa de un establecimiento por su ID.
    */
-  async ficha(id: string): Promise<DenueEstablishment | null> {
+  async ficha(id: string): Promise<DenueRawRecord | null> {
     const url = `${BASE_URL}/Ficha/${id}/${this.token}/`;
 
     const response = await this.fetchWithRetry(url, 3);
@@ -110,7 +110,7 @@ export class DenueClient {
     try {
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed[0] as DenueEstablishment;
+        return parsed[0] as DenueRawRecord;
       }
       return null;
     } catch {

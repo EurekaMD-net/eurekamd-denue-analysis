@@ -7,27 +7,30 @@ import type { ExtractorConfig } from "./types.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
+// Shape matches real API response (verified 2026-05-03, tests/fixtures/denue-real-09-sample.json)
 const MOCK_ESTABLISHMENT = {
+  CLEE: "09016541110003013001000000U0",
   Id: "1",
   Nombre: "TEST EMPRESA",
   Razon_social: "TEST SA DE CV",
   Clase_actividad: "Farmacias sin minisúper",
-  Codigo_actividad: "464111",
   Estrato: "1 a 5 personas",
   Tipo_vialidad: "CALLE",
-  Nom_vialidad: "REFORMA",
-  Num_exterior: "1",
-  Num_interior: "",
-  Nom_colonia: "JUÁREZ",
-  Nom_municipio: "CUAUHTÉMOC",
-  Nom_estado: "CIUDAD DE MÉXICO",
-  Codigo_postal: "06600",
-  Ubicacion: "...",
+  Calle: "REFORMA",
+  Num_Exterior: "1",
+  Num_Interior: "",
+  Colonia: "JUÁREZ",
+  CP: "06600",
+  Ubicacion: "CUAUHTÉMOC, Cuauhtémoc, CIUDAD DE MÉXICO",
   Telefono: "",
   Correo_e: "",
-  Www: "",
+  Sitio_internet: "",
+  Tipo: "Fijo",
   Longitud: "-99.16",
   Latitud: "19.42",
+  tipo_corredor_industrial: "",
+  nom_corredor_industrial: "",
+  numero_local: "SN",
 };
 
 function makeConfig(outputDir: string): ExtractorConfig {

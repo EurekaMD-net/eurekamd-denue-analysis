@@ -7,48 +7,9 @@
  */
 
 import { readFileSync } from "fs";
+import type { DenueRawRecord } from "../extractor/types.js";
 
-// ---------------------------------------------------------------------------
-// Tipos
-// ---------------------------------------------------------------------------
-
-/** Shape del JSON crudo que devuelve el extractor DENUE */
-export interface DenueRawRecord {
-  CLEE: string;
-  Id: string;
-  Nombre: string;
-  Razon_social: string;
-  Clase_actividad: string;
-  Estrato: string;
-  Tipo_vialidad: string;
-  Calle: string;
-  Num_Exterior: string;
-  Num_Interior: string;
-  Colonia: string;
-  CP: string;
-  Ubicacion: string;
-  Telefono: string;
-  Correo_e: string;
-  Sitio_internet: string;
-  Tipo: string;
-  Longitud: string;
-  Latitud: string;
-  tipo_corredor_industrial: string;
-  nom_corredor_industrial: string;
-  numero_local: string;
-  AGEB: string;
-  Manzana: string;
-  CLASE_ACTIVIDAD_ID: string;
-  EDIFICIO_PISO: string;
-  SECTOR_ACTIVIDAD_ID: string;
-  SUBSECTOR_ACTIVIDAD_ID: string;
-  RAMA_ACTIVIDAD_ID: string;
-  SUBRAMA_ACTIVIDAD_ID: string;
-  EDIFICIO: string;
-  Tipo_Asentamiento: string;
-  Fecha_Alta: string;
-  AreaGeo: string;
-}
+export type { DenueRawRecord };
 
 /** Registro normalizado listo para insertar en la tabla */
 export interface EstablecimientoRow {
@@ -119,10 +80,14 @@ function parseDate(val: string | undefined | null): string | null {
   return null;
 }
 
-/** Extrae la clave de entidad (2 dígitos) del campo AreaGeo */
-function extractEntidad(areaGeo: string | undefined | null): string | null {
-  if (!areaGeo || areaGeo.length < 2) return null;
-  return areaGeo.slice(0, 2);
+/**
+ * Extrae la clave de entidad (2 dígitos) del CLEE.
+ * CLEE format: 2-digit entidad + 3-digit municipio + ... (always present in real API).
+ * AreaGeo is NOT returned by buscarEntidad — do not use it for entidad extraction.
+ */
+function extractEntidad(clee: string | undefined | null): string | null {
+  if (!clee || clee.length < 2) return null;
+  return clee.slice(0, 2);
 }
 
 /** Transforma un registro crudo DENUE en una fila normalizada */
@@ -148,7 +113,7 @@ export function transform(raw: DenueRawRecord): EstablecimientoRow {
     tipo_asentamiento: clean(raw.Tipo_Asentamiento),
     cp: clean(raw.CP),
     municipio: extractMunicipio(clean(raw.Ubicacion)),
-    entidad: extractEntidad(raw.AreaGeo),
+    entidad: extractEntidad(raw.CLEE),
     ubicacion: clean(raw.Ubicacion),
     edificio: clean(raw.EDIFICIO),
     edificio_piso: clean(raw.EDIFICIO_PISO),
@@ -206,7 +171,17 @@ export async function loadRecords(
   const { supabaseUrl, serviceRoleKey, batchSize = 100 } = config;
   const startMs = Date.now();
 
-  const rows = records.map(transform);
+  // Filter out records with empty CLEE — a missing primary key would fail the upsert
+  // and poison the entire batch. Log and skip so one bad row doesn't abort a 100-row chunk.
+  const validRecords = records.filter((r) => {
+    if (!r.CLEE || r.CLEE.trim() === "") {
+      console.warn(`[Loader] Skipping record with empty CLEE: Id=${r.Id ?? "(unknown)"}`);
+      return false;
+    }
+    return true;
+  });
+
+  const rows = validRecords.map(transform);
   const result: LoadResult = { inserted: 0, errors: [], durationMs: 0 };
 
   // Chunk en lotes

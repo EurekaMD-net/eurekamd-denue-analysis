@@ -5,27 +5,30 @@ import { DenueClient, DenueApiError } from "./denue-client.js";
 
 const MOCK_TOKEN = "test-token-1234";
 
+// Shape matches real API response (verified 2026-05-03, tests/fixtures/denue-real-09-sample.json)
 const MOCK_ESTABLISHMENT = {
+  CLEE: "09016541110003013001000000U0",
   Id: "6319819",
   Nombre: "FARMACIA GUADALAJARA",
   Razon_social: "FARMACIAS GUADALAJARA SA DE CV",
   Clase_actividad: "Farmacias sin minisúper",
-  Codigo_actividad: "464111",
   Estrato: "11 a 30 personas",
   Tipo_vialidad: "CALLE",
-  Nom_vialidad: "INSURGENTES SUR",
-  Num_exterior: "100",
-  Num_interior: "",
-  Nom_colonia: "HIPÓDROMO",
-  Nom_municipio: "CUAUHTÉMOC",
-  Nom_estado: "CIUDAD DE MÉXICO",
-  Codigo_postal: "06100",
-  Ubicacion: "CALLE INSURGENTES SUR 100, HIPÓDROMO, CDMX",
+  Calle: "INSURGENTES SUR",
+  Num_Exterior: "100",
+  Num_Interior: "",
+  Colonia: "HIPÓDROMO",
+  CP: "06100",
+  Ubicacion: "CUAUHTÉMOC, Cuauhtémoc, CIUDAD DE MÉXICO",
   Telefono: "5555550100",
   Correo_e: "contacto@farmaciasguadalajara.com",
-  Www: "www.farmaciasguadalajara.com",
+  Sitio_internet: "www.farmaciasguadalajara.com",
+  Tipo: "Fijo",
   Longitud: "-99.1701",
   Latitud: "19.4069",
+  tipo_corredor_industrial: "",
+  nom_corredor_industrial: "",
+  numero_local: "SN",
 };
 
 const MOCK_COUNT = [{ Total: "42" }];
