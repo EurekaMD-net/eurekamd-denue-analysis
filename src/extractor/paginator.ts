@@ -1,6 +1,6 @@
 /**
  * Paginator — extrae todos los registros de un estado de forma paginada.
- * Maneja rate limiting, progreso y escritura incremental a disco.
+ * Escribe a disco de forma incremental (streaming) para evitar acumulación en RAM.
  */
 
 import fs from "node:fs";
@@ -45,11 +45,11 @@ export class Paginator {
 
   /**
    * Extrae todos los establecimientos de un estado.
-   * Escribe el resultado a {outputDir}/{clave}_{nombre}.json
+   * Escribe el resultado a {outputDir}/{clave}_{nombre}.json de forma incremental.
    *
-   * @param clave - Clave de 2 dígitos del estado (ej: "09")
-   * @param condicion - Keyword de búsqueda (vacío = todos)
-   * @param sector - Código SCIAN o "todos"
+   * @param clave      - Clave de 2 dígitos del estado (ej: "09")
+   * @param condicion  - Keyword de búsqueda (vacío = todos)
+   * @param sector     - Código SCIAN o "todos"
    */
   async extractEstado(
     clave: EstadoClave,
@@ -77,9 +77,17 @@ export class Paginator {
     }
 
     const totalPaginas = Math.ceil(totalEsperado / this.config.pageSize);
-    const allRecords: DenueEstablishment[] = [];
+    let totalExtraido = 0;
 
-    // 2. Paginar
+    // 2. Preparar archivo de salida para escritura incremental (evita acumular en RAM)
+    fs.mkdirSync(this.config.outputDir, { recursive: true });
+    const filename = `${clave}_${nombre.replace(/\s+/g, "_").toLowerCase()}.json`;
+    const outputFile = path.join(this.config.outputDir, filename);
+    const stream = fs.createWriteStream(outputFile, { encoding: "utf-8" });
+    stream.write("[\n");
+    let firstRecord = true;
+
+    // 3. Paginar — escribir cada página a disco conforme llega
     for (let pagina = 1; pagina <= totalPaginas; pagina++) {
       const registroInicial = (pagina - 1) * this.config.pageSize + 1;
       const registroFinal = Math.min(pagina * this.config.pageSize, totalEsperado);
@@ -89,7 +97,7 @@ export class Paginator {
         nombre,
         pagina,
         totalPaginas,
-        registrosExtraidos: allRecords.length,
+        registrosExtraidos: totalExtraido,
         totalEsperado,
       });
 
@@ -101,7 +109,12 @@ export class Paginator {
           condicion,
           sector
         );
-        allRecords.push(...records);
+        for (const record of records) {
+          if (!firstRecord) stream.write(",\n");
+          stream.write(JSON.stringify(record));
+          firstRecord = false;
+        }
+        totalExtraido += records.length;
       } catch (err) {
         errores++;
         const msg = err instanceof DenueApiError ? err.message : String(err);
@@ -109,8 +122,9 @@ export class Paginator {
           `[Paginator] Error en ${nombre} página ${pagina}/${totalPaginas}: ${msg}`
         );
 
-        // Si el error es estructural (token inválido), abortamos
+        // Si el error es estructural (token inválido), cerramos el stream y abortamos
         if (err instanceof DenueApiError && err.statusCode === 401) {
+          stream.end("\n]");
           throw err;
         }
         // Para otros errores, continuamos (gap aceptable)
@@ -122,34 +136,22 @@ export class Paginator {
       }
     }
 
-    // 3. Escribir a disco
-    const outputFile = this.writeOutput(clave, nombre, allRecords);
+    // 4. Cerrar el array JSON y el stream de forma segura
+    await new Promise<void>((resolve, reject) => {
+      stream.once("error", reject);
+      stream.end("\n]", resolve);
+    });
 
     return {
       estado: nombre,
       clave,
       totalEsperado,
-      totalExtraido: allRecords.length,
+      totalExtraido,
       paginas: totalPaginas,
       errores,
       duracionMs: Date.now() - startTime,
       outputFile,
     };
-  }
-
-  private writeOutput(
-    clave: string,
-    nombre: string,
-    records: DenueEstablishment[]
-  ): string {
-    fs.mkdirSync(this.config.outputDir, { recursive: true });
-
-    const filename = `${clave}_${nombre.replace(/\s+/g, "_").toLowerCase()}.json`;
-    const filepath = path.join(this.config.outputDir, filename);
-
-    fs.writeFileSync(filepath, JSON.stringify(records, null, 2), "utf-8");
-
-    return filepath;
   }
 }
 

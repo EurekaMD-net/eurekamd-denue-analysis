@@ -124,7 +124,7 @@ describe("Paginator", () => {
 
   it("retorna outputFile vacío y cero registros si cuantificar devuelve 0", async () => {
     // Importamos el mock para cambiar el retorno de cuantificar en este test
-    const mod = await import("./denue-client.js") as {
+    const mod = await import("./denue-client.js") as unknown as {
       __mockCuantificar: ReturnType<typeof vi.fn>;
     };
     mod.__mockCuantificar.mockResolvedValueOnce(0);
