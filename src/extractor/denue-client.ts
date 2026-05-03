@@ -4,7 +4,7 @@
  * Documentación: https://www.inegi.org.mx/servicios/api_denue.html
  */
 
-import type { DenueRawRecord, DenueCountResponse } from "./types.js";
+import type { DenueRawRecord } from "./types.js";
 
 const BASE_URL = "https://www.inegi.org.mx/app/api/denue/v1/consulta";
 
@@ -84,20 +84,23 @@ export class DenueClient {
    * Busca establecimientos por entidad federativa y actividad económica.
    * Soporta paginación via registroInicial / registroFinal.
    *
+   * Real endpoint (verified 2026-05-03):
+   *   GET /BuscarEntidad/{condicion}/{entidad}/{from}/{to}/{token}/
+   * NOTE: No {sector} segment — the published docs were wrong. "todos" as condicion
+   * returns all establishments; a keyword (e.g. "farmacia") filters by activity name.
+   *
    * @param entidad - Clave de 2 dígitos del estado (01-32)
    * @param registroInicial - Primer registro a retornar (base 1)
    * @param registroFinal - Último registro a retornar
-   * @param condicion - Keyword de búsqueda (vacío = todos)
-   * @param sector - Código SCIAN o "todos"
+   * @param condicion - Keyword de búsqueda o "todos" para sin filtro (default: "todos")
    */
   async buscarEntidad(
     entidad: string,
     registroInicial: number,
     registroFinal: number,
-    condicion: string = "",
-    sector: string = "todos"
+    condicion: string = "todos"
   ): Promise<DenueRawRecord[]> {
-    const url = `${BASE_URL}/BuscarEntidad/${condicion}/${sector}/${entidad}/${registroInicial}/${registroFinal}/${this.token}/`;
+    const url = `${BASE_URL}/BuscarEntidad/${condicion}/${entidad}/${registroInicial}/${registroFinal}/${this.token}/`;
 
     const response = await this.fetchWithRetry(url, 3);
     const text = await response.text();
@@ -121,30 +124,19 @@ export class DenueClient {
   }
 
   /**
-   * Cuenta el número total de establecimientos para una entidad + condición.
-   * Usa este método primero para calcular cuántas páginas necesitas.
+   * @deprecated The /Cuantificar endpoint returns HTTP 501 (Not Implemented) for all
+   * parameter combinations as of 2026-05-03. Do NOT use this method.
+   * The Paginator now uses open-ended pagination (fetch until empty) instead.
+   * Kept as a stub so external callers get a clear error rather than a silent 501.
    */
   async cuantificarEntidad(
-    entidad: string,
-    condicion: string = "",
-    sector: string = "todos"
+    _entidad: string,
+    _condicion: string = "todos"
   ): Promise<number> {
-    const url = `${BASE_URL}/Cuantificar/${condicion}/${sector}/${entidad}/${this.token}/`;
-
-    const response = await this.fetchWithRetry(url, 3);
-    const text = await response.text();
-
-    try {
-      const parsed = JSON.parse(text) as DenueCountResponse[];
-      if (!Array.isArray(parsed) || parsed.length === 0) return 0;
-      return parseInt(parsed[0].Total, 10) || 0;
-    } catch {
-      throw new DenueApiError(
-        `Error al parsear conteo: ${text.slice(0, 200)}`,
-        undefined,
-        url
-      );
-    }
+    throw new DenueApiError(
+      "cuantificarEntidad: el endpoint /Cuantificar devuelve HTTP 501. " +
+      "Usa paginación abierta (buscarEntidad hasta recibir []) en su lugar."
+    );
   }
 
   /**

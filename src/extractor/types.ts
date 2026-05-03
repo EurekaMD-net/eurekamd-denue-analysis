@@ -58,11 +58,6 @@ export interface DenueRawRecord {
   AreaGeo?: string;
 }
 
-export interface DenueCountResponse {
-  /** Total de establecimientos para la consulta */
-  Total: string;
-}
-
 export interface ExtractorConfig {
   /** Token de acceso a la API DENUE */
   token: string;

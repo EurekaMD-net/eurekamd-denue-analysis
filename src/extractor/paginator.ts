@@ -12,6 +12,7 @@ import { DenueClient, DenueApiError } from "./denue-client.js";
 export interface PaginatorResult {
   estado: string;
   clave: EstadoClave;
+  /** Always 0 — Cuantificar endpoint returns HTTP 501. Count comes from totalExtraido. */
   totalEsperado: number;
   totalExtraido: number;
   paginas: number;
@@ -48,39 +49,23 @@ export class Paginator {
    * Extrae todos los establecimientos de un estado.
    * Escribe el resultado a {outputDir}/{clave}_{nombre}.json de forma incremental.
    *
+   * Uses open-ended pagination: fetches pages until the API returns an empty array.
+   * The /Cuantificar endpoint returns HTTP 501 — do NOT call it.
+   *
    * @param clave      - Clave de 2 dígitos del estado (ej: "09")
-   * @param condicion  - Keyword de búsqueda (vacío = todos)
-   * @param sector     - Código SCIAN o "todos"
+   * @param condicion  - Keyword de búsqueda o "todos" para sin filtro (default: "todos")
    */
   async extractEstado(
     clave: EstadoClave,
-    condicion: string = "",
-    sector: string = "todos"
+    condicion: string = "todos"
   ): Promise<PaginatorResult> {
     const nombre = ESTADOS[clave];
     const startTime = Date.now();
     let errores = 0;
-
-    // 1. Contar total de registros
-    const totalEsperado = await this.client.cuantificarEntidad(clave, condicion, sector);
-
-    if (totalEsperado === 0) {
-      return {
-        estado: nombre,
-        clave,
-        totalEsperado: 0,
-        totalExtraido: 0,
-        paginas: 0,
-        errores: 0,
-        duracionMs: Date.now() - startTime,
-        outputFile: "",
-      };
-    }
-
-    const totalPaginas = Math.ceil(totalEsperado / this.config.pageSize);
     let totalExtraido = 0;
+    let pagina = 0;
 
-    // 2. Preparar archivo de salida para escritura incremental (evita acumular en RAM)
+    // Prepare output file for incremental streaming writes (avoids RAM accumulation)
     fs.mkdirSync(this.config.outputDir, { recursive: true });
     const filename = `${clave}_${nombre.replace(/\s+/g, "_").toLowerCase()}.json`;
     const outputFile = path.join(this.config.outputDir, filename);
@@ -88,18 +73,20 @@ export class Paginator {
     stream.write("[\n");
     let firstRecord = true;
 
-    // 3. Paginar — escribir cada página a disco conforme llega
-    for (let pagina = 1; pagina <= totalPaginas; pagina++) {
+    // Open-ended pagination: keep fetching until the API returns [] or null.
+    // totalPaginas is unknown upfront (Cuantificar returns 501), so we use -1 as sentinel.
+    while (true) {
+      pagina++;
       const registroInicial = (pagina - 1) * this.config.pageSize + 1;
-      const registroFinal = Math.min(pagina * this.config.pageSize, totalEsperado);
+      const registroFinal = pagina * this.config.pageSize;
 
       this.onProgress?.({
         clave,
         nombre,
         pagina,
-        totalPaginas,
+        totalPaginas: -1,             // unknown until the loop ends
         registrosExtraidos: totalExtraido,
-        totalEsperado,
+        totalEsperado: 0,             // unknown — Cuantificar is broken
       });
 
       try {
@@ -107,37 +94,46 @@ export class Paginator {
           clave,
           registroInicial,
           registroFinal,
-          condicion,
-          sector
+          condicion
         );
+
+        if (records.length === 0) {
+          // Empty page = end of data
+          break;
+        }
+
         for (const record of records) {
           if (!firstRecord) stream.write(",\n");
           stream.write(JSON.stringify(record));
           firstRecord = false;
         }
         totalExtraido += records.length;
+
+        // If the page came back shorter than pageSize, this is the last page
+        if (records.length < this.config.pageSize) {
+          break;
+        }
       } catch (err) {
         errores++;
         const msg = err instanceof DenueApiError ? err.message : String(err);
         console.error(
-          `[Paginator] Error en ${nombre} página ${pagina}/${totalPaginas}: ${msg}`
+          `[Paginator] Error en ${nombre} página ${pagina}: ${msg}`
         );
 
-        // Si el error es estructural (token inválido), cerramos el stream y abortamos
+        // Structural error (invalid token) — abort immediately
         if (err instanceof DenueApiError && err.statusCode === 401) {
           stream.end("\n]");
           throw err;
         }
-        // Para otros errores, continuamos (gap aceptable)
+        // For transient errors, stop the loop (we can't know if there's more data)
+        break;
       }
 
-      // Rate limiting entre requests
-      if (pagina < totalPaginas) {
-        await sleep(this.config.delayMs);
-      }
+      // Rate limiting between requests
+      await sleep(this.config.delayMs);
     }
 
-    // 4. Cerrar el array JSON y el stream de forma segura
+    // Close the JSON array and stream safely
     await new Promise<void>((resolve, reject) => {
       stream.once("error", reject);
       stream.end("\n]", resolve);
@@ -146,9 +142,9 @@ export class Paginator {
     return {
       estado: nombre,
       clave,
-      totalEsperado,
+      totalEsperado: 0,   // Cuantificar is broken — always 0
       totalExtraido,
-      paginas: totalPaginas,
+      paginas: pagina,
       errores,
       duracionMs: Date.now() - startTime,
       outputFile,

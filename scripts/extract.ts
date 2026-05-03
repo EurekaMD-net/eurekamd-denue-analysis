@@ -4,9 +4,11 @@
  * 
  * Uso:
  *   npx tsx scripts/extract.ts --estado=09
- *   npx tsx scripts/extract.ts --estado=09 --sector=462111
  *   npx tsx scripts/extract.ts --estado=all
  *   npx tsx scripts/extract.ts --estado=09 --condicion=farmacia
+ *
+ * NOTA: --sector fue eliminado. El endpoint BuscarEntidad no tiene parámetro sector.
+ * Para filtrar por actividad, usa --condicion con una keyword (ej: farmacia, hospital).
  *
  * Variables de entorno requeridas:
  *   DENUE_TOKEN=<tu-token>
@@ -41,8 +43,7 @@ function getArg(name: string): string | undefined {
 }
 
 const estadoArg = getArg("estado") ?? "09";
-const sectorArg = getArg("sector") ?? "todos";
-const condicionArg = getArg("condicion") ?? "";
+const condicionArg = getArg("condicion") ?? "todos";
 
 // ─── Ejecución ────────────────────────────────────────────────────────────────
 
@@ -50,10 +51,9 @@ async function main() {
   const paginator = new Paginator(config);
 
   // Callback de progreso
-  paginator.setProgressCallback(({ nombre, pagina, totalPaginas, registrosExtraidos, totalEsperado }) => {
-    const pct = Math.round((registrosExtraidos / totalEsperado) * 100);
+  paginator.setProgressCallback(({ nombre, pagina, registrosExtraidos }) => {
     process.stdout.write(
-      `\r[${nombre}] Página ${pagina}/${totalPaginas} | ${registrosExtraidos.toLocaleString()}/${totalEsperado.toLocaleString()} registros (${pct}%)  `
+      `\r[${nombre}] Página ${pagina} | ${registrosExtraidos.toLocaleString()} registros extraídos  `
     );
   });
 
@@ -71,19 +71,13 @@ async function main() {
     }
 
     console.log(`\n\n→ Extrayendo: ${ESTADOS[clave]} (${clave})...`);
-    const result = await paginator.extractEstado(clave, condicionArg, sectorArg);
+    const result = await paginator.extractEstado(clave, condicionArg);
 
     console.log(`\n  ✓ ${result.totalExtraido.toLocaleString()} registros extraídos`);
-    console.log(`    Esperados:  ${result.totalEsperado.toLocaleString()}`);
     console.log(`    Páginas:    ${result.paginas}`);
     console.log(`    Errores:    ${result.errores}`);
     console.log(`    Duración:   ${(result.duracionMs / 1000).toFixed(1)}s`);
     console.log(`    Archivo:    ${result.outputFile}`);
-
-    const gap = result.totalEsperado - result.totalExtraido;
-    if (gap > 0) {
-      console.warn(`    ⚠ GAP: ${gap} registros faltantes (errores de red o paginación)`);
-    }
 
     resultados.push(result);
   }
@@ -91,12 +85,9 @@ async function main() {
   // Resumen final
   if (resultados.length > 1) {
     const totalExtraido = resultados.reduce((s, r) => s + r.totalExtraido, 0);
-    const totalEsperado = resultados.reduce((s, r) => s + r.totalEsperado, 0);
     console.log("\n\n=== RESUMEN FINAL ===");
     console.log(`Estados procesados: ${resultados.length}`);
     console.log(`Total extraído:     ${totalExtraido.toLocaleString()}`);
-    console.log(`Total esperado:     ${totalEsperado.toLocaleString()}`);
-    console.log(`Cobertura:          ${((totalExtraido / totalEsperado) * 100).toFixed(1)}%`);
   }
 }
 

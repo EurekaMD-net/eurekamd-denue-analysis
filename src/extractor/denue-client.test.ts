@@ -31,8 +31,6 @@ const MOCK_ESTABLISHMENT = {
   numero_local: "SN",
 };
 
-const MOCK_COUNT = [{ Total: "42" }];
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function mockFetch(body: unknown, status = 200): void {
@@ -126,35 +124,25 @@ describe("DenueClient", () => {
       expect(calledUrl).toContain("/09/1/10/");
     });
 
-    it("passes condicion and sector when provided", async () => {
+    it("passes condicion when provided", async () => {
       mockFetch([MOCK_ESTABLISHMENT]);
       const client = new DenueClient(MOCK_TOKEN);
 
-      await client.buscarEntidad("09", 1, 10, "farmacia", "464111");
+      await client.buscarEntidad("09", 1, 10, "farmacia");
 
       const calledUrl = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
       expect(calledUrl).toContain("farmacia");
-      expect(calledUrl).toContain("464111");
+      // Sector segment must NOT appear — real endpoint has no sector param
+      expect(calledUrl).not.toMatch(/\/todos\/09\//);   // old broken format
+      expect(calledUrl).toMatch(/\/farmacia\/09\/1\/10\//);  // correct format
     });
   });
 
   describe("cuantificarEntidad", () => {
-    it("returns the total count as number", async () => {
-      mockFetch(MOCK_COUNT);
+    it("throws DenueApiError (endpoint is HTTP 501 as of 2026-05-03)", async () => {
       const client = new DenueClient(MOCK_TOKEN);
-
-      const total = await client.cuantificarEntidad("09");
-
-      expect(total).toBe(42);
-    });
-
-    it("returns 0 when API returns empty array", async () => {
-      mockFetch([]);
-      const client = new DenueClient(MOCK_TOKEN);
-
-      const total = await client.cuantificarEntidad("09");
-
-      expect(total).toBe(0);
+      // No fetch mock needed — stub throws before calling fetch
+      await expect(client.cuantificarEntidad("09")).rejects.toBeInstanceOf(DenueApiError);
     });
   });
 
