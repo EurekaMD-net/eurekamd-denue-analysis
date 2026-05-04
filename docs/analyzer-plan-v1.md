@@ -275,11 +275,12 @@ Deliverables:
     root * /var/www/denue-analyzer
     file_server
     try_files {path} /index.html
-    handle /api/* {
+    handle_path /api/* {
       reverse_proxy localhost:3030
     }
   }
   ```
+  **Note**: `handle_path` (not `handle`) is required so the `/api` prefix is stripped before proxying. This matches the Vite dev proxy behavior in `web/vite.config.ts` which also rewrites `/api/*` → `*`. Backend Hono routes are mounted at root (`/search`, `/health`, etc.), not under `/api`.
 - `npm run build` from `web/` produces `dist/` → rsync to `/var/www/denue-analyzer`
 - DNS A record for `analyzer.denue.net` → VPS IP (operator-side, may need manual)
 - Caddy reload + verify TLS via Let's Encrypt
