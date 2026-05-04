@@ -6,9 +6,12 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ---
 
-## Versión actual: v0.3 P2 — Locust mode (analyzer frontend)
+## Versión actual: v0.3 P3 — Locust + Map mode (analyzer frontend)
 
-Backend v0.1 + v0.2.1 + v0.2.2-CLUES están todos cargados en producción (5 fuentes: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES, todas joinables por `cve_mun` 5-char). **Locust mode** (analyzer frontend en `web/`) ahora consume las 5 fuentes con 5 charts ECharts: mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, y CLUES vs farmacias por 100k. 4 endpoints `/analytics/*` nuevos (national-treemap, sector-grade-matrix, municipios, top-sectors).
+Backend v0.1 + v0.2.1 + v0.2.2-CLUES están todos cargados en producción (5 fuentes: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES, todas joinables por `cve_mun` 5-char). El analyzer (`web/`) ahora tiene **dos modos** sobre el mismo dataset:
+
+- **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints `/analytics/*` (national-treemap, sector-grade-matrix, municipios, top-sectors).
+- **Map mode**: MapLibre + Carto Positron/Dark Matter basemap, vector source sobre `/tiles/:z/:x/:y.mvt` con heatmap (zoom <14) + circles (zoom ≥11) y deck.gl `ScatterplotLayer` overlay para cluster centroids cuando entidad+sector están seleccionados. Click en punto → detalle del establecimiento via `/establishment/:clee`.
 
 CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (portales gated/slugs caducados, ver `docs/v0.2-status.md` § "What blocks v0.2.x from full closure"). Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
 
@@ -52,15 +55,15 @@ CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión     | Fuentes                         | Descripción                                                                                    | Estado                                        | Docs                                                                |
-| ----------- | ------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
-| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN           | ✅ Done                                       | este README                                                         |
-| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente               | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2         | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado       | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*` | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P3** | Map mode (analyzer)             | Frontend geoespacial: MapLibre + deck.gl sobre `/tiles/:z/:x/:y.mvt`                           | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                   | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión     | Fuentes                         | Descripción                                                                                                  | Estado                                        | Docs                                                                |
+| ----------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------- | ------------------------------------------------------------------- |
+| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done                                       | este README                                                         |
+| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado                     | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
+| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P3** | Map mode (analyzer)             | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
@@ -86,6 +89,7 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 - **v0.2.1**: análisis cruzado DENUE × Censo 2020 × CONEVAL Pobreza × IRS — densidad comercial vs pobreza/educación/infraestructura por municipio
 - **v0.2.1**: tiles vectoriales (`ST_AsMVT`) listos para frontend de mapa
 - **v0.2.2**: proximidad espacial DENUE × CLUES — `ST_DWithin` para "farmacias dentro de 2km de una unidad médica pública" + ratios CLUES-por-100k para detectar desiertos de salud
+- **v0.3 P3**: navegación geográfica del dataset — heatmap de densidad zoom-out, puntos individuales clickables zoom-in, filtros entidad+sector cascadean a la URL del MVT, cluster centroids superpuestos cuando ambos filtros están activos
 
 ### Verticales analizados (v0.1)
 
@@ -114,6 +118,7 @@ Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 falla
 | Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                     |
 | Endpoints API funcionales         | 12 (+ `/health`)      | 8 originales + 4 nuevos `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`                     |
 | Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                         |
+| Frontend analyzer (Map)           | MapLibre + deck.gl    | Carto Positron/Dark Matter basemap + MVT vector source (heatmap zoom<14, circles zoom≥11) + cluster centroids overlay + click-to-detail panel        |
 | Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                            |
 | Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                        |
 | Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                           |
@@ -147,12 +152,13 @@ denue-data-analysis/
 │   ├── load-censo.ts       # Cargar Censo 2020 ITER → censo_iter / censo_municipios (v0.2.1)
 │   ├── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
 │   └── load-clues.ts       # Cargar CLUES DGIS → clues_raw / clues mat-view + GIST (v0.2.2)
-├── web/                    # Analyzer frontend — Vite + React + Tailwind + ECharts
+├── web/                    # Analyzer frontend — Vite + React + Tailwind + ECharts + MapLibre + deck.gl
 │   └── src/
 │       ├── api/            # client.ts + types.ts (Zod) + queries.ts (TanStack hooks)
 │       ├── charts/         # 5 Locust charts + theme.ts + ChartCard wrapper
+│       ├── map/            # MapShell (MapLibre+MVT) + ClusterOverlay (deck.gl) + EstablishmentCard + style
 │       ├── components/     # ApiKeyGate, FilterPanel, SearchBar, Layout, ErrorBoundary
-│       └── modes/          # LocustMode (charts), MapMode (P3, pendiente)
+│       └── modes/          # LocustMode (charts), MapMode (MapLibre + deck.gl)
 ├── docs/
 │   ├── analyzer-plan-v1.md         # Plan sellado del frontend (v0.3+v0.4)
 │   ├── v0.2-status.md              # Hoja de estado del roadmap v0.2.x (sobrevive /compact)
