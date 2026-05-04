@@ -149,6 +149,19 @@ describe("transform()", () => {
     expect(row.area_geo).toBe("09012");
   });
 
+  it("ageb is always NULL from transform (filled by spatial-join script, not API)", () => {
+    // BASE_RECORD has AGEB="0123" (4-char API value). The 4-char locality-
+    // local cve_ageb would mix with the 13-char CVEGEO that the spatial join
+    // writes — so transform deliberately drops the API field. Spatial-join
+    // script (scripts/backfill-ageb.ts) is the only writer of `ageb`.
+    const row = transform(BASE_RECORD);
+    expect(row.ageb).toBeNull();
+
+    // Also when AGEB is absent
+    const raw: DenueRawRecord = { ...BASE_RECORD, AGEB: undefined };
+    expect(transform(raw).ageb).toBeNull();
+  });
+
   it("deriva area_geo (CVE_MUN_5) del CLEE cuando AreaGeo está ausente", () => {
     // CLEE chars 1-5 = '06009' for this Colima fixture
     const raw: DenueRawRecord = {

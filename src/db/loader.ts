@@ -171,7 +171,12 @@ export function transform(raw: DenueRawRecord): EstablecimientoRow {
     edificio: clean(raw.EDIFICIO),
     edificio_piso: clean(raw.EDIFICIO_PISO),
     numero_local: clean(raw.numero_local),
-    ageb: clean(raw.AGEB),
+    // ageb is the 13-char CVEGEO (ENT+MUN+LOC+AGEB), populated by the
+    // spatial-join script `scripts/backfill-ageb.ts` after ingest. The
+    // DENUE API only returns the 4-char cve_ageb (locality-local, not
+    // national-unique) — mixing 4-char API values with 13-char spatial
+    // values would break joins to Censo 2020 / CONEVAL. Always start NULL.
+    ageb: null,
     manzana: clean(raw.Manzana),
     corredor_industrial: clean(raw.tipo_corredor_industrial),
     nom_corredor_industrial: clean(raw.nom_corredor_industrial),

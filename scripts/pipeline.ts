@@ -35,7 +35,10 @@ function loadEnv(): Record<string, string> {
       const eq = trimmed.indexOf("=");
       if (eq < 0) continue;
       const key = trimmed.slice(0, eq).trim();
-      const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+      const val = trimmed
+        .slice(eq + 1)
+        .trim()
+        .replace(/^["']|["']$/g, "");
       env[key] = val;
     }
   } catch {
@@ -67,7 +70,12 @@ function parseArgs(): {
   const args = process.argv.slice(2);
 
   if (args.includes("--status")) {
-    return { command: "status", retryFailed: false, concurrency: 1, updateGeom: false };
+    return {
+      command: "status",
+      retryFailed: false,
+      concurrency: 1,
+      updateGeom: false,
+    };
   }
 
   const estadosArg = args.find((a) => a.startsWith("--estados="));
@@ -116,8 +124,15 @@ async function main(): Promise<void> {
     console.log(`🔄 Running: ${summary.running}`);
     console.log("\nDetalle por estado:");
     for (const e of sm.getAll()) {
-      const icon = { done: "✅", failed: "❌", pending: "⏳", running: "🔄" }[e.status];
-      const detail = e.status === "failed" ? ` — ${e.error ?? ""}` : e.records_loaded > 0 ? ` — ${e.records_loaded.toLocaleString()} registros` : "";
+      const icon = { done: "✅", failed: "❌", pending: "⏳", running: "🔄" }[
+        e.status
+      ];
+      const detail =
+        e.status === "failed"
+          ? ` — ${e.error ?? ""}`
+          : e.records_loaded > 0
+            ? ` — ${e.records_loaded.toLocaleString()} registros`
+            : "";
       console.log(`  ${icon} [${e.clave}] ${e.nombre}${detail}`);
     }
     return;
@@ -167,8 +182,18 @@ async function main(): Promise<void> {
   console.log(`   Done:    ${result.totalDone}`);
   console.log(`   Failed:  ${result.totalFailed}`);
   console.log(`   Skipped: ${result.totalSkipped} (ya estaban done)`);
-  console.log(`   Total registros cargados: ${result.totalRecordsLoaded.toLocaleString()}`);
+  console.log(
+    `   Total registros cargados: ${result.totalRecordsLoaded.toLocaleString()}`,
+  );
   console.log(`   Duración: ${(result.durationMs / 1000).toFixed(1)}s`);
+
+  if (result.totalRecordsLoaded > 0) {
+    console.log(
+      "\n💡 Recuerda llenar la columna `ageb` (CVEGEO 13-char) corriendo:",
+    );
+    console.log("   npx tsx --env-file=.env scripts/backfill-ageb.ts");
+    console.log("   (es idempotente: solo toca filas con ageb IS NULL)");
+  }
 
   if (result.totalFailed > 0) {
     process.exit(1);

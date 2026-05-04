@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS establecimientos (
   edificio         TEXT,
   edificio_piso    TEXT,
   numero_local     TEXT,
-  ageb             TEXT,
+  ageb             TEXT,                        -- 13-char CVEGEO (ENT+MUN+LOC+AGEB). Filled by scripts/backfill-ageb.ts via PostGIS spatial join against ageb_polygons (loaded from INEGI Marco Geoestadístico 2020). Joins to Censo 2020 / CONEVAL.
   manzana          TEXT,
   corredor_industrial TEXT,
   nom_corredor_industrial TEXT,
