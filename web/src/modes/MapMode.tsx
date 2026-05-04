@@ -46,9 +46,18 @@ export function MapMode() {
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
 
+  // Custom limpiar: reset to defaults instead of null/null. The Map mode
+  // canvas should never be unfiltered, so "clear" here means "back to
+  // safe defaults" rather than "remove all constraints".
+  const resetToDefaults = () => {
+    const s = useUiStore.getState();
+    s.setEntidad(DEFAULT_MAP_ENTIDAD);
+    s.setSector(DEFAULT_MAP_SECTOR);
+  };
+
   return (
     <div className="flex h-full flex-col bg-slate-950">
-      <FilterPanel showSector />
+      <FilterPanel showSector onClear={resetToDefaults} />
       <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950 px-4 py-1.5">
         <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">
           Basemap
