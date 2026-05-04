@@ -20,7 +20,8 @@
  *   GET /analytics/municipios?entidad=XX       — per-municipio joined view (P2 Locust)
  *
  * All routes except /health require X-Api-Key header matching config.apiKey.
- * /tiles is additionally rate-limited per IP (5 req/sec).
+ * /tiles is additionally rate-limited per IP (60 req/sec, sized for
+ * MapLibre's viewport burst).
  */
 
 import { Hono } from "hono";
@@ -79,8 +80,14 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/tiles/*", auth);
   app.use("/analytics/*", auth);
 
-  // /tiles also gets a per-IP rate limit on top of auth.
-  app.use("/tiles/*", makeRateLimitMiddleware());
+  // /tiles also gets a per-IP rate limit on top of auth. Sized for
+  // MapLibre's burst pattern: a single viewport at zoom 5 covering
+  // Mexico fetches ~28 tiles in parallel at page load. The old 5/s
+  // limit dropped 80% of those tiles to 429, leaving the user with a
+  // near-empty map. 60/s/IP comfortably absorbs an initial burst plus
+  // a follow-on pan; the 50k-features-per-tile cap inside the handler
+  // is the real abuse defense.
+  app.use("/tiles/*", makeRateLimitMiddleware({ max: 60, windowMs: 1000 }));
 
   app.get("/search", (c) => searchHandler(c, config));
   app.get("/establishment/:clee", (c) => establishmentHandler(c, config));

@@ -12,8 +12,11 @@
  * deterministically by ORDER BY clee LIMIT cap (clee has unique index,
  * so the cost is dominated by the bbox filter, not the sort).
  *
- * Auth: X-Api-Key (mounted in server.ts). Rate limit: 5 req/sec/IP
- * (mounted in server.ts via makeRateLimitMiddleware).
+ * Auth: X-Api-Key (mounted in server.ts). Rate limit: 60 req/sec/IP
+ * (mounted in server.ts via makeRateLimitMiddleware) — sized so a
+ * single MapLibre viewport burst at zoom 5 (~28 parallel tile fetches)
+ * doesn't run into 429s. The 50k-features-per-tile cap is the real
+ * abuse defense.
  *
  * SQL composition is safe: every interpolated value is either a number
  * (parsed + bounded by Number.isInteger checks) or a 2-char regex-validated
