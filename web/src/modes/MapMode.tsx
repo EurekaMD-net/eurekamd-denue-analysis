@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Map as MapInstance } from "maplibre-gl";
 import { MapShell } from "../map/MapShell";
 import { ClusterOverlay } from "../map/ClusterOverlay";
@@ -6,7 +6,12 @@ import { EstablishmentCard } from "../map/EstablishmentCard";
 import { FilterPanel } from "../components/FilterPanel";
 import { useUiStore } from "../store";
 import { useUrlSync } from "../useUrlSync";
-import { DEFAULT_BASEMAP, type BasemapStyle } from "../map/style";
+import {
+  DEFAULT_BASEMAP,
+  DEFAULT_MAP_ENTIDAD,
+  DEFAULT_MAP_SECTOR,
+  type BasemapStyle,
+} from "../map/style";
 
 /**
  * Map mode — geographic lens over the same DENUE dataset Locust mode
@@ -21,6 +26,20 @@ import { DEFAULT_BASEMAP, type BasemapStyle } from "../map/style";
  */
 export function MapMode() {
   useUrlSync();
+
+  // Seed the filter state with safe defaults whenever the user lands on
+  // the map without any filter set. Runs after useUrlSync's mount-only
+  // hydration (declaration order matters), so URL params always win:
+  // we read the post-hydration store via getState() instead of the React
+  // closure so a freshly applied URL filter isn't clobbered. Without
+  // this, /map (no params, no localStorage) renders the unfiltered
+  // 6.1M-point heatmap — slow and visually meaningless.
+  useEffect(() => {
+    const s = useUiStore.getState();
+    if (s.entidad === null) s.setEntidad(DEFAULT_MAP_ENTIDAD);
+    if (s.sector === null) s.setSector(DEFAULT_MAP_SECTOR);
+  }, []);
+
   const [basemap, setBasemap] = useState<BasemapStyle>(DEFAULT_BASEMAP);
   const [map, setMap] = useState<MapInstance | null>(null);
   const [selectedClee, setSelectedClee] = useState<string | null>(null);
