@@ -61,6 +61,19 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
 
+  // Refs that mirror the latest filter values for the async map.on("load")
+  // callback. Without these, the load callback closes over the entidad/
+  // sector from the FIRST render — typically null/null because useUrlSync
+  // hasn't pushed URL params into Zustand yet. When load eventually fires
+  // it adds layers with the stale values, and the filter useEffect never
+  // re-runs because deps haven't changed since its last (bailed) attempt.
+  // Result before this fix: dots never appear after a hard refresh on
+  // /map?sector=NN, even though Zustand has the right value.
+  const entidadRef = useRef(entidad);
+  const sectorRef = useRef(sector);
+  entidadRef.current = entidad;
+  sectorRef.current = sector;
+
   // (Re)create the map whenever the basemap toggles. Cleanup on unmount.
   useEffect(() => {
     if (!containerRef.current) return;
@@ -105,7 +118,14 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
     // post-load makes the intent explicit and survives future MapLibre
     // changes that might tighten that tolerance.
     map.on("load", () => {
-      addDataLayers(map, { entidad, sector });
+      // Read filter values from refs — see comment on entidadRef above.
+      // This call uses the LATEST filter state, not the closure-captured
+      // values from when the map was created.
+      const liveFilters = {
+        entidad: entidadRef.current,
+        sector: sectorRef.current,
+      };
+      addDataLayers(map, liveFilters);
       if (onPointClick) {
         map.on("click", CIRCLE_LAYER_ID, (e) => {
           const features = e.features ?? [];
