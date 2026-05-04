@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Map as MapInstance } from "maplibre-gl";
 import { MapShell } from "../map/MapShell";
-import { ClusterOverlay, clusterOverlayActive } from "../map/ClusterOverlay";
+import { ClusterOverlay } from "../map/ClusterOverlay";
 import { EstablishmentCard } from "../map/EstablishmentCard";
 import { FilterPanel } from "../components/FilterPanel";
 import { useUiStore } from "../store";
@@ -35,18 +35,13 @@ export function MapMode() {
           Basemap
         </span>
         <BasemapToggle current={basemap} set={setBasemap} />
-        {clusterOverlayActive(entidad, sector) ? (
-          <span className="font-mono text-[10px] text-rose-400">
-            ● clusters k=10 visibles
-          </span>
-        ) : (
-          <span className="font-mono text-[10px] text-slate-600">
-            elige entidad + sector para ver clusters
-          </span>
-        )}
+        <span className="h-4 w-px bg-slate-800" />
+        <FilterStatus entidad={entidad} sector={sector} />
         <div className="flex-1" />
         <span className="font-mono text-[10px] text-slate-600">
-          zoom &lt;14 = heatmap · zoom ≥11 = puntos · click → detalle
+          {entidad || sector
+            ? "puntos visibles desde zoom 5 · click → detalle"
+            : "filtra por entidad o sector para ver puntos · click → detalle"}
         </span>
       </div>
       <div className="relative flex-1 overflow-hidden">
@@ -62,6 +57,47 @@ export function MapMode() {
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * Compact pill summary of the active filter state. Replaces the old
+ * "elige entidad + sector para ver clusters" hint, which only mentioned
+ * the cluster overlay (and was misleading when sector-only was selected,
+ * because cluster centroids require both filters but circles now work
+ * with one).
+ */
+function FilterStatus({
+  entidad,
+  sector,
+}: {
+  entidad: string | null;
+  sector: string | null;
+}) {
+  const both = entidad !== null && sector !== null;
+  const any = entidad !== null || sector !== null;
+  if (!any) {
+    return (
+      <span className="font-mono text-[10px] text-slate-600">
+        sin filtros — vista nacional (heatmap)
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-2 font-mono text-[10px]">
+      <span className="text-cyan-400">● filtro activo</span>
+      {entidad && (
+        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">
+          ent {entidad}
+        </span>
+      )}
+      {sector && (
+        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">
+          scian {sector}
+        </span>
+      )}
+      {both && <span className="text-rose-400">+ clusters k=10</span>}
+    </span>
   );
 }
 

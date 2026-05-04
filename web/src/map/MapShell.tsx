@@ -129,7 +129,18 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
   }, [basemap, apiKey, onMapLoad, onPointClick]);
   // ^ apiKey change forces re-create so transformRequest closes over fresh key
 
-  // Filter changes: rebuild the source URL without remounting the map.
+  // Filter changes: rebuild the source URL without remounting the map,
+  // and shift the layer zoom ranges so dots are visible immediately
+  // when the user filters by entidad or sector.
+  //
+  // Why the zoom shift: unfiltered, the tile feature cap (50k/tile) at
+  // zoom 5 would paint a country-wide blob of cyan circles — ugly. So
+  // circles stay hidden until zoom 11 (street-level). But once a filter
+  // is active the dataset is much smaller, so circles become readable
+  // at any zoom and the heatmap can fade out earlier to let them
+  // dominate. Without this, "select a sector" looks like it does
+  // nothing at the default Mexico-overview zoom.
+  //
   // Audit W2 fix: setTiles is not part of the MapLibre public TypeScript
   // surface — fall back to remove+re-add the source + layers when it's
   // unavailable, so a future MapLibre patch that drops the private
@@ -150,16 +161,51 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
       if (map.getLayer(HEATMAP_LAYER_ID)) map.removeLayer(HEATMAP_LAYER_ID);
       map.removeSource(SOURCE_ID);
       addDataLayers(map, { entidad, sector });
+      return;
     }
+    applyFilterZoomRanges(map, { entidad, sector });
   }, [entidad, sector]);
 
   return <div ref={containerRef} className="h-full w-full" />;
+}
+
+function isFiltered(filters: {
+  entidad: string | null;
+  sector: string | null;
+}): boolean {
+  return filters.entidad !== null || filters.sector !== null;
+}
+
+/**
+ * Shift layer zoom ranges in response to filter changes. Called after a
+ * setTiles refresh so the user sees dots at country zoom the moment they
+ * apply a filter, instead of having to zoom to street level.
+ *
+ * Heatmap maxzoom 14 → 9 when filtered: heatmap fades out earlier so
+ * circles take over.
+ *
+ * Circle minzoom 11 → 5 when filtered: dots appear at the default
+ * Mexico-overview zoom. The 50k/tile cap is the same either way, but
+ * filtered tiles return far fewer features so the canvas isn't overwhelmed.
+ */
+function applyFilterZoomRanges(
+  map: MapInstance,
+  filters: { entidad: string | null; sector: string | null },
+): void {
+  const filtered = isFiltered(filters);
+  if (map.getLayer(HEATMAP_LAYER_ID)) {
+    map.setLayerZoomRange(HEATMAP_LAYER_ID, 0, filtered ? 9 : 14);
+  }
+  if (map.getLayer(CIRCLE_LAYER_ID)) {
+    map.setLayerZoomRange(CIRCLE_LAYER_ID, filtered ? 5 : 11, 22);
+  }
 }
 
 function addDataLayers(
   map: MapInstance,
   filters: { entidad: string | null; sector: string | null },
 ): void {
+  const filtered = isFiltered(filters);
   map.addSource(SOURCE_ID, {
     type: "vector",
     tiles: [absoluteTileUrl(filters)],
@@ -172,7 +218,7 @@ function addDataLayers(
     type: "heatmap",
     source: SOURCE_ID,
     "source-layer": SOURCE_LAYER,
-    maxzoom: 14,
+    maxzoom: filtered ? 9 : 14,
     paint: {
       "heatmap-weight": 0.4,
       "heatmap-intensity": [
@@ -227,16 +273,36 @@ function addDataLayers(
     type: "circle",
     source: SOURCE_ID,
     "source-layer": SOURCE_LAYER,
-    minzoom: 11,
+    // minzoom is filter-state dependent — see applyFilterZoomRanges.
+    minzoom: filtered ? 5 : 11,
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 1.2, 16, 4.5],
+      // Radius ramp from country zoom (5, 1.5px) through state zoom
+      // (8, 1.8px) up to street (16, 4.5px). The country-zoom value
+      // matters when a sector filter is active and the user is still
+      // at the default Mexico view.
+      "circle-radius": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        5,
+        1.5,
+        11,
+        2,
+        16,
+        4.5,
+      ],
       "circle-color": "#22d3ee", // cyan-400
+      // Opacity ramp: 0.55 at country zoom (lower than mid-zoom so the
+      // density doesn't read as a smeared blob), 0.7 at city zoom,
+      // 0.85 at street zoom for individual identification.
       "circle-opacity": [
         "interpolate",
         ["linear"],
         ["zoom"],
+        5,
+        0.55,
         11,
-        0.35,
+        0.7,
         16,
         0.85,
       ],
