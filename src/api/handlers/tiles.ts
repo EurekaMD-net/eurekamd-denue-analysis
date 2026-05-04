@@ -125,30 +125,37 @@ async function buildTile(
   if (p.sector) filters.push(`AND sector_actividad_id = '${p.sector}'`);
   const filterClause = filters.join(" ");
 
-  // bounds_3857 is the tile envelope in Web Mercator (3857) — used by
-  // ST_AsMVTGeom which requires the same SRID as the tile.
-  // bounds_4326 is the same envelope reprojected to lat/lon — used by the
-  // bbox prefilter `&&` against establecimientos.geom (SRID 4326). The
-  // prefilter MUST be SRID-aligned or PostGIS compares raw bbox numbers
-  // and finds nothing (Web Mercator coords are 1e6+, lat/lon ~180).
+  // Tile envelope inlined as a literal expression on BOTH sides of the
+  // pipeline so PostgreSQL can constant-fold at plan time. An earlier
+  // version computed the envelope inside a CTE (bounds_3857 +
+  // bounds_4326) which the planner treated as a runtime parameter ($1),
+  // forcing a Bitmap Index Scan on idx_estab_geom that returned 3.6M
+  // rows before applying the entidad/sector filters in heap recheck —
+  // 60s per tile under the seeded entidad=09+sector=62 default. Inlining
+  // lets the planner pick BitmapAnd(idx_estab_sector, idx_estab_entidad)
+  // first (147ms) and only recheck the bbox in the heap. ~200x speedup.
+  //
+  // The prefilter `geom && ST_Transform(env, 4326)` MUST be SRID-aligned
+  // or PostGIS compares raw bbox numbers and finds nothing (Web Mercator
+  // coords are 1e6+, lat/lon ~180).
+  //
+  // ST_TileEnvelope is IMMUTABLE so duplicate calls fold to a single
+  // constant during planning; no runtime cost from repeating it.
+  const tileEnv3857 = `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y})`;
   const sql =
-    `WITH bounds_3857 AS (` +
-    `  SELECT ST_TileEnvelope(${p.z}, ${p.x}, ${p.y}) AS geom` +
-    `), bounds_4326 AS (` +
-    `  SELECT ST_Transform(geom, 4326) AS geom FROM bounds_3857` +
-    `), filtered AS (` +
+    `WITH filtered AS (` +
     `  SELECT clee, nombre, clase_actividad, geom` +
     `  FROM establecimientos` +
-    `  WHERE geom && (SELECT geom FROM bounds_4326)` +
-    `  ${filterClause}` +
+    `  WHERE 1=1 ${filterClause}` +
+    `    AND geom && ST_Transform(${tileEnv3857}, 4326)` +
     // hashtext gives a deterministic but uniform-distribution sample —
     // ORDER BY clee would systematically over-represent low-numbered entidades.
     `  ORDER BY hashtext(clee)` +
     `  LIMIT ${TILE_FEATURE_CAP}` +
     `), mvt_geom AS (` +
-    `  SELECT ST_AsMVTGeom(ST_Transform(f.geom, 3857), b.geom, 4096, 64, true) AS geom,` +
+    `  SELECT ST_AsMVTGeom(ST_Transform(f.geom, 3857), ${tileEnv3857}, 4096, 64, true) AS geom,` +
     `         f.clee, f.nombre, f.clase_actividad` +
-    `  FROM filtered f, bounds_3857 b` +
+    `  FROM filtered f` +
     `) SELECT encode(ST_AsMVT(mvt_geom, 'establecimientos'), 'base64') FROM mvt_geom;`;
 
   let stdout: string;
