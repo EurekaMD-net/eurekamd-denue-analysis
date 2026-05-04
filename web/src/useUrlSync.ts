@@ -30,7 +30,7 @@ export function useUrlSync(): void {
   const setSector = useUiStore((s) => s.setSector);
 
   // Hydrate Zustand from URL on first mount only.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only hydration; capturing setEntidad/setSector once is intentional
   useEffect(() => {
     const ent = params.get("entidad");
     const sec = params.get("sector");
@@ -38,7 +38,15 @@ export function useUrlSync(): void {
     if (sec && SCIAN_RE.test(sec)) setSector(sec);
   }, []);
 
-  // Mirror Zustand → URL on every change.
+  // Mirror Zustand → URL on filter change. Deps deliberately limited
+  // to the filters themselves (audit C1 fix). `params` is read inside
+  // for the equality short-circuit but doesn't drive the effect — every
+  // useSearchParams render returns a new params reference, so including
+  // it would re-run the effect on every parent re-render with no
+  // correctness benefit. `setParams` is referentially stable from
+  // react-router. The eslint exception is the price of wanting the
+  // effect driven by Zustand state alone, not by router churn.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const next = new URLSearchParams(params);
     if (entidad) next.set("entidad", entidad);
@@ -48,5 +56,5 @@ export function useUrlSync(): void {
     if (next.toString() !== params.toString()) {
       setParams(next, { replace: true });
     }
-  }, [entidad, sector, params, setParams]);
+  }, [entidad, sector]);
 }

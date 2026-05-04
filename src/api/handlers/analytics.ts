@@ -59,6 +59,31 @@ function normalizeGrado(g: string | null | undefined): IrsGrado {
   return "sin_dato";
 }
 
+/**
+ * Format a thrown error into a 502-message-friendly string, surfacing
+ * the spawned process's stderr when present. execFileSync attaches
+ * stderr to the thrown Error as a Buffer; some non-Node runtimes ship
+ * it as a string. When stderr is absent (e.g., timeout, EAGAIN, OOM)
+ * we fall back to err.message.
+ *
+ * Audit Locust-R1 (2026-05-04). Exported so tests can cover all 3
+ * branches without needing to actually throw inside execFileSync (which
+ * trips a vitest 4 unhandled-exception quirk in this codebase).
+ */
+export function formatPsqlError(err: unknown): string {
+  const baseMsg = err instanceof Error ? err.message : String(err);
+  const stderr = (err as { stderr?: unknown }).stderr;
+  let stderrText = "";
+  if (stderr instanceof Buffer) {
+    stderrText = stderr.toString("utf-8").trim();
+  } else if (typeof stderr === "string") {
+    stderrText = stderr.trim();
+  }
+  return stderrText
+    ? `${baseMsg} | psql stderr: ${stderrText.slice(0, 500)}`
+    : baseMsg;
+}
+
 function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
   if (!SAFE_CONTAINER_RE.test(config.dbContainer)) {
     throw new HttpError(
@@ -87,23 +112,8 @@ function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
       { encoding: "utf-8", timeout: 30_000 },
     ).trim();
   } catch (err) {
-    // Audit Locust-R1 (2026-05-04): execFileSync attaches the spawned
-    // process's stderr as `err.stderr` (Buffer | string), but the default
-    // Error.message just says "Command failed". Surface stderr so ops
-    // can see the actual psql diagnostic without tailing journalctl.
-    const baseMsg = err instanceof Error ? err.message : String(err);
-    const stderr = (err as { stderr?: Buffer | string }).stderr;
-    const stderrText =
-      stderr instanceof Buffer
-        ? stderr.toString("utf-8").trim()
-        : typeof stderr === "string"
-          ? stderr.trim()
-          : "";
-    const fullMsg = stderrText
-      ? `${baseMsg} | psql stderr: ${stderrText.slice(0, 500)}`
-      : baseMsg;
     throw new HttpError(
-      `analytics query failed: ${fullMsg}`,
+      `analytics query failed: ${formatPsqlError(err)}`,
       502,
       "postgres.error",
     );

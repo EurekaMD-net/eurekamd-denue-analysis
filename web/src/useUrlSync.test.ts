@@ -8,7 +8,11 @@ import { describe, it, expect } from "vitest";
 const ENTIDAD_RE = /^(0[1-9]|[12][0-9]|3[0-2])$/;
 const SCIAN_RE = /^[0-9]{2}$/;
 
-describe("useUrlSync URL-param validation regexes", () => {
+// NOTE: these tests cover only the regex CONTRACT. Hook behavior
+// (hydration order, mirror equality short-circuit, mode-switch URL
+// persistence) needs RTL + jsdom which the project doesn't set up
+// yet — flagged in audit W4 (2026-05-04).
+describe("ENTIDAD_RE / SCIAN_RE contract (frontend ↔ backend)", () => {
   it("ENTIDAD_RE accepts all 32 valid claves", () => {
     for (let n = 1; n <= 32; n++) {
       const c = String(n).padStart(2, "0");

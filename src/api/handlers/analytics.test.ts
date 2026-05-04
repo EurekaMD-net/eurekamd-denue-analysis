@@ -7,6 +7,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { createServer } from "../server.js";
+import { formatPsqlError } from "./analytics.js";
 import type {
   ApiServerConfig,
   MunicipiosAnalyticsResult,
@@ -414,7 +415,68 @@ describe("GET /analytics/top-sectors?entidad=", () => {
     expect(sql).toMatch(/sector_actividad_id/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
   });
+});
 
+// ---------------------------------------------------------------------------
+// formatPsqlError — pure function, all 3 stderr branches
+// (audit W1 2026-05-04: cover all branches without the vitest-4 throw quirk)
+// ---------------------------------------------------------------------------
+
+describe("formatPsqlError", () => {
+  it("appends Buffer stderr to the base message (truncated to 500)", () => {
+    const err = Object.assign(new Error("Command failed"), {
+      stderr: Buffer.from('ERROR:  relation "x" does not exist\nLINE 1: ...'),
+    });
+    const out = formatPsqlError(err);
+    expect(out).toBe(
+      'Command failed | psql stderr: ERROR:  relation "x" does not exist\nLINE 1: ...',
+    );
+  });
+
+  it("appends string stderr (non-Node Buffer environments)", () => {
+    const err = Object.assign(new Error("Command failed"), {
+      stderr: "FATAL:  password authentication failed\n",
+    });
+    expect(formatPsqlError(err)).toBe(
+      "Command failed | psql stderr: FATAL:  password authentication failed",
+    );
+  });
+
+  it("falls back to message when stderr is undefined", () => {
+    const err = new Error("ETIMEDOUT");
+    expect(formatPsqlError(err)).toBe("ETIMEDOUT");
+  });
+
+  it("falls back to message when stderr is empty Buffer", () => {
+    const err = Object.assign(new Error("EAGAIN"), {
+      stderr: Buffer.from(""),
+    });
+    expect(formatPsqlError(err)).toBe("EAGAIN");
+  });
+
+  it("truncates stderr at 500 chars to bound the 502 response size", () => {
+    const big = "a".repeat(2000);
+    const err = Object.assign(new Error("Command failed"), {
+      stderr: Buffer.from(big),
+    });
+    const out = formatPsqlError(err);
+    expect(out.length).toBeLessThanOrEqual(
+      "Command failed | psql stderr: ".length + 500,
+    );
+    expect(out).toContain("psql stderr: " + "a".repeat(500));
+    expect(out).not.toContain("a".repeat(501));
+  });
+
+  it("stringifies non-Error throws (e.g., a thrown string)", () => {
+    expect(formatPsqlError("naked string throw")).toBe("naked string throw");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/top-sectors — error paths (R2 + R3 from prior audit)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/top-sectors error paths", () => {
   // Audit R2: symmetric malformed-JSON coverage with national-treemap.
   it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
     mockExec.mockReturnValue("definitely not json");
