@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Map as MapInstance } from "maplibre-gl";
 import { MapShell } from "../map/MapShell";
 import { ClusterOverlay } from "../map/ClusterOverlay";
@@ -6,12 +6,7 @@ import { EstablishmentCard } from "../map/EstablishmentCard";
 import { FilterPanel } from "../components/FilterPanel";
 import { useUiStore } from "../store";
 import { useUrlSync } from "../useUrlSync";
-import {
-  DEFAULT_BASEMAP,
-  DEFAULT_MAP_ENTIDAD,
-  DEFAULT_MAP_SECTOR,
-  type BasemapStyle,
-} from "../map/style";
+import { DEFAULT_BASEMAP, type BasemapStyle } from "../map/style";
 
 /**
  * Map mode — geographic lens over the same DENUE dataset Locust mode
@@ -19,7 +14,13 @@ import {
  * (zoom ≥11) + cluster centroids overlay (when both entidad + sector
  * filters set) + click-to-detail side panel.
  *
- * Data path: /tiles/:z/:x/:y.mvt (PostGIS ST_AsMVT, rate-limited 5/s/IP),
+ * No seeded defaults — landing on /map shows the unfiltered country-
+ * wide heatmap. Canvas safety comes from the tile feature cap
+ * (TILE_FEATURE_CAP=50k per tile) and the circle layer's filter-aware
+ * minzoom (11 unfiltered, 5 filtered). Tiles complete in ~400ms
+ * unfiltered thanks to LIMIT-without-ORDER-BY in the SQL.
+ *
+ * Data path: /tiles/:z/:x/:y.mvt (PostGIS ST_AsMVT, rate-limited 60/s/IP),
  * filters via querystring entidad/sector. X-Api-Key injected in
  * MapShell's transformRequest. /clusters and /establishment fetched via
  * the standard apiFetch wrapper through TanStack Query.
@@ -27,37 +28,15 @@ import {
 export function MapMode() {
   useUrlSync();
 
-  // Seed the filter state with safe defaults whenever the user lands on
-  // the map without any filter set. Runs after useUrlSync's mount-only
-  // hydration (declaration order matters), so URL params always win:
-  // we read the post-hydration store via getState() instead of the React
-  // closure so a freshly applied URL filter isn't clobbered. Without
-  // this, /map (no params, no localStorage) renders the unfiltered
-  // 6.1M-point heatmap — slow and visually meaningless.
-  useEffect(() => {
-    const s = useUiStore.getState();
-    if (s.entidad === null) s.setEntidad(DEFAULT_MAP_ENTIDAD);
-    if (s.sector === null) s.setSector(DEFAULT_MAP_SECTOR);
-  }, []);
-
   const [basemap, setBasemap] = useState<BasemapStyle>(DEFAULT_BASEMAP);
   const [map, setMap] = useState<MapInstance | null>(null);
   const [selectedClee, setSelectedClee] = useState<string | null>(null);
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
 
-  // Custom limpiar: reset to defaults instead of null/null. The Map mode
-  // canvas should never be unfiltered, so "clear" here means "back to
-  // safe defaults" rather than "remove all constraints".
-  const resetToDefaults = () => {
-    const s = useUiStore.getState();
-    s.setEntidad(DEFAULT_MAP_ENTIDAD);
-    s.setSector(DEFAULT_MAP_SECTOR);
-  };
-
   return (
     <div className="flex h-full flex-col bg-slate-950">
-      <FilterPanel showSector onClear={resetToDefaults} />
+      <FilterPanel showSector />
       <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950 px-4 py-1.5">
         <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">
           Basemap

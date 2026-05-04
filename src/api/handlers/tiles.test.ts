@@ -56,9 +56,10 @@ describe("GET /tiles/:z/:x/:y", () => {
     expect(sql).toMatch(/entidad = '09'/);
     expect(sql).toMatch(/sector_actividad_id = '46'/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
-    // Uniform sample — never `ORDER BY clee` (skews to low entidades) —
-    // see audit W3.
-    expect(sql).toMatch(/ORDER BY hashtext\(clee\)/);
+    // No ORDER BY — relies on LIMIT short-circuiting the scan for speed.
+    // The trade-off (non-uniform sampling) is acceptable for density
+    // visualization at low zoom; high zoom never hits the cap.
+    expect(sql).not.toMatch(/ORDER BY/);
     expect(sql).toMatch(/LIMIT 50000/);
     expect(sql).toMatch(/encode\(ST_AsMVT/);
   });

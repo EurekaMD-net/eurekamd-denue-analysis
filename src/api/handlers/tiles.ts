@@ -145,15 +145,22 @@ async function buildTile(
   // ST_TileEnvelope is IMMUTABLE so duplicate calls fold to a single
   // constant during planning; no runtime cost from repeating it.
   const tileEnv3857 = `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y})`;
+  // LIMIT without ORDER BY — the planner short-circuits the scan as soon
+  // as TILE_FEATURE_CAP matching rows are found, so an unfiltered low-
+  // zoom tile completes in ~400ms instead of 16s. The trade-off is that
+  // the sample is non-uniform (whatever the scan encounters first,
+  // typically biased by physical row order which loosely correlates
+  // with insert order = state). For density-heatmap visualization at
+  // country zoom that's invisible; per-establishment markers at high
+  // zoom never hit the cap because the bbox is small enough that all
+  // matching rows fit. This is what enables the unfiltered "first
+  // visit" experience to be fast without forcing default filters.
   const sql =
     `WITH filtered AS (` +
     `  SELECT clee, nombre, clase_actividad, geom` +
     `  FROM establecimientos` +
     `  WHERE 1=1 ${filterClause}` +
     `    AND geom && ST_Transform(${tileEnv3857}, 4326)` +
-    // hashtext gives a deterministic but uniform-distribution sample —
-    // ORDER BY clee would systematically over-represent low-numbered entidades.
-    `  ORDER BY hashtext(clee)` +
     `  LIMIT ${TILE_FEATURE_CAP}` +
     `), mvt_geom AS (` +
     `  SELECT ST_AsMVTGeom(ST_Transform(f.geom, 3857), ${tileEnv3857}, 4096, 64, true) AS geom,` +

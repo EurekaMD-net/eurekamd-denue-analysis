@@ -21,21 +21,6 @@ export const MEXICO_BOUNDS: [number, number, number, number] = [
 ];
 
 /**
- * Default filter the Map mode forces on first visit so the canvas never
- * paints unfiltered tiles (50k features × ~25 tiles at zoom 5 ≈ 1.25M
- * heatmap points — visibly slow even though it doesn't crash).
- *
- * "09" is Ciudad de México (densest urban data, recognizable for QA).
- * "62" is SCIAN sector "Servicios de salud y de asistencia social" —
- * on-brand for the EurekaMD use case.
- *
- * Users can still pick "Nacional" or different sectors after the initial
- * load; this only seeds the empty case.
- */
-export const DEFAULT_MAP_ENTIDAD = "09";
-export const DEFAULT_MAP_SECTOR = "62";
-
-/**
  * Builds the MVT tile source URL template for MapLibre.
  *
  * MUST return an absolute URL. MapLibre internally calls
