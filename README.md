@@ -8,13 +8,13 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ## Estado del proyecto
 
-| Fase | Descripción                                              | Estado        |
-| ---- | -------------------------------------------------------- | ------------- |
-| 1    | Extractor paginado — cliente HTTP, reintentos, streaming | ✅ Completado |
-| 2    | Schema PostgreSQL + PostGIS, loader con upsert           | ✅ Completado |
-| 3    | Pipeline nacional reanudable (32 estados)                | ✅ Completado |
-| 4    | Pipeline de análisis y reportes                          | ⏳ Pendiente  |
-| 5    | API interna queryable (Hono, X-Api-Key auth)             | ✅ Completado |
+| Fase | Descripción                                                     | Estado        |
+| ---- | --------------------------------------------------------------- | ------------- |
+| 1    | Extractor paginado — cliente HTTP, reintentos, streaming        | ✅ Completado |
+| 2    | Schema PostgreSQL + PostGIS, loader con upsert                  | ✅ Completado |
+| 3    | Pipeline nacional reanudable (32 estados)                       | ✅ Completado |
+| 4    | Pipeline de análisis y reportes (mat-views, clusters, coverage) | ✅ Completado |
+| 5    | API interna queryable (Hono, X-Api-Key auth)                    | ✅ Completado |
 
 ---
 
