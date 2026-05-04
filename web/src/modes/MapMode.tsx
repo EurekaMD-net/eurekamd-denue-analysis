@@ -5,6 +5,7 @@ import { ClusterOverlay, clusterOverlayActive } from "../map/ClusterOverlay";
 import { EstablishmentCard } from "../map/EstablishmentCard";
 import { FilterPanel } from "../components/FilterPanel";
 import { useUiStore } from "../store";
+import { useUrlSync } from "../useUrlSync";
 import { DEFAULT_BASEMAP, type BasemapStyle } from "../map/style";
 
 /**
@@ -19,6 +20,7 @@ import { DEFAULT_BASEMAP, type BasemapStyle } from "../map/style";
  * the standard apiFetch wrapper through TanStack Query.
  */
 export function MapMode() {
+  useUrlSync();
   const [basemap, setBasemap] = useState<BasemapStyle>(DEFAULT_BASEMAP);
   const [map, setMap] = useState<MapInstance | null>(null);
   const [selectedClee, setSelectedClee] = useState<string | null>(null);
