@@ -146,6 +146,39 @@ describe("GET /analytics/national-treemap", () => {
     const body = (await res.json()) as NationalTreemapResult;
     expect(body.entidades).toEqual([]);
   });
+
+  it("hits the mat-view first (mv_national_treemap)", async () => {
+    mockExec.mockReturnValue("null");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/national-treemap", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    expect(args[args.length - 1]).toMatch(/FROM mv_national_treemap/);
+  });
+
+  it("falls back to live multi-CTE SQL when mat-view is missing", async () => {
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_national_treemap" does not exist',
+          ),
+        });
+      })
+      .mockReturnValueOnce("null"); // live SQL returns empty
+    const app = createServer(CONFIG);
+    await app.request("/analytics/national-treemap", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    // Audit W2 (2026-05-04): pin the live-fallback SQL to the multi-CTE
+    // shape that the mat-view materializes — prevents drift between the
+    // two sources of truth.
+    const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
+    const liveSql = liveArgs[liveArgs.length - 1];
+    expect(liveSql).toMatch(/WITH entidad_counts AS/);
+    expect(liveSql).toMatch(/coneval_irs_municipal/);
+    expect(liveSql).toMatch(/coneval_pobreza_municipal/);
+    expect(liveSql).toMatch(/ROW_NUMBER\(\) OVER/);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -193,6 +193,15 @@ async function main(): Promise<void> {
     );
     console.log("   npx tsx --env-file=.env scripts/backfill-ageb.ts");
     console.log("   (es idempotente: solo toca filas con ageb IS NULL)");
+    console.log(
+      "\n💡 Refresca también las mat-views de /analytics (se quedan stale):",
+    );
+    console.log(
+      "   docker exec -i supabase-db psql -U postgres -d postgres < scripts/perf-matviews.sql",
+    );
+    console.log(
+      "   (reconstruye mv_sector_grade_matrix + mv_national_treemap; ~15s)",
+    );
   }
 
   if (result.totalFailed > 0) {

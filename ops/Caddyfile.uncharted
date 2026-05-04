@@ -1,0 +1,35 @@
+# Canonical snapshot of the Caddy block deployed at /etc/caddy/Caddyfile.
+# Audit W5 (2026-05-04): commit infra-as-code so VPS rebuilds are reproducible.
+#
+# To apply on a fresh VPS: append this block to /etc/caddy/Caddyfile,
+# `caddy validate --config /etc/caddy/Caddyfile`, then
+# `systemctl reload caddy` — Caddy auto-provisions LE TLS via HTTP-01.
+#
+# Prereqs:
+#   - DNS A record: uncharted.eurekamd.cloud → <VPS_PUBLIC_IP>
+#   - Backend running on localhost:3030 (`scripts/serve.ts`, tmux session `denue-api`)
+#   - dist/ built via `cd web && npm run build`
+
+# DENUE Analyzer — production dist/ + Hono backend on uncharted.eurekamd.cloud
+# /api/* strips the prefix and proxies to Hono routes mounted at root.
+# Static assets served from dist/ (built via `cd web && npm run build`),
+# with SPA fallback to /index.html for client-side routing.
+# Audit P3-perf C fix (2026-05-04): switched from Vite dev (~1500 module
+# fetches per cold load) to dist/ (single chunk + lazy MapMode chunk).
+# Vite dev still runs on :5173 for local HMR; not exposed publicly.
+uncharted.eurekamd.cloud {
+	encode zstd gzip
+	handle_path /api/* {
+		reverse_proxy localhost:3030
+	}
+	handle /assets/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		root * /root/claude/projects/data-intelligence/denue-data-analysis/web/dist
+		file_server
+	}
+	handle {
+		root * /root/claude/projects/data-intelligence/denue-data-analysis/web/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -14,6 +14,11 @@ import { LocustMode } from "./modes/LocustMode";
 // default /locust landing doesn't pay the cost. Audit P3-perf D fix
 // (2026-05-04) — production build splits this into its own chunk;
 // in dev mode the import is a single fetch on /map navigation.
+//
+// MapMode is a NAMED export, but React.lazy expects a module with a
+// `default` export — the `.then(...)` adapter rewrites the shape.
+// Chunk-load failures bubble up to the root <ErrorBoundary> rather
+// than spinning forever in the Suspense fallback.
 const MapMode = lazy(() =>
   import("./modes/MapMode").then((m) => ({ default: m.MapMode })),
 );
