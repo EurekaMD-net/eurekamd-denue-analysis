@@ -1,5 +1,5 @@
 /**
- * Phase 5 — HTTP API server factory.
+ * Phase 5 + P1 — HTTP API server factory.
  *
  * createServer(config) returns a Hono app instance. Tests call app.fetch()
  * directly with a Request object, no live server. scripts/serve.ts wraps
@@ -12,8 +12,12 @@
  *   GET /summary/sector/:scian
  *   GET /summary/entidad/:clave
  *   GET /clusters?entidad=&scian=&k=
+ *   GET /entidades                             — dropdown source (P1)
+ *   GET /sectors                               — dropdown source (P1)
+ *   GET /tiles/:z/:x/:y.mvt?entidad=&sector=   — vector tile (P1, rate-limited)
  *
  * All routes except /health require X-Api-Key header matching config.apiKey.
+ * /tiles is additionally rate-limited per IP (5 req/sec).
  */
 
 import { Hono } from "hono";
@@ -21,11 +25,15 @@ import type { ApiServerConfig } from "./types.js";
 import { makeAuthMiddleware } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
 import { logMiddleware } from "./middleware/log.js";
+import { makeRateLimitMiddleware } from "./middleware/rate-limit.js";
 import { searchHandler } from "./handlers/search.js";
 import { establishmentHandler } from "./handlers/establishment.js";
 import { summarySectorHandler } from "./handlers/summary-sector.js";
 import { summaryEntidadHandler } from "./handlers/summary-entidad.js";
 import { clustersHandler } from "./handlers/clusters.js";
+import { entidadesHandler } from "./handlers/entidades.js";
+import { sectorsHandler } from "./handlers/sectors.js";
+import { tilesHandler } from "./handlers/tiles.js";
 
 export function createServer(config: ApiServerConfig): Hono {
   if (!config.supabaseUrl)
@@ -57,12 +65,21 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/establishment/*", auth);
   app.use("/summary/*", auth);
   app.use("/clusters", auth);
+  app.use("/entidades", auth);
+  app.use("/sectors", auth);
+  app.use("/tiles/*", auth);
+
+  // /tiles also gets a per-IP rate limit on top of auth.
+  app.use("/tiles/*", makeRateLimitMiddleware());
 
   app.get("/search", (c) => searchHandler(c, config));
   app.get("/establishment/:clee", (c) => establishmentHandler(c, config));
   app.get("/summary/sector/:scian", (c) => summarySectorHandler(c, config));
   app.get("/summary/entidad/:clave", (c) => summaryEntidadHandler(c, config));
   app.get("/clusters", (c) => clustersHandler(c, config));
+  app.get("/entidades", (c) => entidadesHandler(c, config));
+  app.get("/sectors", (c) => sectorsHandler(c, config));
+  app.get("/tiles/:z/:x/:y", (c) => tilesHandler(c, config));
 
   return app;
 }

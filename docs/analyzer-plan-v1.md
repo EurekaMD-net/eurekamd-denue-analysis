@@ -122,7 +122,7 @@ Auth: X-Api-Key. Returns dropdown source for SCIAN 2-digit prefixes.
 }
 ```
 
-Source: aggregate over `establecimientos` grouped by `SUBSTR(clee, 3, 2)`. Use a NEW mat view `mv_scian_2digit` if the GROUP BY is too slow (likely fine — ~100 distinct values).
+Source: aggregate over `establecimientos` grouped by `SUBSTR(clee, 6, 2)` — the 2-digit SCIAN sector lives at chars 6-7 of CLEE (chars 3-5 are the municipio). Use a NEW mat view `mv_scian_2digit` if the GROUP BY is too slow (likely fine — ~100 distinct values).
 
 SCIAN names: hardcoded JSON `src/db/scian_2digit_names.json` (~20 entries, NOT fabricated — use the official INEGI taxonomy).
 
@@ -141,7 +141,7 @@ filtered AS (
   FROM establecimientos
   WHERE geom && (SELECT geom FROM bounds)
     AND ($entidad IS NULL OR entidad = $entidad)
-    AND ($sector IS NULL OR SUBSTR(clee, 3, 2) = $sector)
+    AND ($sector IS NULL OR SUBSTR(clee, 6, 2) = $sector)
 ),
 mvt_geom AS (
   SELECT ST_AsMVTGeom(f.geom, b.geom, 4096, 64, true) AS geom,

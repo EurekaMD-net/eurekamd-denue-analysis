@@ -213,14 +213,17 @@ npx tsx --env-file=.env scripts/serve.ts
 
 Endpoints disponibles:
 
-| Método | Ruta                      | Auth | Descripción                                                                                                     |
-| ------ | ------------------------- | ---- | --------------------------------------------------------------------------------------------------------------- |
-| `GET`  | `/health`                 | ✗    | Liveness check (sin auth, para probes)                                                                          |
-| `GET`  | `/search`                 | ✓    | Búsqueda paginada: `?q=`, `?entidad=`, `?from=lat,lon&radius_km=`, `?page=&limit=` (`limit` máx 1000)           |
-| `GET`  | `/establishment/:clee`    | ✓    | Lookup por CLEE individual (15 caracteres alfanuméricos)                                                        |
-| `GET`  | `/summary/sector/:scian`  | ✓    | Resumen nacional por sector SCIAN de 2 dígitos: total nacional + top entidades (lee `mv_sector_summary`)        |
-| `GET`  | `/summary/entidad/:clave` | ✓    | Resumen por entidad (`01`–`32`): cargados + total INEGI + cobertura % + top sectores + distribución de estratos |
-| `GET`  | `/clusters`               | ✓    | Clustering K-means PostGIS: `?entidad=&scian=&k=` — agrupa establecimientos por sector dentro de una entidad    |
+| Método | Ruta                      | Auth | Rate-limit | Descripción                                                                                                     |
+| ------ | ------------------------- | ---- | ---------- | --------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`                 | ✗    | ✗          | Liveness check (sin auth, para probes)                                                                          |
+| `GET`  | `/search`                 | ✓    | ✗          | Búsqueda paginada: `?q=`, `?entidad=`, `?from=lat,lon&radius_km=`, `?page=&limit=` (`limit` máx 1000)           |
+| `GET`  | `/establishment/:clee`    | ✓    | ✗          | Lookup por CLEE individual (28 caracteres alfanuméricos)                                                        |
+| `GET`  | `/summary/sector/:scian`  | ✓    | ✗          | Resumen nacional por sector SCIAN de 2 dígitos: total nacional + top entidades (agrega CLEE chars 6-7)          |
+| `GET`  | `/summary/entidad/:clave` | ✓    | ✗          | Resumen por entidad (`01`–`32`): cargados + total INEGI + cobertura % + top sectores + distribución de estratos |
+| `GET`  | `/clusters`               | ✓    | ✗          | Clustering K-means PostGIS: `?entidad=&scian=&k=` — agrupa establecimientos por sector dentro de una entidad    |
+| `GET`  | `/entidades`              | ✓    | ✗          | Dropdown source para el frontend: 32 estados con `loaded` + `inegi_total` + `status` (`Cache-Control: 60s`)     |
+| `GET`  | `/sectors`                | ✓    | ✗          | Dropdown source para el frontend: 23+ SCIAN de 2 dígitos con `national_count` (ordenado DESC)                   |
+| `GET`  | `/tiles/:z/:x/:y.mvt`     | ✓    | 5 req/s/IP | Vector tile MVT (PostGIS `ST_AsMVT`): `?entidad=&sector=`, `Cache-Control: 1h`, cap 50k features/tile           |
 
 Autenticación: header `X-Api-Key: <API_KEY>` en todas las rutas excepto `/health`. Sin la clave o con clave incorrecta el servidor responde `401`.
 

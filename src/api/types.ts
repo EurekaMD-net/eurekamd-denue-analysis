@@ -101,6 +101,48 @@ export interface ClustersQuery {
 export type { ClusterCentroid } from "../analysis/cluster-by-sector.js";
 
 // ---------------------------------------------------------------------------
+// Entidades dropdown
+// ---------------------------------------------------------------------------
+
+export interface EntidadDropdownEntry {
+  clave: string;
+  nombre: string;
+  loaded: number;
+  inegi_total: number | null;
+  status: "green" | "yellow" | "red" | "unverified";
+}
+
+export interface EntidadesResult {
+  entidades: EntidadDropdownEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// Sectors dropdown
+// ---------------------------------------------------------------------------
+
+export interface SectorEntry {
+  scian: string;
+  name: string;
+  national_count: number;
+}
+
+export interface SectorsResult {
+  sectors: SectorEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// Tiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Z/X/Y bounds. Hard-clamped at the handler boundary so SQL composition
+ * cannot receive a Z above 22 or negative X/Y.
+ */
+export const MAX_TILE_ZOOM = 22;
+/** Soft cap on features per tile to protect the browser. Sample at SQL. */
+export const TILE_FEATURE_CAP = 50_000;
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

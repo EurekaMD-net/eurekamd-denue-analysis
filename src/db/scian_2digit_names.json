@@ -1,0 +1,30 @@
+{
+  "_comment": "INEGI SCIAN 2-digit sector labels. Verified against the official taxonomy at https://www.inegi.org.mx/app/scian/. The 23 sectors below are the ones that actually appear in the loaded DENUE corpus (see SELECT SUBSTR(clee, 6, 2), COUNT(*) FROM establecimientos GROUP BY 1). Anomalies 29/75/89 (1, 7, 1 rows respectively) are excluded as data noise — never fabricate names.",
+  "_verified_at": "2026-05-04",
+  "_source": "https://www.inegi.org.mx/app/scian/",
+  "sectors": {
+    "11": "Agricultura, cría y explotación de animales, aprovechamiento forestal, pesca y caza",
+    "21": "Minería",
+    "22": "Generación, transmisión, distribución y comercialización de energía eléctrica, suministro de agua y de gas natural por ductos al consumidor final",
+    "23": "Construcción",
+    "31": "Industrias manufactureras (alimentos, bebidas, tabaco, textiles, prendas de vestir, cuero)",
+    "32": "Industrias manufactureras (madera, papel, impresión, petróleo, química, plástico, hule, minerales no metálicos)",
+    "33": "Industrias manufactureras (metálicas básicas, productos metálicos, maquinaria, equipo de cómputo, eléctrico, transporte, muebles, otras)",
+    "43": "Comercio al por mayor",
+    "46": "Comercio al por menor",
+    "48": "Transportes, correos y almacenamiento (transportes)",
+    "49": "Transportes, correos y almacenamiento (correos y almacenamiento)",
+    "51": "Información en medios masivos",
+    "52": "Servicios financieros y de seguros",
+    "53": "Servicios inmobiliarios y de alquiler de bienes muebles e intangibles",
+    "54": "Servicios profesionales, científicos y técnicos",
+    "55": "Corporativos",
+    "56": "Servicios de apoyo a los negocios y manejo de residuos y desechos, y servicios de remediación",
+    "61": "Servicios educativos",
+    "62": "Servicios de salud y de asistencia social",
+    "71": "Servicios de esparcimiento culturales y deportivos, y otros servicios recreativos",
+    "72": "Servicios de alojamiento temporal y de preparación de alimentos y bebidas",
+    "81": "Otros servicios excepto actividades gubernamentales",
+    "93": "Actividades legislativas, gubernamentales, de impartición de justicia y de organismos internacionales y extraterritoriales"
+  }
+}

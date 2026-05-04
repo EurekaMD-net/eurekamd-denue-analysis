@@ -62,13 +62,17 @@ export async function clusterBySector(
   // ST_ClusterKMeans returns cluster_id over the window of records matching the WHERE.
   // Outer aggregate computes centroid + member list per cluster.
   // Output as JSON so we don't have to parse a psql table format.
+  //
+  // SCIAN offset: chars 6-7 of CLEE hold the 2-digit SCIAN sector. Chars 3-5
+  // are the municipio. Using 3-2 here was a pre-P1 bug — every prior cluster
+  // result was filtered by municipio prefix, not by SCIAN. Fixed in P1.
   const sql = `
     WITH clustered AS (
       SELECT clee, latitud, longitud,
              ST_ClusterKMeans(geom, ${params.k}) OVER () AS cluster_id
       FROM establecimientos
       WHERE entidad = '${params.entidad}'
-        AND SUBSTR(clee, 3, 2) = '${params.scianPrefix}'
+        AND SUBSTR(clee, 6, 2) = '${params.scianPrefix}'
         AND geom IS NOT NULL
     )
     SELECT json_agg(c) FROM (
