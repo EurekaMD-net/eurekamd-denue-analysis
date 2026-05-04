@@ -48,7 +48,11 @@ export function DensidadPobrezaScatter({ entidad, entidadNombre }: Props) {
           m.poblacion !== null && m.poblacion > 0 && m.pobreza_pct !== null,
       )
       .map((m) => {
-        const densidad = (m.establecimientos / (m.poblacion ?? 1)) * 1000;
+        // Filter above gates `m.poblacion !== null && m.poblacion > 0`,
+        // so the non-null assertion is sound. Audit Locust-W3 (2026-05-04):
+        // dropped the `?? 1` fallback that would have silently inflated
+        // densities if the filter were ever loosened.
+        const densidad = (m.establecimientos / m.poblacion!) * 1000;
         return {
           name: m.municipio ?? m.cve_mun,
           value: [

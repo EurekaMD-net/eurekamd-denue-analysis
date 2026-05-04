@@ -31,8 +31,12 @@ export const useUiStore = create<UiState>((set) => ({
   },
 
   entidad: null,
-  setEntidad: (clave) => set({ entidad: clave }),
+  // Normalize empty strings to null so downstream queries gated on
+  // `entidad !== null` don't fire with `?entidad=` and 400 the backend.
+  // Audit Locust-W2 (2026-05-04) — defense for future call sites that
+  // might forward a select's empty value verbatim.
+  setEntidad: (clave) => set({ entidad: clave === "" ? null : clave }),
 
   sector: null,
-  setSector: (scian) => set({ sector: scian }),
+  setSector: (scian) => set({ sector: scian === "" ? null : scian }),
 }));

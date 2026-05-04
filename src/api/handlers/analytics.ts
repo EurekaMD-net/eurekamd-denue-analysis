@@ -87,9 +87,23 @@ function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
       { encoding: "utf-8", timeout: 30_000 },
     ).trim();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Audit Locust-R1 (2026-05-04): execFileSync attaches the spawned
+    // process's stderr as `err.stderr` (Buffer | string), but the default
+    // Error.message just says "Command failed". Surface stderr so ops
+    // can see the actual psql diagnostic without tailing journalctl.
+    const baseMsg = err instanceof Error ? err.message : String(err);
+    const stderr = (err as { stderr?: Buffer | string }).stderr;
+    const stderrText =
+      stderr instanceof Buffer
+        ? stderr.toString("utf-8").trim()
+        : typeof stderr === "string"
+          ? stderr.trim()
+          : "";
+    const fullMsg = stderrText
+      ? `${baseMsg} | psql stderr: ${stderrText.slice(0, 500)}`
+      : baseMsg;
     throw new HttpError(
-      `analytics query failed: ${msg}`,
+      `analytics query failed: ${fullMsg}`,
       502,
       "postgres.error",
     );

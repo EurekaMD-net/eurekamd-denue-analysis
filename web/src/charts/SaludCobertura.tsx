@@ -28,13 +28,17 @@ export function SaludCobertura({ entidad, entidadNombre }: Props) {
       .sort((a, b) => (b.poblacion ?? 0) - (a.poblacion ?? 0))
       .slice(0, 10)
       .reverse(); // ECharts paints bottom→top
+    // Filter above gates `poblacion > 10_000` so non-null assertions
+    // below are sound. Audit Locust-W3 (2026-05-04): dropped `?? 1`
+    // fallbacks to prevent silent rate inflation if the filter ever
+    // loosens.
     return {
       labels: muns.map((m) => m.municipio ?? m.cve_mun),
       clues_per_100k: muns.map((m) =>
-        Number(((m.unidades_clues / (m.poblacion ?? 1)) * 100_000).toFixed(2)),
+        Number(((m.unidades_clues / m.poblacion!) * 100_000).toFixed(2)),
       ),
       farmacias_per_100k: muns.map((m) =>
-        Number(((m.farmacias / (m.poblacion ?? 1)) * 100_000).toFixed(2)),
+        Number(((m.farmacias / m.poblacion!) * 100_000).toFixed(2)),
       ),
     };
   }, [data]);
