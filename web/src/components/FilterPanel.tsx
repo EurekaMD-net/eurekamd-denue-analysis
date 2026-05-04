@@ -9,14 +9,28 @@ interface Props {
 /**
  * Compact entidad picker (and optionally a SCIAN sector picker).
  *
- * Reads from /entidades for the entidad dropdown source so the label
- * includes loaded count + INEGI status (green/yellow/red/unverified).
- * Reads from /sectors for the SCIAN dropdown when `showSector` is true.
+ * Two consumers:
+ *   - LocustMode embeds <FilterControls> directly inside its sticky top
+ *     toolbar (no bar wrapper).
+ *   - MapMode renders <FilterPanel> as a full-width bar above the canvas.
  *
  * Selecting cascades through Zustand into every per-entidad chart and
  * the Map mode tile-source URL.
  */
 export function FilterPanel({ showSector = false }: Props = {}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950 px-4 py-2">
+      <FilterControls showSector={showSector} />
+    </div>
+  );
+}
+
+/**
+ * Bare picker controls. Renders the entidad dropdown (and optionally the
+ * SCIAN sector picker) plus a "limpiar" button when any filter is set.
+ * No outer chrome — caller supplies the surrounding toolbar.
+ */
+export function FilterControls({ showSector = false }: Props = {}) {
   const entidad = useUiStore((s) => s.entidad);
   const setEntidad = useUiStore((s) => s.setEntidad);
   const sector = useUiStore((s) => s.sector);
@@ -25,7 +39,7 @@ export function FilterPanel({ showSector = false }: Props = {}) {
   const { data: secs } = useSectors();
 
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950 px-4 py-2">
+    <>
       <label className="font-mono text-[11px] uppercase tracking-wider text-slate-500">
         Entidad
       </label>
@@ -84,6 +98,6 @@ export function FilterPanel({ showSector = false }: Props = {}) {
           limpiar
         </button>
       )}
-    </div>
+    </>
   );
 }

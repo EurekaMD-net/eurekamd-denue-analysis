@@ -6,7 +6,7 @@ import { SectorGradeMatrix } from "../charts/SectorGradeMatrix";
 import { TopSectoresBar } from "../charts/TopSectoresBar";
 import { DensidadPobrezaScatter } from "../charts/DensidadPobrezaScatter";
 import { SaludCobertura } from "../charts/SaludCobertura";
-import { FilterPanel } from "../components/FilterPanel";
+import { FilterControls } from "../components/FilterPanel";
 import { SearchBar } from "../components/SearchBar";
 
 /**
@@ -14,10 +14,10 @@ import { SearchBar } from "../components/SearchBar";
  * CONEVAL × CLUES) as a single story.
  *
  * Layout:
- *   - Top bar: search box (debounced /search)
- *   - Row 1 (national, no filter): treemap + sector×IRS heatmap
- *   - Filter panel (entidad picker)
- *   - Row 2 (per-entidad): top sectores · scatter · salud cobertura
+ *   - Sticky toolbar: search · entidad picker · provenance tagline
+ *   - Section "Panorama nacional": treemap + sector×IRS heatmap
+ *   - Section "Detalle estatal" (header reflects selected entidad):
+ *     top sectores · scatter · salud cobertura
  */
 export function LocustMode() {
   useUrlSync();
@@ -29,22 +29,35 @@ export function LocustMode() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-slate-950">
-      <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950 px-4 py-2">
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-slate-950/80">
         <SearchBar />
+        <span className="hidden h-5 w-px bg-slate-800 sm:block" />
+        <FilterControls />
         <div className="flex-1" />
         <span className="font-mono text-[10px] text-slate-600">
           DENUE × Censo 2020 × CONEVAL × CLUES
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 p-3 md:grid-cols-2">
+      <SectionHeader
+        eyebrow="01 / Panorama nacional"
+        title="Tejido económico y rezago social a nivel nacional"
+      />
+      <div className="grid grid-cols-1 gap-3 px-3 pb-4 md:grid-cols-2 xl:gap-5 xl:px-5 xl:pb-6">
         <NationalTreemap />
         <SectorGradeMatrix />
       </div>
 
-      <FilterPanel />
-
-      <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-3">
+      <SectionHeader
+        eyebrow="02 / Detalle estatal"
+        title={
+          entidadNombre
+            ? `Foco en ${entidadNombre}`
+            : "Selecciona una entidad arriba para enfocar"
+        }
+        muted={!entidadNombre}
+      />
+      <div className="grid grid-cols-1 gap-3 px-3 pb-6 lg:grid-cols-3 xl:gap-5 xl:px-5 xl:pb-8">
         <TopSectoresBar entidad={entidad} entidadNombre={entidadNombre} />
         <DensidadPobrezaScatter
           entidad={entidad}
@@ -52,6 +65,29 @@ export function LocustMode() {
         />
         <SaludCobertura entidad={entidad} entidadNombre={entidadNombre} />
       </div>
+    </div>
+  );
+}
+
+interface SectionHeaderProps {
+  eyebrow: string;
+  title: string;
+  muted?: boolean;
+}
+
+function SectionHeader({ eyebrow, title, muted = false }: SectionHeaderProps) {
+  return (
+    <div className="flex items-baseline gap-3 px-4 pb-1 pt-4 xl:px-6 xl:pt-6">
+      <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-cyan-500/80">
+        {eyebrow}
+      </span>
+      <h2
+        className={`font-mono text-xs ${
+          muted ? "text-slate-600" : "text-slate-300"
+        }`}
+      >
+        {title}
+      </h2>
     </div>
   );
 }
