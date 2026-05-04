@@ -122,6 +122,23 @@ function deriveScian(
   return slice;
 }
 
+/**
+ * Derive area_geo (CVE_MUN_5 = CVE_ENT||CVE_MUN, INEGI standard) from CLEE
+ * chars 1-5. This is the join key for CONEVAL, SESNSP, CE 2024, Datatur,
+ * CLUES — every municipal-level government dataset on the v0.2.x roadmap.
+ *
+ * BuscarEntidad doesn't return AreaGeo, so without this fallback every
+ * row stores NULL and no municipal join works. Returns null only if CLEE
+ * is too short (<5 chars) — no numeric guard since INEGI municipality
+ * codes are always 5 digits and CLEEs in this corpus are 27-28 chars.
+ */
+function deriveAreaGeo(clee: string | undefined | null): string | null {
+  if (!clee || clee.length < 5) return null;
+  const slice = clee.slice(0, 5);
+  if (!/^[0-9]{5}$/.test(slice)) return null;
+  return slice;
+}
+
 /** Transforma un registro crudo DENUE en una fila normalizada */
 export function transform(raw: DenueRawRecord): EstablecimientoRow {
   return {
@@ -158,7 +175,7 @@ export function transform(raw: DenueRawRecord): EstablecimientoRow {
     manzana: clean(raw.Manzana),
     corredor_industrial: clean(raw.tipo_corredor_industrial),
     nom_corredor_industrial: clean(raw.nom_corredor_industrial),
-    area_geo: clean(raw.AreaGeo),
+    area_geo: clean(raw.AreaGeo) ?? deriveAreaGeo(raw.CLEE),
     telefono: clean(raw.Telefono),
     correo_e: clean(raw.Correo_e),
     sitio_internet: clean(raw.Sitio_internet),

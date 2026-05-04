@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS establecimientos (
   geom             GEOMETRY(Point, 4326),       -- punto espacial WGS84
 
   -- Área geográfica
-  area_geo         TEXT,                        -- clave del área (ej. "09012")
+  area_geo         TEXT,                        -- CVE_ENT||CVE_MUN (5 dígitos, ej. "09012") — INEGI standard municipal join key for CONEVAL/SESNSP/CE 2024/Datatur/CLUES. Backfilled from CLEE chars 1-5 in src/db/loader.ts:deriveAreaGeo().
 
   -- Fechas
   fecha_alta       DATE,

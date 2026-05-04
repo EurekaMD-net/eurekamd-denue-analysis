@@ -144,9 +144,50 @@ describe("transform()", () => {
     expect(row.fecha_alta).toBeNull();
   });
 
-  it("area_geo mapeado correctamente", () => {
+  it("area_geo mapeado correctamente cuando AreaGeo está presente", () => {
     const row = transform(BASE_RECORD);
     expect(row.area_geo).toBe("09012");
+  });
+
+  it("deriva area_geo (CVE_MUN_5) del CLEE cuando AreaGeo está ausente", () => {
+    // CLEE chars 1-5 = '06009' for this Colima fixture
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "06009461121001991000000000U0",
+      AreaGeo: undefined,
+    };
+    const row = transform(raw);
+    expect(row.area_geo).toBe("06009");
+  });
+
+  it("prefiere AreaGeo del API sobre la derivación cuando está presente", () => {
+    // BASE_RECORD has AreaGeo='09012' AND CLEE chars 1-5='09012' — same
+    // value here but the precedence is what matters: API field wins so any
+    // future endpoint that returns a different/longer AreaGeo (e.g. with
+    // AGEB suffix) is not silently replaced.
+    const raw: DenueRawRecord = { ...BASE_RECORD, AreaGeo: "09012XYZ" };
+    const row = transform(raw);
+    expect(row.area_geo).toBe("09012XYZ");
+  });
+
+  it("retorna null para area_geo cuando CLEE es muy corto y AreaGeo ausente", () => {
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "0901",
+      AreaGeo: undefined,
+    };
+    const row = transform(raw);
+    expect(row.area_geo).toBeNull();
+  });
+
+  it("retorna null para area_geo cuando CLEE chars 1-5 no son numéricos", () => {
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "0900AB6X1121001991000000000U0", // chars 5 is 'A', not a digit
+      AreaGeo: undefined,
+    };
+    const row = transform(raw);
+    expect(row.area_geo).toBeNull();
   });
 
   // ---------------------------------------------------------------------------
