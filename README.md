@@ -8,6 +8,8 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ## Versión actual: v0.3 P3 — Locust + Map mode (analyzer frontend)
 
+**Live**: <https://uncharted.eurekamd.cloud/> (Caddy + LE TLS + dist/ + gzip + immutable cache).
+
 Backend v0.1 + v0.2.1 + v0.2.2-CLUES están todos cargados en producción (5 fuentes: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES, todas joinables por `cve_mun` 5-char). El analyzer (`web/`) ahora tiene **dos modos** sobre el mismo dataset:
 
 - **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints `/analytics/*` (national-treemap, sector-grade-matrix, municipios, top-sectors).
@@ -106,25 +108,28 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 
 Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 fallas, 32/32 entidades).
 
-| Métrica                           | Valor                 | Notas                                                                                                                                                |
-| --------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Filas en Supabase                 | **6,097,681**         | `SELECT COUNT(*) FROM establecimientos`                                                                                                              |
-| Cobertura PostGIS (`geom`)        | 6,097,681 (100%)      | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                                                                  |
-| CLEEs únicos                      | 6,097,681             | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                                                                            |
-| Entidades                         | 32 + 1 anomalía       | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                                                                   |
-| CDMX (`09`)                       | 460,866               | piloto inicial — coincide con conteo INEGI dentro del margen                                                                                         |
-| Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                            |
-| Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                            |
-| Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                     |
-| Endpoints API funcionales         | 12 (+ `/health`)      | 8 originales + 4 nuevos `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`                     |
-| Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                         |
-| Frontend analyzer (Map)           | MapLibre + deck.gl    | Carto Positron/Dark Matter basemap + MVT vector source (heatmap zoom<14, circles zoom≥11) + cluster centroids overlay + click-to-detail panel        |
-| Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                            |
-| Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                        |
-| Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                           |
-| CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                           |
-| CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                   |
-| CLUES (DGIS, ene-2026)            | 41,381 EN OPERACION   | `clues` materialized view — 39,946 (96.5%) geocodificadas, GIST sobre geom POINT(4326), btree sobre cve_mun + cve_loc + institucion + nivel_atencion |
+| Métrica                           | Valor                 | Notas                                                                                                                                                 |
+| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Filas en Supabase                 | **6,097,681**         | `SELECT COUNT(*) FROM establecimientos`                                                                                                               |
+| Cobertura PostGIS (`geom`)        | 6,097,681 (100%)      | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                                                                   |
+| CLEEs únicos                      | 6,097,681             | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                                                                             |
+| Entidades                         | 32 + 1 anomalía       | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                                                                    |
+| CDMX (`09`)                       | 460,866               | piloto inicial — coincide con conteo INEGI dentro del margen                                                                                          |
+| Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                             |
+| Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                             |
+| Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                      |
+| Endpoints API funcionales         | 12 (+ `/health`)      | 8 originales + 4 nuevos `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`                      |
+| Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                          |
+| Frontend analyzer (Map)           | MapLibre + deck.gl    | Carto Positron/Dark Matter basemap + MVT vector source (heatmap zoom<14, circles zoom≥11) + cluster centroids overlay + click-to-detail panel         |
+| Web bundle (production split)     | 487 + 467 KB gz       | `index-*.js` Locust + shared (487 KB gz) + `MapMode-*.js` lazy chunk (467 KB gz, only on `/map` navigation). Caddy serves with gzip + immutable cache |
+| Mat-views perf-backed             | 2 mat-views           | `mv_sector_grade_matrix` (13.7s→91ms) + `mv_national_treemap` (1.15s→88ms). DDL: `scripts/perf-matviews.sql`. Refresh after pipeline reload           |
+| Tests                             | 308 across 32 files   | 238 backend src + 38 backend scripts + 32 web. Vitest, mocked fetch + execFileSync, no live HTTP/Supabase                                             |
+| Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                             |
+| Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                         |
+| Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                            |
+| CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                            |
+| CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                    |
+| CLUES (DGIS, ene-2026)            | 41,381 EN OPERACION   | `clues` materialized view — 39,946 (96.5%) geocodificadas, GIST sobre geom POINT(4326), btree sobre cve_mun + cve_loc + institucion + nivel_atencion  |
 
 ---
 
