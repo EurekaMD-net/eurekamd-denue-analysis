@@ -162,7 +162,7 @@ API_KEY=<clave_para_api_interna>                 # Header X-Api-Key requerido en
 # Opcionales (con defaults)
 # API_PORT=3030                                  # puerto del servidor HTTP
 # SUPABASE_DB_CONTAINER=supabase-db              # contenedor Postgres
-# OUTPUT_DIR=./data/raw                          # destino de los JSON extraídos
+# OUTPUT_DIR=./data                              # raíz para artefactos del pipeline (lee scripts/pipeline.ts; scripts/extract.ts hardcodea ./data/raw)
 # STATE_DIR=./data/state                         # ubicación de pipeline-state.json
 ```
 
@@ -173,8 +173,13 @@ API_KEY=<clave_para_api_interna>                 # Header X-Api-Key requerido en
 ### Extracción de uno o varios estados
 
 ```bash
+# pipeline.ts (orquestador con checkpoint y carga a Supabase)  — flag plural
 npx tsx --env-file=.env scripts/pipeline.ts --estados=09
 npx tsx --env-file=.env scripts/pipeline.ts --estados=09,15,14
+
+# extract.ts (extractor crudo a JSON, sin carga a Supabase)    — flag singular
+npx tsx --env-file=.env scripts/extract.ts --estado=09
+npx tsx --env-file=.env scripts/extract.ts --estado=all --condicion=farmacia
 # 09 = CDMX, 15 = México, 14 = Jalisco. Ver tabla de claves INEGI.
 ```
 
@@ -244,7 +249,7 @@ La API INEGI pagina por `registro_inicio` + `registro_fin`. El extractor mantien
 
 ### Throttle global de API
 
-500ms entre requests por defecto (`DENUE_REQUEST_DELAY_MS`). Aumentar si la API INEGI devuelve 429.
+500ms entre requests por defecto, configurable vía el parámetro `delayMs` que el extractor pasa al cliente (`src/extractor/denue-client.ts`). Subir si la API INEGI devuelve 429.
 
 ### pageSize = 500
 
@@ -262,7 +267,7 @@ La API INEGI acepta `municipio` como string de 5 dígitos (`cve_ent` + `cve_mun`
 
 ### Mat-views: definidas, no aplicadas
 
-Los runners de Fase 4 (`src/analysis/`) emiten SQL `CREATE MATERIALIZED VIEW IF NOT EXISTS` para tres vistas:
+El DDL vive en `src/db/materialized-views.sql` y se aplica con `scripts/analyze.ts`. Los runners en `src/analysis/*.ts` solo _leen_ las vistas (vía PostgREST). Tres vistas definidas:
 
 - `mv_sector_summary` — agregados por sector (clase_actividad) y entidad
 - `mv_coverage` — conteo cargado por entidad + comparación contra INEGI autoritativo
