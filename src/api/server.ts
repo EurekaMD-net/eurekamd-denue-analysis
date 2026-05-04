@@ -15,6 +15,9 @@
  *   GET /entidades                             — dropdown source (P1)
  *   GET /sectors                               — dropdown source (P1)
  *   GET /tiles/:z/:x/:y.mvt?entidad=&sector=   — vector tile (P1, rate-limited)
+ *   GET /analytics/national-treemap            — 32-entidad join (P2 Locust)
+ *   GET /analytics/sector-grade-matrix         — SCIAN×IRS heatmap (P2 Locust)
+ *   GET /analytics/municipios?entidad=XX       — per-municipio joined view (P2 Locust)
  *
  * All routes except /health require X-Api-Key header matching config.apiKey.
  * /tiles is additionally rate-limited per IP (5 req/sec).
@@ -34,6 +37,12 @@ import { clustersHandler } from "./handlers/clusters.js";
 import { entidadesHandler } from "./handlers/entidades.js";
 import { sectorsHandler } from "./handlers/sectors.js";
 import { tilesHandler } from "./handlers/tiles.js";
+import {
+  municipiosAnalyticsHandler,
+  nationalTreemapHandler,
+  sectorGradeMatrixHandler,
+  topSectorsByEntidadHandler,
+} from "./handlers/analytics.js";
 
 export function createServer(config: ApiServerConfig): Hono {
   if (!config.supabaseUrl)
@@ -68,6 +77,7 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/entidades", auth);
   app.use("/sectors", auth);
   app.use("/tiles/*", auth);
+  app.use("/analytics/*", auth);
 
   // /tiles also gets a per-IP rate limit on top of auth.
   app.use("/tiles/*", makeRateLimitMiddleware());
@@ -80,6 +90,18 @@ export function createServer(config: ApiServerConfig): Hono {
   app.get("/entidades", (c) => entidadesHandler(c, config));
   app.get("/sectors", (c) => sectorsHandler(c, config));
   app.get("/tiles/:z/:x/:y", (c) => tilesHandler(c, config));
+  app.get("/analytics/national-treemap", (c) =>
+    nationalTreemapHandler(c, config),
+  );
+  app.get("/analytics/sector-grade-matrix", (c) =>
+    sectorGradeMatrixHandler(c, config),
+  );
+  app.get("/analytics/municipios", (c) =>
+    municipiosAnalyticsHandler(c, config),
+  );
+  app.get("/analytics/top-sectors", (c) =>
+    topSectorsByEntidadHandler(c, config),
+  );
 
   return app;
 }

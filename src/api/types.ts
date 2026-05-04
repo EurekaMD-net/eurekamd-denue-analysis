@@ -131,6 +131,69 @@ export interface SectorsResult {
 }
 
 // ---------------------------------------------------------------------------
+// Analytics endpoints (P2 — Locust mode joins DENUE × Censo × CONEVAL × CLUES)
+// ---------------------------------------------------------------------------
+
+export type IrsGrado =
+  | "Muy bajo"
+  | "Bajo"
+  | "Medio"
+  | "Alto"
+  | "Muy alto"
+  | "sin_dato";
+
+export interface NationalTreemapEntry {
+  /** 2-char zero-padded entidad clave */
+  entidad: string;
+  nombre: string;
+  establecimientos: number;
+  modal_irs_grado: IrsGrado;
+  pobreza_pct_promedio: number | null;
+}
+
+export interface NationalTreemapResult {
+  entidades: NationalTreemapEntry[];
+}
+
+export interface SectorGradeMatrixCell {
+  scian: string;
+  irs_grado: IrsGrado;
+  count: number;
+}
+
+export interface SectorGradeMatrixResult {
+  cells: SectorGradeMatrixCell[];
+}
+
+export interface MunicipioAnalyticsRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | null;
+  establecimientos: number;
+  farmacias: number;
+  unidades_clues: number;
+  pobreza_pct: number | null;
+  irs_grado: IrsGrado | null;
+  irs_indice: number | null;
+}
+
+export interface MunicipiosAnalyticsResult {
+  entidad: string;
+  municipios: MunicipioAnalyticsRow[];
+}
+
+export interface TopSectorRow {
+  scian: string;
+  name: string;
+  count: number;
+}
+
+export interface TopSectorsResult {
+  entidad: string;
+  sectors: TopSectorRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

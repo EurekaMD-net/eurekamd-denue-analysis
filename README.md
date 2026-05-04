@@ -6,9 +6,9 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ---
 
-## Versión actual: v0.2.2 — DENUE × Censo 2020 × CONEVAL × CLUES (parcial)
+## Versión actual: v0.3 P2 — Locust mode (analyzer frontend)
 
-v0.1 (analizador DENUE base) + v0.2.1 (Censo 2020 + CONEVAL Pobreza/IRS) + **v0.2.2 CLUES** (catálogo nacional de unidades médicas DGIS, 41,381 EN OPERACION con 96.5% geocodificadas) están todos cargados en producción. Las 5 fuentes comparten clave municipal `cve_mun` (5-char `CVE_ENT||CVE_MUN`); CLUES además expone `cve_loc` (9-char) y `geom POINT(4326)` para joins espaciales (`ST_DWithin`).
+Backend v0.1 + v0.2.1 + v0.2.2-CLUES están todos cargados en producción (5 fuentes: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES, todas joinables por `cve_mun` 5-char). **Locust mode** (analyzer frontend en `web/`) ahora consume las 5 fuentes con 5 charts ECharts: mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, y CLUES vs farmacias por 100k. 4 endpoints `/analytics/*` nuevos (national-treemap, sector-grade-matrix, municipios, top-sectors).
 
 CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (portales gated/slugs caducados, ver `docs/v0.2-status.md` § "What blocks v0.2.x from full closure"). Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
 
@@ -52,14 +52,15 @@ CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión    | Fuentes                         | Descripción                                                                              | Estado                                        | Docs                                                                |
-| ---------- | ------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
-| **v0.1**   | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN     | ✅ Done                                       | este README                                                         |
-| **v0.2.1** | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente         | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2** | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2   | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3** | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3**   | Modo Mapa                       | Frontend geoespacial: MapLibre + deck.gl sobre la API v0.2.x                             | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.4**   | Modo Locust                     | Visualización analítica: ECharts (barras, radar, scatter 3D). Paralelo a v0.3            | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión     | Fuentes                         | Descripción                                                                                    | Estado                                        | Docs                                                                |
+| ----------- | ------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
+| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN           | ✅ Done                                       | este README                                                         |
+| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente               | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2         | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado       | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
+| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*` | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P3** | Map mode (analyzer)             | Frontend geoespacial: MapLibre + deck.gl sobre `/tiles/:z/:x/:y.mvt`                           | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                   | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
@@ -111,7 +112,8 @@ Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 falla
 | Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                            |
 | Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                            |
 | Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                     |
-| Endpoints API funcionales         | 8 (+ `/health`)       | `/search`, `/establishment/:clee`, `/summary/sector/:scian`, `/summary/entidad/:clave`, `/clusters`, `/entidades`, `/sectors`, `/tiles/:z/:x/:y.mvt` |
+| Endpoints API funcionales         | 12 (+ `/health`)      | 8 originales + 4 nuevos `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`                     |
+| Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                         |
 | Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                            |
 | Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                        |
 | Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                           |
@@ -130,9 +132,9 @@ denue-data-analysis/
 │   ├── db/                 # loader.ts: upsert a Supabase + PostGIS geom
 │   ├── pipeline/           # Orquestador nacional reanudable
 │   ├── analysis/           # Runners de mat-views, clusters, coverage
-│   └── api/                # Hono HTTP server (Fase 5 + P1)
+│   └── api/                # Hono HTTP server (Fase 5 + P1 + v0.3 P2 analytics)
 │       ├── server.ts       # createServer factory (testeable)
-│       ├── handlers/       # /search, /establishment, /summary/*, /clusters, /entidades, /sectors, /tiles
+│       ├── handlers/       # /search, /establishment, /summary/*, /clusters, /entidades, /sectors, /tiles, /analytics/*
 │       └── middleware/     # auth (X-Api-Key), error, log, rate-limit
 ├── scripts/
 │   ├── extract.ts          # Extractor de un estado individual
@@ -145,7 +147,12 @@ denue-data-analysis/
 │   ├── load-censo.ts       # Cargar Censo 2020 ITER → censo_iter / censo_municipios (v0.2.1)
 │   ├── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
 │   └── load-clues.ts       # Cargar CLUES DGIS → clues_raw / clues mat-view + GIST (v0.2.2)
-├── web/                    # Analyzer frontend — Vite + React + Tailwind (P0 scaffold)
+├── web/                    # Analyzer frontend — Vite + React + Tailwind + ECharts
+│   └── src/
+│       ├── api/            # client.ts + types.ts (Zod) + queries.ts (TanStack hooks)
+│       ├── charts/         # 5 Locust charts + theme.ts + ChartCard wrapper
+│       ├── components/     # ApiKeyGate, FilterPanel, SearchBar, Layout, ErrorBoundary
+│       └── modes/          # LocustMode (charts), MapMode (P3, pendiente)
 ├── docs/
 │   ├── analyzer-plan-v1.md         # Plan sellado del frontend (v0.3+v0.4)
 │   ├── v0.2-status.md              # Hoja de estado del roadmap v0.2.x (sobrevive /compact)
