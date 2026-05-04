@@ -6,15 +6,17 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ---
 
-## Versión actual: v0.1 — DENUE Base
+## Versión actual: v0.2.1 — DENUE × Censo 2020 × CONEVAL (nivel municipal)
 
-El código en este repositorio corresponde a la **v0.1**: analizador DENUE base. Cubre extracción, carga, análisis y API queryable sobre datos DENUE en aislamiento.
+v0.1 (analizador DENUE base) + v0.2.1 (joins a Censo 2020 + CONEVAL Pobreza + CONEVAL IRS, todo a nivel municipio) están ambos cargados en producción. Las 4 fuentes comparten clave de unión `cve_mun` (5-char `CVE_ENT||CVE_MUN`).
 
-La integración de fuentes externas (Censo 2020, CONEVAL, CE 2024, CLUES, SESNSP, Datatur, SINAIS, ENOE) se documenta en la hoja de ruta de versiones futuras (ver sección **Hoja de Ruta** abajo).
+La hoja de ruta v0.2.2+ (CE 2024 + CLUES + SESNSP, después Datatur/SINAIS/ENOE/ENIGH) está documentada abajo. Estado completo en [docs/v0.2-status.md](docs/v0.2-status.md).
 
 ---
 
-## Estado del proyecto (v0.1)
+## Estado del proyecto
+
+### v0.1 (DENUE base) — ✅ Completo
 
 | Fase interna | Descripción                                                     | Estado        |
 | ------------ | --------------------------------------------------------------- | ------------- |
@@ -24,20 +26,32 @@ La integración de fuentes externas (Censo 2020, CONEVAL, CE 2024, CLUES, SESNSP
 | 4            | Pipeline de análisis y reportes (mat-views, clusters, coverage) | ✅ Completado |
 | 5            | API interna queryable (Hono, X-Api-Key auth)                    | ✅ Completado |
 
+### v0.2.1 (Censo 2020 + CONEVAL) — ✅ Cerrado a nivel municipal
+
+| Tier | Descripción                                                                                   | Estado                                                                    |
+| ---- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 1    | Backfill `area_geo` (CVE_MUN_5) + SCIAN ids (×5) desde el CLEE — desbloquea joins municipales | ✅ Completado                                                             |
+| 2    | Backfill `ageb` (CVEGEO 13-char) vía spatial join contra polígonos AGEB urbana del MGN 2020   | ✅ Completado                                                             |
+| 2.5  | Polígonos ENT/MUN/LOC/AGEB cargados a PostGIS (mapa base + futuros joins espaciales)          | ✅ Completado                                                             |
+| —    | Censo 2020 ITER: 195k filas × 286 cols + view `censo_municipios` (14 cols, pobtot/pea/etc.)   | ✅ Completado                                                             |
+| —    | CONEVAL Pobreza Municipal: % pobreza/extrema, vulnerabilidad, 6 carencias, línea de pobreza   | ✅ Completado                                                             |
+| —    | CONEVAL IRS Municipal: índice + grado + rezago educativo/salud/calidad-vivienda × 7           | ✅ Completado                                                             |
+| —    | AGEB-level Censo (RESAGEBURB) y rezago social AGEB                                            | ⏳ Pendiente — portal CONEVAL/INEGI cerrado, requiere asistencia operador |
+
 ---
 
 ## Hoja de Ruta — Versionado Semántico
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión    | Fuentes                         | Descripción                                                                              | Estimado | Docs                                                                |
-| ---------- | ------------------------------- | ---------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
-| **v0.1**   | DENUE                           | ✅ Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN  | ✅ Done  | este README                                                         |
-| **v0.2.1** | Censo 2020 + CONEVAL            | PSINDER, P60YMAS, IRS sintético, IVAF v1/v2. Join por `cve_mun` y `cve_ageb`             | 1-2 días | [fase-1-censo-coneval.md](docs/fase-1-censo-coneval.md)             |
-| **v0.2.2** | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2   | 2-3 días | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3** | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado | 1-2 días | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3**   | Modo Mapa                       | Frontend geoespacial: MapLibre + deck.gl sobre la API v0.2.x                             | 2-3 días | TBD                                                                 |
-| **v0.4**   | Modo Locust                     | Visualización analítica: ECharts (barras, radar, scatter 3D). Paralelo a v0.3            | 2-3 días | TBD                                                                 |
+| Versión    | Fuentes                         | Descripción                                                                              | Estado              | Docs                                                                |
+| ---------- | ------------------------------- | ---------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| **v0.1**   | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN     | ✅ Done             | este README                                                         |
+| **v0.2.1** | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente         | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2** | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2   | 📋 Queued           | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3** | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado | 📋 Queued           | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
+| **v0.3**   | Modo Mapa                       | Frontend geoespacial: MapLibre + deck.gl sobre la API v0.2.x                             | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.4**   | Modo Locust                     | Visualización analítica: ECharts (barras, radar, scatter 3D). Paralelo a v0.3            | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
@@ -60,6 +74,8 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 - Análisis de densidad, cobertura y clustering por SCIAN
 - Detección de hipersaturación y desiertos comerciales
 - API HTTP interna con autenticación por API key
+- **v0.2.1**: análisis cruzado DENUE × Censo 2020 × CONEVAL Pobreza × IRS — densidad comercial vs pobreza/educación/infraestructura por municipio
+- **v0.2.1**: tiles vectoriales (`ST_AsMVT`) listos para frontend de mapa
 
 ### Verticales analizados (v0.1)
 
@@ -76,17 +92,22 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 
 Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 fallas, 32/32 entidades).
 
-| Métrica                    | Valor            | Notas                                                                                               |
-| -------------------------- | ---------------- | --------------------------------------------------------------------------------------------------- |
-| Filas en Supabase          | **6,097,681**    | `SELECT COUNT(*) FROM establecimientos`                                                             |
-| Cobertura PostGIS (`geom`) | 6,097,681 (100%) | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                 |
-| CLEEs únicos               | 6,097,681        | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                           |
-| Entidades                  | 32 + 1 anomalía  | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                  |
-| CDMX (`09`)                | 460,866          | piloto inicial — coincide con conteo INEGI dentro del margen                                        |
-| Tlaxcala (`29`)            | 98,729           | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                           |
-| Colima (`06`)              | 41,765           | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                           |
-| Mat-views aplicadas        | 0                | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                    |
-| Endpoints API funcionales  | 5 (+ `/health`)  | `/search`, `/establishment/:clee`, `/summary/sector/:scian`, `/summary/entidad/:clave`, `/clusters` |
+| Métrica                           | Valor                 | Notas                                                                                                                                                |
+| --------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Filas en Supabase                 | **6,097,681**         | `SELECT COUNT(*) FROM establecimientos`                                                                                                              |
+| Cobertura PostGIS (`geom`)        | 6,097,681 (100%)      | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                                                                  |
+| CLEEs únicos                      | 6,097,681             | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                                                                            |
+| Entidades                         | 32 + 1 anomalía       | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                                                                   |
+| CDMX (`09`)                       | 460,866               | piloto inicial — coincide con conteo INEGI dentro del margen                                                                                         |
+| Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                            |
+| Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                            |
+| Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                     |
+| Endpoints API funcionales         | 8 (+ `/health`)       | `/search`, `/establishment/:clee`, `/summary/sector/:scian`, `/summary/entidad/:clave`, `/clusters`, `/entidades`, `/sectors`, `/tiles/:z/:x/:y.mvt` |
+| Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                            |
+| Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                        |
+| Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                           |
+| CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                           |
+| CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                   |
 
 ---
 
@@ -99,19 +120,24 @@ denue-data-analysis/
 │   ├── db/                 # loader.ts: upsert a Supabase + PostGIS geom
 │   ├── pipeline/           # Orquestador nacional reanudable
 │   ├── analysis/           # Runners de mat-views, clusters, coverage
-│   └── api/                # Hono HTTP server (Fase 5)
+│   └── api/                # Hono HTTP server (Fase 5 + P1)
 │       ├── server.ts       # createServer factory (testeable)
-│       ├── handlers/       # /search, /establishment, /summary/*, /clusters
-│       └── middleware/     # auth (X-Api-Key), error, log
+│       ├── handlers/       # /search, /establishment, /summary/*, /clusters, /entidades, /sectors, /tiles
+│       └── middleware/     # auth (X-Api-Key), error, log, rate-limit
 ├── scripts/
 │   ├── extract.ts          # Extractor de un estado individual
-│   ├── pipeline.ts         # Pipeline nacional reanudable
-│   ├── load.ts             # Carga manual JSON → Supabase
+│   ├── pipeline.ts         # Pipeline nacional reanudable (DENUE)
+│   ├── load.ts             # Carga manual JSON → Supabase (DENUE)
 │   ├── analyze.ts          # Correr runners de análisis
 │   ├── coverage.ts         # Reporte de cobertura por entidad
-│   └── serve.ts            # Arranca el servidor HTTP (Fase 5)
+│   ├── serve.ts            # Arranca el servidor HTTP (Fase 5)
+│   ├── backfill-ageb.ts    # Spatial join: rellena `ageb` con CVEGEO 13-char (Tier 2)
+│   ├── load-censo.ts       # Cargar Censo 2020 ITER → censo_iter / censo_municipios (v0.2.1)
+│   └── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
+├── web/                    # Analyzer frontend — Vite + React + Tailwind (P0 scaffold)
 ├── docs/
 │   ├── analyzer-plan-v1.md         # Plan sellado del frontend (v0.3+v0.4)
+│   ├── v0.2-status.md              # Hoja de estado del roadmap v0.2.x (sobrevive /compact)
 │   ├── plan-integracion-datos-mexico.md
 │   ├── fuentes-datos-gubernamentales.md
 │   ├── fase-1-censo-coneval.md
