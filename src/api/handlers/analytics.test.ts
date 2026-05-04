@@ -7,7 +7,11 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { createServer } from "../server.js";
-import { formatPsqlError } from "./analytics.js";
+import {
+  formatPsqlError,
+  isRelationMissingError,
+  runJsonQueryMvFirst,
+} from "./analytics.js";
 import type {
   ApiServerConfig,
   MunicipiosAnalyticsResult,
@@ -181,14 +185,37 @@ describe("GET /analytics/sector-grade-matrix", () => {
     expect(body.cells[0]?.irs_grado).toBe("sin_dato");
   });
 
-  it("uses LEFT JOIN against coneval_irs_municipal", async () => {
+  it("hits the mat-view first (mv_sector_grade_matrix)", async () => {
     mockExec.mockReturnValue("null");
     const app = createServer(CONFIG);
     await app.request("/analytics/sector-grade-matrix", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledTimes(1);
     const args = mockExec.mock.calls[0]?.[1] as string[];
     const sql = args[args.length - 1];
-    expect(sql).toMatch(/LEFT JOIN coneval_irs_municipal/);
-    expect(sql).toMatch(/sector_actividad_id/);
+    expect(sql).toMatch(/FROM mv_sector_grade_matrix/);
+  });
+
+  it("falls back to live LEFT JOIN when mat-view is missing", async () => {
+    // First call (mat-view) fails with relation-missing
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_sector_grade_matrix" does not exist',
+          ),
+        });
+      })
+      .mockReturnValueOnce("null"); // second call (live) returns empty
+    const app = createServer(CONFIG);
+    await app.request("/analytics/sector-grade-matrix", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    // Second call carries the live SQL with the LEFT JOIN that the
+    // mat-view materializes. Pinning this SQL shape so the live fallback
+    // never silently drifts away from the indexed sector_actividad_id path.
+    const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
+    const liveSql = liveArgs[liveArgs.length - 1];
+    expect(liveSql).toMatch(/LEFT JOIN coneval_irs_municipal/);
+    expect(liveSql).toMatch(/sector_actividad_id/);
   });
 });
 
@@ -469,6 +496,104 @@ describe("formatPsqlError", () => {
 
   it("stringifies non-Error throws (e.g., a thrown string)", () => {
     expect(formatPsqlError("naked string throw")).toBe("naked string throw");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isRelationMissingError + runJsonQueryMvFirst
+// (audit P3-perf 2026-05-04: mat-view-first read with live-SQL fallback)
+// ---------------------------------------------------------------------------
+
+describe("isRelationMissingError", () => {
+  it("matches the canonical 'relation X does not exist' phrase", () => {
+    const err = new Error(
+      'analytics query failed: Command failed | psql stderr: ERROR:  relation "mv_sector_grade_matrix" does not exist',
+    );
+    expect(isRelationMissingError(err)).toBe(true);
+  });
+
+  it("matches by SQLSTATE code 42P01 even without the phrase", () => {
+    const err = new Error("postgres failed with code 42P01");
+    expect(isRelationMissingError(err)).toBe(true);
+  });
+
+  it("inspects err.stderr Buffer when message is generic", () => {
+    const err = Object.assign(new Error("Command failed"), {
+      stderr: Buffer.from(
+        'ERROR:  relation "mv_national_treemap" does not exist\n',
+      ),
+    });
+    expect(isRelationMissingError(err)).toBe(true);
+  });
+
+  it("inspects err.stderr string when message is generic", () => {
+    const err = Object.assign(new Error("Command failed"), {
+      stderr: "ERROR:  relation does not exist\n",
+    });
+    expect(isRelationMissingError(err)).toBe(true);
+  });
+
+  it("returns false for unrelated errors (timeout, syntax, permission)", () => {
+    expect(isRelationMissingError(new Error("ETIMEDOUT"))).toBe(false);
+    expect(
+      isRelationMissingError(new Error("syntax error at or near 'FROM'")),
+    ).toBe(false);
+    expect(
+      isRelationMissingError(new Error("permission denied for table")),
+    ).toBe(false);
+  });
+
+  it("returns false for non-Error throws", () => {
+    expect(isRelationMissingError(undefined)).toBe(false);
+    expect(isRelationMissingError(null)).toBe(false);
+    expect(isRelationMissingError("string")).toBe(false);
+  });
+});
+
+describe("runJsonQueryMvFirst", () => {
+  beforeEach(() => mockExec.mockReset());
+
+  const mvSql = "SELECT * FROM mv_x;";
+  const liveSql = "WITH t AS (...) SELECT FROM t;";
+
+  it("succeeds via mat-view (one psql call, live SQL untouched)", () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([{ scian: "46", count: 1 }]));
+    const rows = runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
+    expect(rows).toEqual([{ scian: "46", count: 1 }]);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    expect(args[args.length - 1]).toBe(mvSql);
+  });
+
+  it("falls back to live SQL when mat-view is missing", () => {
+    // First call (mat-view) throws relation-missing
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_sector_grade_matrix" does not exist',
+          ),
+        });
+      })
+      // Second call (live SQL) returns the data
+      .mockReturnValueOnce(JSON.stringify([{ scian: "46", count: 999 }]));
+
+    const rows = runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
+    expect(rows).toEqual([{ scian: "46", count: 999 }]);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    // Verify second call was the live SQL
+    const liveCallArgs = mockExec.mock.calls[1]?.[1] as string[];
+    expect(liveCallArgs[liveCallArgs.length - 1]).toBe(liveSql);
+  });
+
+  it("propagates non-relation errors without retrying", () => {
+    mockExec.mockImplementationOnce(() => {
+      throw Object.assign(new Error("Command failed"), {
+        stderr: Buffer.from("ERROR:  syntax error at or near 'FROM'"),
+      });
+    });
+    expect(() => runJsonQueryMvFirst(CONFIG, mvSql, liveSql)).toThrow();
+    expect(mockExec).toHaveBeenCalledTimes(1);
   });
 });
 

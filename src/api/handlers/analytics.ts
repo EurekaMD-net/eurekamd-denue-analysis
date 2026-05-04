@@ -60,6 +60,36 @@ function normalizeGrado(g: string | null | undefined): IrsGrado {
 }
 
 /**
+ * Detect whether a postgres error is the "relation does not exist"
+ * fingerprint (psql code 42P01). Used by analytics handlers to fall
+ * back from a missing mat-view to the live aggregation. We test the
+ * combined message+stderr so it works regardless of which path the
+ * error text arrived through (formatPsqlError appends both).
+ *
+ * Audit hardening note: this is a substring check, not a code match —
+ * but `runJsonQuery` already wraps the throw in HttpError("postgres.error")
+ * so this helper only sees postgres-origin errors. Safe.
+ */
+export function isRelationMissingError(err: unknown): boolean {
+  if (err === null || err === undefined) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  // Guard .stderr lookup so primitive throws (string, number) don't
+  // throw "Cannot read properties of undefined".
+  const stderrField =
+    typeof err === "object" ? (err as { stderr?: unknown }).stderr : undefined;
+  const stderr =
+    typeof stderrField === "string"
+      ? stderrField
+      : stderrField instanceof Buffer
+        ? stderrField.toString("utf-8")
+        : "";
+  const haystack = `${msg}\n${stderr}`;
+  // psql may emit `relation "X" does not exist` (quoted name) OR rarely
+  // `relation does not exist` (schema-stripped). Allow zero chars between.
+  return /relation\b.*does not exist/i.test(haystack) || /42P01/.test(haystack);
+}
+
+/**
  * Format a thrown error into a 502-message-friendly string, surfacing
  * the spawned process's stderr when present. execFileSync attaches
  * stderr to the thrown Error as a Buffer; some non-Node runtimes ship
@@ -131,9 +161,45 @@ function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
   }
 }
 
+/**
+ * Mat-view-first read with graceful fallback to live aggregation.
+ *
+ * Tries the (typically 100ms) materialized-view SELECT. If the mat-view
+ * is missing (e.g., not yet refreshed after a schema reset), falls back
+ * to the live multi-CTE aggregation. Real postgres errors (timeout,
+ * permission, syntax) propagate as 502 unchanged.
+ *
+ * Audit P3-perf (2026-05-04): mv_sector_grade_matrix turns 13.7s scans
+ * into 91ms reads; mv_national_treemap takes 1.15s → 88ms. The fallback
+ * keeps the handlers working on a fresh DB before the operator runs the
+ * mat-view bootstrap.
+ */
+export function runJsonQueryMvFirst<T>(
+  config: ApiServerConfig,
+  mvSql: string,
+  liveSql: string,
+): T {
+  try {
+    return runJsonQuery<T>(config, mvSql);
+  } catch (err) {
+    if (isRelationMissingError(err)) {
+      return runJsonQuery<T>(config, liveSql);
+    }
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // /analytics/national-treemap
 // ---------------------------------------------------------------------------
+
+/** Mat-view read (~88ms). Falls back to NATIONAL_TREEMAP_SQL if absent. */
+const NATIONAL_TREEMAP_MV_SQL = `
+SELECT json_agg(row_to_json(t) ORDER BY t.entidad) FROM (
+  SELECT entidad, establecimientos, modal_irs_grado, pobreza_pct_promedio
+  FROM mv_national_treemap
+) t;
+`;
 
 const NATIONAL_TREEMAP_SQL = `
 WITH entidad_counts AS (
@@ -185,7 +251,11 @@ export async function nationalTreemapHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const rows = runJsonQuery<RawNationalRow[]>(config, NATIONAL_TREEMAP_SQL);
+  const rows = runJsonQueryMvFirst<RawNationalRow[]>(
+    config,
+    NATIONAL_TREEMAP_MV_SQL,
+    NATIONAL_TREEMAP_SQL,
+  );
   const result: NationalTreemapResult = {
     entidades: rows.map((r) => ({
       entidad: r.entidad,
@@ -204,6 +274,13 @@ export async function nationalTreemapHandler(
 // ---------------------------------------------------------------------------
 // /analytics/sector-grade-matrix
 // ---------------------------------------------------------------------------
+
+/** Mat-view read (~91ms). Falls back to SECTOR_GRADE_MATRIX_SQL if absent. */
+const SECTOR_GRADE_MATRIX_MV_SQL = `
+SELECT json_agg(row_to_json(t) ORDER BY t.scian, t.irs_grado) FROM (
+  SELECT scian, irs_grado, count FROM mv_sector_grade_matrix
+) t;
+`;
 
 const SECTOR_GRADE_MATRIX_SQL = `
 SELECT json_agg(row_to_json(t) ORDER BY t.scian, t.irs_grado) FROM (
@@ -228,7 +305,11 @@ export async function sectorGradeMatrixHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const rows = runJsonQuery<RawMatrixCell[]>(config, SECTOR_GRADE_MATRIX_SQL);
+  const rows = runJsonQueryMvFirst<RawMatrixCell[]>(
+    config,
+    SECTOR_GRADE_MATRIX_MV_SQL,
+    SECTOR_GRADE_MATRIX_SQL,
+  );
   const result: SectorGradeMatrixResult = {
     cells: rows.map((r) => ({
       scian: r.scian,

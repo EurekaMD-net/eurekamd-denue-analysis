@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import {
   createBrowserRouter,
   Navigate,
@@ -9,7 +9,24 @@ import { ApiKeyGate } from "./components/ApiKeyGate";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
 import { LocustMode } from "./modes/LocustMode";
-import { MapMode } from "./modes/MapMode";
+
+// MapMode pulls maplibre-gl + deck.gl (~1.5 MB JS). Lazy-loaded so the
+// default /locust landing doesn't pay the cost. Audit P3-perf D fix
+// (2026-05-04) — production build splits this into its own chunk;
+// in dev mode the import is a single fetch on /map navigation.
+const MapMode = lazy(() =>
+  import("./modes/MapMode").then((m) => ({ default: m.MapMode })),
+);
+
+function MapModeFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-slate-950">
+      <div className="font-mono text-xs text-slate-500">
+        cargando MapLibre + deck.gl…
+      </div>
+    </div>
+  );
+}
 
 const router = createBrowserRouter([
   {
@@ -18,7 +35,14 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/locust" replace /> },
       { path: "locust", element: <LocustMode /> },
-      { path: "map", element: <MapMode /> },
+      {
+        path: "map",
+        element: (
+          <Suspense fallback={<MapModeFallback />}>
+            <MapMode />
+          </Suspense>
+        ),
+      },
     ],
   },
 ]);
