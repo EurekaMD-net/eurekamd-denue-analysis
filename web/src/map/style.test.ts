@@ -42,9 +42,15 @@ describe("map/style", () => {
   });
 
   describe("tileSourceUrl", () => {
-    it("emits {z}/{x}/{y} placeholders for MapLibre to expand", () => {
+    it("emits an absolute URL with {z}/{x}/{y} placeholders for MapLibre to expand", () => {
       const url = tileSourceUrl({});
-      expect(url).toBe("/api/tiles/{z}/{x}/{y}");
+      // MapLibre's new Request(url) requires absolute URLs — relative
+      // paths throw "Failed to parse URL". The shape is
+      // <origin>/api/tiles/{z}/{x}/{y}; in jsdom the origin is
+      // http://localhost.
+      expect(url).toMatch(
+        /^https?:\/\/[^/]+\/api\/tiles\/\{z\}\/\{x\}\/\{y\}$/,
+      );
     });
 
     it("never URL-encodes the {z}/{x}/{y} placeholders", () => {
@@ -62,7 +68,10 @@ describe("map/style", () => {
 
     it("omits filters that are null or empty string", () => {
       const url = tileSourceUrl({ entidad: null, sector: "" });
-      expect(url).toBe("/api/tiles/{z}/{x}/{y}");
+      expect(url).toMatch(
+        /^https?:\/\/[^/]+\/api\/tiles\/\{z\}\/\{x\}\/\{y\}$/,
+      );
+      expect(url).not.toContain("?");
     });
 
     it("URL-encodes filter values defensively", () => {
@@ -76,6 +85,18 @@ describe("map/style", () => {
     it("does not emit api_key in the URL (header-injected separately)", () => {
       const url = tileSourceUrl({ entidad: "09", sector: "46" });
       expect(url).not.toMatch(/api[_-]?key/i);
+    });
+
+    it("returns absolute URL parsable by Request constructor", () => {
+      // The bug this regression test guards: MapLibre tiles 5.0+
+      // construct `new Request(url)` per fetch, which throws on relative
+      // URLs. Assert the URL parses cleanly in the URL constructor.
+      const url = tileSourceUrl({ entidad: "09", sector: "62" }).replace(
+        /\{z\}\/\{x\}\/\{y\}/,
+        "5/7/14",
+      );
+      expect(() => new URL(url)).not.toThrow();
+      expect(() => new Request(url)).not.toThrow();
     });
   });
 });

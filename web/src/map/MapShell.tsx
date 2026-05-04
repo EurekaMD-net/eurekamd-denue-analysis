@@ -94,8 +94,24 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
       // Audit W1 fix: short-circuit when no key is set so we don't
       // silently 401 every tile with an empty header. Audit S3 fix:
       // dropped redundant URL.includes("/api/tiles/") clause (subset).
+      // 2026-05-04 fix: tile URLs are now absolute (must be — MapLibre
+      // calls new Request(url)), so match by pathname rather than by
+      // prefix. Same-origin guard via window.location.origin so we
+      // don't accidentally inject the key into a third-party basemap
+      // CDN that happens to have /api/ in its path.
       transformRequest: (url, _resourceType) => {
-        if (!url.startsWith("/api/")) return { url };
+        let isOurApi = false;
+        try {
+          const parsed = new URL(url);
+          isOurApi =
+            parsed.origin === window.location.origin &&
+            parsed.pathname.startsWith("/api/");
+        } catch {
+          // Non-absolute URL — basemap relative paths or unusual MapLibre
+          // resource lookups. Pass through untouched.
+          isOurApi = false;
+        }
+        if (!isOurApi) return { url };
         if (!apiKey) {
           // No key = no point firing the request. Backend would 401
           // every tile and the user would see a blank map with no

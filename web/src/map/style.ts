@@ -38,6 +38,16 @@ export const DEFAULT_MAP_SECTOR = "62";
 /**
  * Builds the MVT tile source URL template for MapLibre.
  *
+ * MUST return an absolute URL. MapLibre internally calls
+ * `new Request(url)` to load tiles, and `Request`'s constructor rejects
+ * relative paths with "Failed to parse URL from ...". A previous
+ * version of this function returned `/api/tiles/...` (relative) which
+ * silently broke every tile fetch in production — the dev server's
+ * Vite proxy happened to mask the problem because requests were
+ * constructed against the page's origin somewhere upstream of MapLibre,
+ * but production via Caddy hit the real Request-constructor path and
+ * threw on every tile.
+ *
  * Filters are encoded as query string. {z}/{x}/{y} stay as MapLibre
  * placeholders that the renderer expands per-tile. The X-Api-Key
  * header is NOT in the URL — it's injected via MapLibre's
@@ -56,5 +66,12 @@ export function tileSourceUrl(filters: {
   if (filters.entidad) params.set("entidad", filters.entidad);
   if (filters.sector) params.set("sector", filters.sector);
   const qs = params.toString();
-  return `/api/tiles/{z}/{x}/{y}${qs ? `?${qs}` : ""}`;
+  // typeof window check keeps SSR/test environments from blowing up;
+  // in tests we fall back to a localhost origin which is fine for
+  // string-shape assertions (no real fetch happens).
+  const origin =
+    typeof window !== "undefined" && window.location
+      ? window.location.origin
+      : "http://localhost";
+  return `${origin}/api/tiles/{z}/{x}/{y}${qs ? `?${qs}` : ""}`;
 }
