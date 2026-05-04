@@ -4,14 +4,14 @@
  * Returns one entry per 2-digit SCIAN sector that actually appears in the
  * loaded data, with the official INEGI name + national row count.
  *
- * SCIAN derivation: SUBSTR(clee, 6, 2). The CLEE encoding places the
- * 6-digit SCIAN class at chars 6-11; the leading 2 chars are the
- * 2-digit sector. (Chars 3-5 are the municipio — never use those for
- * sector grouping.) See src/db/scian_2digit_names.json for the catalog.
+ * SCIAN source: the indexed `sector_actividad_id` column on
+ * `establecimientos` (backfilled from CLEE chars 6-7 by
+ * src/db/loader.ts:deriveScian). See src/db/scian_2digit_names.json
+ * for the human-readable catalog.
  *
  * Implementation: shells to docker exec psql for the GROUP BY since
- * PostgREST cannot express SUBSTR-based grouping. Same pattern as
- * src/analysis/cluster-by-sector.ts.
+ * PostgREST can't express GROUP-BY aggregates over a column without
+ * a server-side RPC. Same pattern as src/analysis/cluster-by-sector.ts.
  */
 
 import { execFileSync } from "node:child_process";
@@ -80,10 +80,14 @@ export async function sectorsHandler(
 async function fetchSectorCounts(
   config: ApiServerConfig,
 ): Promise<Array<[string, number]>> {
+  // sector_actividad_id is backfilled from CLEE chars 6-7 (see
+  // src/db/loader.ts:deriveScian). The btree idx_estab_sector index makes
+  // this GROUP BY fast — no SUBSTR scan needed.
   const sql =
     "SELECT json_agg(row_to_json(t)) FROM (" +
-    "  SELECT SUBSTR(clee, 6, 2) AS scian, COUNT(*)::bigint AS count" +
+    "  SELECT sector_actividad_id AS scian, COUNT(*)::bigint AS count" +
     "  FROM establecimientos" +
+    "  WHERE sector_actividad_id IS NOT NULL" +
     "  GROUP BY 1" +
     "  ORDER BY 1" +
     ") t;";

@@ -54,7 +54,8 @@ describe("GET /tiles/:z/:x/:y", () => {
     const sql = argList[argList.length - 1] ?? "";
     expect(sql).toMatch(/ST_TileEnvelope\(10, 512, 512\)/);
     expect(sql).toMatch(/entidad = '09'/);
-    expect(sql).toMatch(/SUBSTR\(clee, 6, 2\) = '46'/);
+    expect(sql).toMatch(/sector_actividad_id = '46'/);
+    expect(sql).not.toMatch(/SUBSTR\(clee/);
     // Uniform sample — never `ORDER BY clee` (skews to low entidades) —
     // see audit W3.
     expect(sql).toMatch(/ORDER BY hashtext\(clee\)/);

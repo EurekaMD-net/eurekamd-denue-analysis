@@ -73,9 +73,11 @@ describe("GET /sectors", () => {
     expect(argList).toContain("exec");
     expect(argList).toContain("test-supabase-db");
     expect(argList).toContain("psql");
-    // Last arg is the SQL — must reference the correct SCIAN offset (chars 6-7)
+    // Last arg is the SQL — must hit the indexed sector_actividad_id column
+    // (backfilled from CLEE chars 6-7). Never re-scan via SUBSTR.
     const sql = argList[argList.length - 1];
-    expect(sql).toMatch(/SUBSTR\(clee, 6, 2\)/);
+    expect(sql).toMatch(/sector_actividad_id/);
+    expect(sql).not.toMatch(/SUBSTR\(clee/);
   });
 
   it("returns empty array when DB returns null", async () => {

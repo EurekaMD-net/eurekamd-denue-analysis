@@ -15,7 +15,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
-import { loadRecords, type DenueRawRecord, type LoaderConfig } from "../../src/db/loader.js";
+import {
+  loadRecords,
+  type DenueRawRecord,
+  type LoaderConfig,
+} from "../../src/db/loader.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE_PATH = join(__dirname, "../fixtures/denue-real-09-sample.json");
@@ -53,13 +57,18 @@ describe("extractor → loader seam (real API fixture)", () => {
     const records = loadFixture();
     let capturedPayload: Array<Record<string, unknown>> = [];
 
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
-      capturedPayload = JSON.parse(opts.body as string) as Array<Record<string, unknown>>;
-      return Promise.resolve({
-        ok: true,
-        json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
-      });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedPayload = JSON.parse(opts.body as string) as Array<
+          Record<string, unknown>
+        >;
+        return Promise.resolve({
+          ok: true,
+          json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
+        });
+      }),
+    );
 
     const result = await loadRecords(records, LOADER_CONFIG);
 
@@ -92,18 +101,31 @@ describe("extractor → loader seam (real API fixture)", () => {
     const records = loadFixture();
     let capturedPayload: Array<Record<string, unknown>> = [];
 
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
-      capturedPayload = JSON.parse(opts.body as string) as Array<Record<string, unknown>>;
-      return Promise.resolve({
-        ok: true,
-        json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
-      });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedPayload = JSON.parse(opts.body as string) as Array<
+          Record<string, unknown>
+        >;
+        return Promise.resolve({
+          ok: true,
+          json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
+        });
+      }),
+    );
 
     return loadRecords(records, LOADER_CONFIG).then(() => {
       for (const row of capturedPayload) {
-        // CLASE_ACTIVIDAD_ID not present in real buscarEntidad response → null
-        expect(row["clase_actividad_id"]).toBeNull();
+        // CLASE_ACTIVIDAD_ID is absent in real buscarEntidad responses, BUT
+        // the loader's transform() now derives it from CLEE chars 6-11 to
+        // populate the SCIAN hierarchy. Each row should have a 6-digit
+        // numeric clase_actividad_id matching SUBSTR(CLEE, 6, 6).
+        const clee = row["clee"] as string;
+        const expected = clee.slice(5, 11);
+        expect(row["clase_actividad_id"]).toBe(expected);
+        expect(row["clase_actividad_id"]).toMatch(/^[0-9]{6}$/);
+        // And the 2-digit sector should also be derived from CLEE.
+        expect(row["sector_actividad_id"]).toBe(clee.slice(5, 7));
       }
     });
   });
@@ -117,13 +139,18 @@ describe("extractor → loader seam (real API fixture)", () => {
     }
 
     let capturedPayload: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
-      capturedPayload = JSON.parse(opts.body as string) as Array<Record<string, unknown>>;
-      return Promise.resolve({
-        ok: true,
-        json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
-      });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedPayload = JSON.parse(opts.body as string) as Array<
+          Record<string, unknown>
+        >;
+        return Promise.resolve({
+          ok: true,
+          json: async () => capturedPayload.map((_, i) => ({ id: i + 1 })),
+        });
+      }),
+    );
 
     return loadRecords(records, LOADER_CONFIG).then(() => {
       for (const row of capturedPayload) {

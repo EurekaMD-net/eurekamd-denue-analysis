@@ -3,15 +3,14 @@
  *
  * Returns: { scian, total_national, top_entidades: [{entidad, count}, ...] }
  *
- * SCIAN derivation: SUBSTR(clee, 6, 2). The CLEE encoding is
- *   <2:entidad><3:municipio><6:clase_actividad>... — the 2-digit SCIAN
- * sector lives at chars 6-7 of CLEE (the leading 2 of the 6-digit class).
+ * SCIAN source: indexed `sector_actividad_id` column on `establecimientos`
+ * (backfilled from CLEE chars 6-7 by src/db/loader.ts:deriveScian).
  *
  * NOTE on a pre-P1 bug fixed here: the prior implementation built a
  * PostgREST `clee=like.${entidad}${scian}*` filter, which matched CLEEs
  * by entidad + municipio-prefix (chars 3-4), not by SCIAN. Result: every
- * count for `/summary/sector/:scian` was wrong. Fixed by aggregating
- * directly via docker exec psql with `SUBSTR(clee, 6, 2) = '${scian}'`.
+ * count for `/summary/sector/:scian` was wrong. The indexed column makes
+ * that whole bug class impossible by construction.
  *
  * Implementation: shell to psql like sectors.ts / cluster-by-sector.ts.
  * One query returns the full per-entidad breakdown via json_agg.
@@ -61,11 +60,13 @@ async function fetchPerEntidadCounts(
 ): Promise<Array<{ entidad: string; count: number }>> {
   // scian is regex-validated (^[0-9]{2}$) BEFORE reaching here, so the
   // single-quote interpolation cannot escape into SQL.
+  // Uses sector_actividad_id (backfilled from CLEE chars 6-7) to hit the
+  // idx_estab_sector btree — much faster than a SUBSTR scan.
   const sql =
     "SELECT json_agg(row_to_json(t)) FROM (" +
     "  SELECT entidad, COUNT(*)::bigint AS count" +
     "  FROM establecimientos" +
-    `  WHERE SUBSTR(clee, 6, 2) = '${scian}'` +
+    `  WHERE sector_actividad_id = '${scian}'` +
     "  GROUP BY entidad" +
     "  ORDER BY entidad" +
     ") t;";

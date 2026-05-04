@@ -103,6 +103,25 @@ function extractEntidad(clee: string | undefined | null): string | null {
   return clee.slice(0, 2);
 }
 
+/**
+ * Derive a SCIAN code of `length` digits from CLEE chars 6..6+length.
+ * CLEE structure: <2:entidad><3:municipio><6:clase_actividad>... — so
+ * the SCIAN class is at chars 6-11 (1-indexed) i.e. slice(5, 5+length).
+ *
+ * BuscarEntidad doesn't return CLASE_ACTIVIDAD_ID/SECTOR_ACTIVIDAD_ID/etc.,
+ * so without this fallback every row stores NULL for the SCIAN hierarchy.
+ * Returns null if CLEE is too short or the slice isn't all digits.
+ */
+function deriveScian(
+  clee: string | undefined | null,
+  length: number,
+): string | null {
+  if (!clee || clee.length < 5 + length) return null;
+  const slice = clee.slice(5, 5 + length);
+  if (!/^[0-9]+$/.test(slice)) return null;
+  return slice;
+}
+
 /** Transforma un registro crudo DENUE en una fila normalizada */
 export function transform(raw: DenueRawRecord): EstablecimientoRow {
   return {
@@ -110,12 +129,16 @@ export function transform(raw: DenueRawRecord): EstablecimientoRow {
     denue_id: clean(raw.Id),
     nombre: clean(raw.Nombre),
     razon_social: clean(raw.Razon_social),
-    clase_actividad_id: clean(raw.CLASE_ACTIVIDAD_ID),
+    clase_actividad_id:
+      clean(raw.CLASE_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 6),
     clase_actividad: clean(raw.Clase_actividad),
-    sector_actividad_id: clean(raw.SECTOR_ACTIVIDAD_ID),
-    subsector_actividad_id: clean(raw.SUBSECTOR_ACTIVIDAD_ID),
-    rama_actividad_id: clean(raw.RAMA_ACTIVIDAD_ID),
-    subrama_actividad_id: clean(raw.SUBRAMA_ACTIVIDAD_ID),
+    sector_actividad_id:
+      clean(raw.SECTOR_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 2),
+    subsector_actividad_id:
+      clean(raw.SUBSECTOR_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 3),
+    rama_actividad_id: clean(raw.RAMA_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 4),
+    subrama_actividad_id:
+      clean(raw.SUBRAMA_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 5),
     estrato: clean(raw.Estrato),
     tipo_unidad: clean(raw.Tipo),
     tipo_vialidad: clean(raw.Tipo_vialidad),

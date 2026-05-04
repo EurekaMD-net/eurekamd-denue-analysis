@@ -85,7 +85,8 @@ describe("clusterBySector — psql interaction", () => {
     expect(cmd).toContain("docker exec test-supabase-db psql");
     expect(cmd).toContain("ST_ClusterKMeans");
     expect(cmd).toContain("entidad = '09'");
-    expect(cmd).toContain("SUBSTR(clee, 6, 2) = '46'");
+    expect(cmd).toContain("sector_actividad_id = '46'");
+    expect(cmd).not.toContain("SUBSTR(clee");
 
     expect(result).toHaveLength(1);
     expect(result[0]?.member_count).toBe(12);

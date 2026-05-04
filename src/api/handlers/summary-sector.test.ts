@@ -52,9 +52,11 @@ describe("GET /summary/sector/:scian", () => {
     expect(mockExec).toHaveBeenCalledOnce();
     const argList = mockExec.mock.calls[0]?.[1] as string[];
     const sql = argList[argList.length - 1] ?? "";
-    expect(sql).toMatch(/SUBSTR\(clee, 6, 2\) = '46'/);
-    // Ensure the buggy chars 3-4 pattern never reappears.
-    expect(sql).not.toMatch(/SUBSTR\(clee, 3, 2\)/);
+    // Hits the backfilled sector_actividad_id column (idx_estab_sector btree)
+    // — much faster than a SUBSTR scan, and the buggy chars 3-4 offset can
+    // never come back via this path.
+    expect(sql).toMatch(/sector_actividad_id = '46'/);
+    expect(sql).not.toMatch(/SUBSTR\(clee/);
   });
 
   it("returns 400 on invalid SCIAN (not 2 digits)", async () => {

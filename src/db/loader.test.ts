@@ -26,7 +26,7 @@ import {
 // (verified 2026-05-03, tests/fixtures/denue-real-09-sample.json).
 // Optional fields are included where needed by specific tests.
 const BASE_RECORD: DenueRawRecord = {
-  CLEE: "09012345678901234567890000U0",  // starts with "09" → entidad = "09"
+  CLEE: "09012345678901234567890000U0", // starts with "09" → entidad = "09"
   Id: "12345678",
   Nombre: "HOSPITAL GENERAL SUR",
   Razon_social: "SERVICIOS DE SALUD CDMX",
@@ -132,7 +132,10 @@ describe("transform()", () => {
   });
 
   it("parsea fecha ISO correctamente", () => {
-    const row = transform({ ...BASE_RECORD, Fecha_Alta: "2024-06-15T00:00:00" });
+    const row = transform({
+      ...BASE_RECORD,
+      Fecha_Alta: "2024-06-15T00:00:00",
+    });
     expect(row.fecha_alta).toBe("2024-06-15");
   });
 
@@ -144,6 +147,71 @@ describe("transform()", () => {
   it("area_geo mapeado correctamente", () => {
     const row = transform(BASE_RECORD);
     expect(row.area_geo).toBe("09012");
+  });
+
+  // ---------------------------------------------------------------------------
+  // SCIAN derivation from CLEE — covers BuscarEntidad which doesn't return
+  // CLASE_ACTIVIDAD_ID/SECTOR_ACTIVIDAD_ID/etc. The transform falls back to
+  // CLEE chars 6-11 (1-indexed) so the SCIAN hierarchy is never NULL.
+  // ---------------------------------------------------------------------------
+
+  it("deriva SCIAN ids del CLEE cuando los campos API están ausentes", () => {
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "06009461121001991000000000U0", // chars 6-11 = '461121'
+      // Drop all SCIAN id fields the API didn't return
+      CLASE_ACTIVIDAD_ID: undefined,
+      SECTOR_ACTIVIDAD_ID: undefined,
+      SUBSECTOR_ACTIVIDAD_ID: undefined,
+      RAMA_ACTIVIDAD_ID: undefined,
+      SUBRAMA_ACTIVIDAD_ID: undefined,
+    };
+    const row = transform(raw);
+    expect(row.clase_actividad_id).toBe("461121");
+    expect(row.sector_actividad_id).toBe("46");
+    expect(row.subsector_actividad_id).toBe("461");
+    expect(row.rama_actividad_id).toBe("4611");
+    expect(row.subrama_actividad_id).toBe("46112");
+  });
+
+  it("prefiere los campos API sobre la derivación cuando están presentes", () => {
+    // CLEE chars 6-11 = '345678' but API supplies '622111' — API wins.
+    const row = transform(BASE_RECORD);
+    expect(row.clase_actividad_id).toBe("622111");
+    expect(row.sector_actividad_id).toBe("62");
+  });
+
+  it("retorna null cuando CLEE es muy corto para derivar", () => {
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "0900", // only 4 chars — not enough for any SCIAN slice
+      CLASE_ACTIVIDAD_ID: undefined,
+      SECTOR_ACTIVIDAD_ID: undefined,
+      SUBSECTOR_ACTIVIDAD_ID: undefined,
+      RAMA_ACTIVIDAD_ID: undefined,
+      SUBRAMA_ACTIVIDAD_ID: undefined,
+    };
+    const row = transform(raw);
+    expect(row.clase_actividad_id).toBeNull();
+    expect(row.sector_actividad_id).toBeNull();
+    expect(row.subsector_actividad_id).toBeNull();
+    expect(row.rama_actividad_id).toBeNull();
+    expect(row.subrama_actividad_id).toBeNull();
+  });
+
+  it("retorna null cuando los chars 6-11 del CLEE no son numéricos", () => {
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "0900AB6X1121001991000000000U0", // chars 6-11 contain letters
+      CLASE_ACTIVIDAD_ID: undefined,
+      SECTOR_ACTIVIDAD_ID: undefined,
+      SUBSECTOR_ACTIVIDAD_ID: undefined,
+      RAMA_ACTIVIDAD_ID: undefined,
+      SUBRAMA_ACTIVIDAD_ID: undefined,
+    };
+    const row = transform(raw);
+    expect(row.sector_actividad_id).toBeNull();
+    expect(row.clase_actividad_id).toBeNull();
   });
 });
 
@@ -158,7 +226,11 @@ describe("readExtractorOutput()", () => {
   });
 
   afterEach(() => {
-    try { unlinkSync(tmpFile); } catch { /* ok */ }
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      /* ok */
+    }
   });
 
   it("lee un array de registros válido", () => {
@@ -194,10 +266,13 @@ describe("loadRecords()", () => {
 
   it("retorna inserted count igual al número de registros en respuesta exitosa", async () => {
     const fakeResponse = [{ id: 1 }, { id: 2 }];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => fakeResponse,
+      }),
+    );
 
     const result = await loadRecords([BASE_RECORD, BASE_RECORD], config);
     expect(result.inserted).toBe(2);
@@ -208,10 +283,13 @@ describe("loadRecords()", () => {
 
   it("raw_json llega como objeto (no string) en el payload enviado a fetch", async () => {
     let capturedBody: unknown;
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
-      capturedBody = JSON.parse(opts.body as string);
-      return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedBody = JSON.parse(opts.body as string);
+        return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+      }),
+    );
 
     await loadRecords([BASE_RECORD], config);
 
@@ -223,10 +301,13 @@ describe("loadRecords()", () => {
   });
 
   it("registra error si la API retorna !ok", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: false,
-      text: async () => "duplicate key value",
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        text: async () => "duplicate key value",
+      }),
+    );
 
     const result = await loadRecords([BASE_RECORD], config);
     expect(result.inserted).toBe(0);
@@ -251,10 +332,13 @@ describe("loadRecords()", () => {
 
   it("incluye headers correctos en la request", async () => {
     let capturedHeaders: Record<string, string> = {};
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
-      capturedHeaders = opts.headers as Record<string, string>;
-      return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedHeaders = opts.headers as Record<string, string>;
+        return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+      }),
+    );
 
     await loadRecords([BASE_RECORD], config);
 
@@ -265,10 +349,13 @@ describe("loadRecords()", () => {
 
   it("URL incluye ?on_conflict=clee para upsert correcto en PostgREST", async () => {
     let capturedUrl = "";
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: unknown, _opts: RequestInit) => {
-      capturedUrl = url as string;
-      return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: unknown, _opts: RequestInit) => {
+        capturedUrl = url as string;
+        return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+      }),
+    );
 
     await loadRecords([BASE_RECORD], config);
 
@@ -278,10 +365,13 @@ describe("loadRecords()", () => {
   });
 
   it("retorna durationMs > 0", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => [{ id: 1 }],
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [{ id: 1 }],
+      }),
+    );
 
     const result = await loadRecords([BASE_RECORD], config);
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
@@ -289,13 +379,19 @@ describe("loadRecords()", () => {
 
   it("continúa procesando batches aunque uno falle", async () => {
     let callCount = 0;
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ ok: false, text: async () => "error batch 1" });
-      }
-      return Promise.resolve({ ok: true, json: async () => [{ id: 2 }] });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.resolve({
+            ok: false,
+            text: async () => "error batch 1",
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [{ id: 2 }] });
+      }),
+    );
 
     const records = Array(20).fill(BASE_RECORD) as DenueRawRecord[];
     const result = await loadRecords(records, { ...config, batchSize: 10 });

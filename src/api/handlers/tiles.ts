@@ -6,7 +6,7 @@
  *
  * Optional query filters:
  *  - entidad — 2-digit clave (01-32)
- *  - sector  — 2-digit SCIAN derived from SUBSTR(clee, 6, 2)
+ *  - sector  — 2-digit SCIAN, filters on indexed `sector_actividad_id`
  *
  * Hard cap: TILE_FEATURE_CAP features per tile. Above that we sample
  * deterministically by ORDER BY clee LIMIT cap (clee has unique index,
@@ -121,7 +121,8 @@ async function buildTile(
   // are pre-validated integers or regex-bounded 2-char strings.
   const filters: string[] = [];
   if (p.entidad) filters.push(`AND entidad = '${p.entidad}'`);
-  if (p.sector) filters.push(`AND SUBSTR(clee, 6, 2) = '${p.sector}'`);
+  // sector_actividad_id is the backfilled, indexed copy of CLEE chars 6-7.
+  if (p.sector) filters.push(`AND sector_actividad_id = '${p.sector}'`);
   const filterClause = filters.join(" ");
 
   // bounds_3857 is the tile envelope in Web Mercator (3857) — used by
