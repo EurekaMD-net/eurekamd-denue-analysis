@@ -6,11 +6,11 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ---
 
-## Versión actual: v0.2.1 — DENUE × Censo 2020 × CONEVAL (nivel municipal)
+## Versión actual: v0.2.2 — DENUE × Censo 2020 × CONEVAL × CLUES (parcial)
 
-v0.1 (analizador DENUE base) + v0.2.1 (joins a Censo 2020 + CONEVAL Pobreza + CONEVAL IRS, todo a nivel municipio) están ambos cargados en producción. Las 4 fuentes comparten clave de unión `cve_mun` (5-char `CVE_ENT||CVE_MUN`).
+v0.1 (analizador DENUE base) + v0.2.1 (Censo 2020 + CONEVAL Pobreza/IRS) + **v0.2.2 CLUES** (catálogo nacional de unidades médicas DGIS, 41,381 EN OPERACION con 96.5% geocodificadas) están todos cargados en producción. Las 5 fuentes comparten clave municipal `cve_mun` (5-char `CVE_ENT||CVE_MUN`); CLUES además expone `cve_loc` (9-char) y `geom POINT(4326)` para joins espaciales (`ST_DWithin`).
 
-La hoja de ruta v0.2.2+ (CE 2024 + CLUES + SESNSP, después Datatur/SINAIS/ENOE/ENIGH) está documentada abajo. Estado completo en [docs/v0.2-status.md](docs/v0.2-status.md).
+CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (portales gated/slugs caducados, ver `docs/v0.2-status.md` § "What blocks v0.2.x from full closure"). Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
 
 ---
 
@@ -38,20 +38,28 @@ La hoja de ruta v0.2.2+ (CE 2024 + CLUES + SESNSP, después Datatur/SINAIS/ENOE/
 | —    | CONEVAL IRS Municipal: índice + grado + rezago educativo/salud/calidad-vivienda × 7           | ✅ Completado                                                             |
 | —    | AGEB-level Censo (RESAGEBURB) y rezago social AGEB                                            | ⏳ Pendiente — portal CONEVAL/INEGI cerrado, requiere asistencia operador |
 
+### v0.2.2 (CE 2024 + CLUES + SESNSP) — 🟡 Parcial
+
+| Sub | Descripción                                                                                                                                                                                                | Estado                                                                          |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| —   | **CLUES** (DGIS Catálogo Establecimientos de Salud, ene-2026): 63,708 raw → 41,381 EN OPERACION → 39,946 (96.5%) geocodificadas. `clues` materialized view con cve_mun + cve_loc + geom POINT(4326) + GIST | ✅ Completado                                                                   |
+| —   | **CE 2024** (Censo Económico INEGI): revenue/personal_ocupado/valor_agregado por SCIAN×municipio                                                                                                           | ⏳ Pendiente — portal SAIC/SPA gated, requiere ZIP URLs por estado del operador |
+| —   | **SESNSP** (Incidencia Delictiva mensual): robo_a_negocio, homicidio, extorsión por cve_mun                                                                                                                | ⏳ Pendiente — slugs gob.mx 404 (2026-05-04), requiere URL actual del operador  |
+
 ---
 
 ## Hoja de Ruta — Versionado Semántico
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión    | Fuentes                         | Descripción                                                                              | Estado              | Docs                                                                |
-| ---------- | ------------------------------- | ---------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
-| **v0.1**   | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN     | ✅ Done             | este README                                                         |
-| **v0.2.1** | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente         | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2** | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2   | 📋 Queued           | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3** | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado | 📋 Queued           | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3**   | Modo Mapa                       | Frontend geoespacial: MapLibre + deck.gl sobre la API v0.2.x                             | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.4**   | Modo Locust                     | Visualización analítica: ECharts (barras, radar, scatter 3D). Paralelo a v0.3            | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión    | Fuentes                         | Descripción                                                                              | Estado                                        | Docs                                                                |
+| ---------- | ------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
+| **v0.1**   | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN     | ✅ Done                                       | este README                                                         |
+| **v0.2.1** | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente         | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2** | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2   | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3** | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
+| **v0.3**   | Modo Mapa                       | Frontend geoespacial: MapLibre + deck.gl sobre la API v0.2.x                             | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.4**   | Modo Locust                     | Visualización analítica: ECharts (barras, radar, scatter 3D). Paralelo a v0.3            | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
@@ -76,6 +84,7 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 - API HTTP interna con autenticación por API key
 - **v0.2.1**: análisis cruzado DENUE × Censo 2020 × CONEVAL Pobreza × IRS — densidad comercial vs pobreza/educación/infraestructura por municipio
 - **v0.2.1**: tiles vectoriales (`ST_AsMVT`) listos para frontend de mapa
+- **v0.2.2**: proximidad espacial DENUE × CLUES — `ST_DWithin` para "farmacias dentro de 2km de una unidad médica pública" + ratios CLUES-por-100k para detectar desiertos de salud
 
 ### Verticales analizados (v0.1)
 
@@ -108,6 +117,7 @@ Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 falla
 | Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                           |
 | CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                           |
 | CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                   |
+| CLUES (DGIS, ene-2026)            | 41,381 EN OPERACION   | `clues` materialized view — 39,946 (96.5%) geocodificadas, GIST sobre geom POINT(4326), btree sobre cve_mun + cve_loc + institucion + nivel_atencion |
 
 ---
 
@@ -133,7 +143,8 @@ denue-data-analysis/
 │   ├── serve.ts            # Arranca el servidor HTTP (Fase 5)
 │   ├── backfill-ageb.ts    # Spatial join: rellena `ageb` con CVEGEO 13-char (Tier 2)
 │   ├── load-censo.ts       # Cargar Censo 2020 ITER → censo_iter / censo_municipios (v0.2.1)
-│   └── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
+│   ├── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
+│   └── load-clues.ts       # Cargar CLUES DGIS → clues_raw / clues mat-view + GIST (v0.2.2)
 ├── web/                    # Analyzer frontend — Vite + React + Tailwind (P0 scaffold)
 ├── docs/
 │   ├── analyzer-plan-v1.md         # Plan sellado del frontend (v0.3+v0.4)
