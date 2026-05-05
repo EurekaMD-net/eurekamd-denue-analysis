@@ -213,6 +213,80 @@ export function runJsonQueryMvFirst<T>(
 }
 
 // ---------------------------------------------------------------------------
+// resolveCurrentRiskAno — runtime resolver for the "latest fully-reported
+// year" used as the default `ano` in /analytics/risk-summary. Audit W5
+// long-term fix (2026-05-05): replaces the redeploy-coupled
+// `RISK_DEFAULT_CURRENT_ANO` constant with a value pulled from the data
+// at server start, so the rollover happens automatically when the
+// December load of next year lands.
+//
+// Strategy: query the live SESNSP table for the max year that has all
+// 12 months reported. The mat-view drops the `mes` column, so the
+// resolver bypasses it — this query runs once per process and is bounded
+// (~3ms with the cve_mun+ano btree). On any failure (DB unreachable,
+// table missing, malformed output, no fully-reported year exists) the
+// resolver falls back to the static constant `RISK_DEFAULT_CURRENT_ANO`,
+// so the service still starts and risk-summary still serves.
+//
+// "Fully reported" = COUNT(DISTINCT mes) = 12 across all municipios for
+// that year. Partial years (e.g. 2026 with only Q1 reported) intentionally
+// do NOT win — comparing partial 2026 vs full 2020 baseline produces
+// misleading change percentages. Operator can still pass `?ano=2026`
+// explicitly when they want partial-year data.
+// ---------------------------------------------------------------------------
+
+const CURRENT_RISK_ANO_LIVE_SQL = `
+SELECT json_build_array(MAX(ano)) FROM (
+  SELECT ano
+  FROM sesnsp_delitos_municipal
+  WHERE ano <= EXTRACT(YEAR FROM NOW())::int
+  GROUP BY ano
+  HAVING COUNT(DISTINCT mes) = 12
+) t;
+`;
+
+/**
+ * Resolve the "latest fully-reported year" for risk-summary defaults.
+ * Synchronous — uses the same execFileSync path as the handlers. Always
+ * returns a valid 4-digit year in `RISK_ANO_RE` range; never throws.
+ *
+ * Returns a discriminated result so the caller can log honestly: when
+ * the data and the static constant happen to coincide, the boot log
+ * still reflects which path produced the value.
+ *
+ * Caller (typically `scripts/serve.ts` at startup) stores `.ano` on
+ * `ApiServerConfig.currentRiskAno`. Handlers read that field with a
+ * fallback to `RISK_DEFAULT_CURRENT_ANO`, so a missed startup resolve
+ * (DB unavailable at boot) degrades gracefully to the static value rather
+ * than serving 502s on every risk-summary request.
+ */
+export function resolveCurrentRiskAno(config: ApiServerConfig): {
+  ano: number;
+  source: "data" | "fallback";
+} {
+  const fromLive = tryResolveAno(config, CURRENT_RISK_ANO_LIVE_SQL);
+  if (fromLive !== null) return { ano: fromLive, source: "data" };
+  return { ano: RISK_DEFAULT_CURRENT_ANO, source: "fallback" };
+}
+
+function tryResolveAno(config: ApiServerConfig, sql: string): number | null {
+  let raw: number[] | null;
+  try {
+    raw = runJsonQuery<number[] | null>(config, sql);
+  } catch {
+    // Caller decides whether to try the next source or fall through to the
+    // hardcoded constant — neither outcome should escalate to a thrown error.
+    return null;
+  }
+  const first = Array.isArray(raw) ? raw[0] : null;
+  if (typeof first !== "number") return null;
+  // Defense: never accept a year outside the regex bounds even if the data
+  // table somehow has a corrupt value. RISK_ANO_RE allows 2010-2039.
+  if (!Number.isInteger(first) || first < 2010 || first > 2039) return null;
+  return first;
+}
+
+// ---------------------------------------------------------------------------
 // /analytics/national-treemap
 // ---------------------------------------------------------------------------
 
@@ -662,7 +736,11 @@ export async function riskSummaryHandler(
   }
   const anoRaw = c.req.query("ano");
   const baselineRaw = c.req.query("baseline_ano");
-  const currentAno = parseAnoArg(anoRaw, RISK_DEFAULT_CURRENT_ANO, "ano");
+  // Prefer the resolver-set value (latest year present in SESNSP); fall back
+  // to the hardcoded constant for tests / cold-boot scenarios where the DB
+  // wasn't reachable at server start.
+  const defaultCurrentAno = config.currentRiskAno ?? RISK_DEFAULT_CURRENT_ANO;
+  const currentAno = parseAnoArg(anoRaw, defaultCurrentAno, "ano");
   const baselineAno = parseAnoArg(
     baselineRaw,
     RISK_DEFAULT_BASELINE_ANO,

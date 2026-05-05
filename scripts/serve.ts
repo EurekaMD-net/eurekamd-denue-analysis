@@ -18,7 +18,11 @@
 
 import { serve } from "@hono/node-server";
 import { createServer } from "../src/api/server.js";
-import type { ApiServerConfig } from "../src/api/types.js";
+import { resolveCurrentRiskAno } from "../src/api/handlers/analytics.js";
+import {
+  RISK_DEFAULT_CURRENT_ANO,
+  type ApiServerConfig,
+} from "../src/api/types.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -40,6 +44,23 @@ const port = parseInt(process.env["API_PORT"] ?? "3030", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`❌  API_PORT inválido: "${process.env["API_PORT"]}"`);
   process.exit(1);
+}
+
+// Resolve the "latest fully-reported year" from the data so
+// /analytics/risk-summary rolls over automatically when next year's
+// December SESNSP load lands. Resolver returns the static fallback if
+// the DB is unreachable at boot — service still starts, risk-summary
+// still serves.
+const resolved = resolveCurrentRiskAno(config);
+config.currentRiskAno = resolved.ano;
+if (resolved.source === "fallback") {
+  console.warn(
+    `⚠️  risk-summary current_ano resolver fell back to static ${RISK_DEFAULT_CURRENT_ANO} (DB unreachable or no fully-reported year exists)`,
+  );
+} else {
+  console.log(
+    `   risk-summary default current_ano resolved from data: ${resolved.ano}`,
+  );
 }
 
 const app = createServer(config);

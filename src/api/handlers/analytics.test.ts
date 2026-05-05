@@ -11,6 +11,7 @@ import { createServer } from "../server.js";
 import {
   formatPsqlError,
   isRelationMissingError,
+  resolveCurrentRiskAno,
   runJsonQueryMvFirst,
 } from "./analytics.js";
 import type {
@@ -851,6 +852,74 @@ describe("GET /analytics/risk-summary", () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("postgres.parse_error");
+  });
+
+  // Audit W5 (2026-05-05) long-term fix: handler honors config.currentRiskAno
+  // when set, so the risk-summary default ano follows the data instead of
+  // a redeploy-coupled constant.
+  it("uses config.currentRiskAno as the default when no ano arg is provided", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer({ ...CONFIG, currentRiskAno: 2026 });
+    const res = await app.request("/analytics/risk-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskSummaryResult;
+    expect(body.current_ano).toBe(2026);
+    // SQL composition should reflect the resolved year, not 2025.
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/ano = 2026/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCurrentRiskAno — runtime resolver for the latest reported year
+// ---------------------------------------------------------------------------
+
+describe("resolveCurrentRiskAno", () => {
+  it("returns the latest fully-reported year (12 months) from SESNSP", () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([2025]));
+    expect(resolveCurrentRiskAno(CONFIG)).toEqual({
+      ano: 2025,
+      source: "data",
+    });
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/FROM sesnsp_delitos_municipal\b/);
+    expect(sql).toMatch(/COUNT\(DISTINCT mes\) = 12/);
+  });
+
+  it("falls back on malformed output (DB error) — source=fallback", () => {
+    // Drives runJsonQuery down the parse_error throw branch, which
+    // tryResolveAno swallows. Avoids the vitest 4 throw-from-execFileSync
+    // unhandled-exception quirk noted at the top of this file.
+    mockExec.mockReturnValueOnce("not json at all");
+    expect(resolveCurrentRiskAno(CONFIG)).toEqual({
+      ano: 2025, // RISK_DEFAULT_CURRENT_ANO
+      source: "fallback",
+    });
+  });
+
+  it("falls back when no fully-reported year exists — source=fallback", () => {
+    // [null] — when no year has 12 months reported (fresh DB or partial-only).
+    mockExec.mockReturnValueOnce(JSON.stringify([null]));
+    expect(resolveCurrentRiskAno(CONFIG)).toEqual({
+      ano: 2025,
+      source: "fallback",
+    });
+  });
+
+  it("rejects out-of-range years (corrupt data) and falls back", () => {
+    // Defense: even if MAX(ano) returns 2099 due to a corrupt row, the
+    // resolver bounds-checks the value to RISK_ANO_RE's range (2010-2039)
+    // and falls through to the static constant.
+    mockExec.mockReturnValueOnce(JSON.stringify([2099]));
+    expect(resolveCurrentRiskAno(CONFIG)).toEqual({
+      ano: 2025,
+      source: "fallback",
+    });
   });
 });
 

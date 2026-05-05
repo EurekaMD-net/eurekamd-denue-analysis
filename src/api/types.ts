@@ -14,6 +14,13 @@ export interface ApiServerConfig {
   apiKey: string;
   /** Postgres docker container name for direct-SQL operations (clusters, ST_DWithin) */
   dbContainer: string;
+  /**
+   * Resolved at server start by `resolveCurrentRiskAno()` from
+   * `MAX(ano) FROM mv_delitos_municipal_yearly WHERE ano <= EXTRACT(YEAR
+   * FROM NOW())`. When omitted (e.g. tests, or DB query failed), handlers
+   * fall back to `RISK_DEFAULT_CURRENT_ANO`. Audit W5 long-term fix.
+   */
+  currentRiskAno?: number;
 }
 
 // Shared validation regexes — same bounds as src/analysis/cluster-by-sector.ts
@@ -211,15 +218,12 @@ export const RISK_ANO_RE = /^(20[1-3][0-9])$/;
 export const CVE_MUN_RE = /^(0[1-9]|[12][0-9]|3[0-2])[0-9]{3}$/;
 
 /**
- * Default "current year" for risk-summary comparisons. 2026 is partial (only
- * Q1 reported as of the loader run on 2026-05-05) so the rolling baseline
- * prefers the latest full year.
- *
- * TODO (audit W5, 2026-05-05): bump to 2026 once the operator confirms 2026
- * has at least Q3 reported (~Oct 2026), and to 2027 once that year closes.
- * Long-term: derive from `MAX(ano) FROM mv_delitos_municipal_yearly WHERE
- * ano <= EXTRACT(YEAR FROM NOW())` once at server start so this stops being
- * a redeploy-coupled constant.
+ * Hardcoded fallback for "current year" risk-summary comparisons. Used when
+ * `resolveCurrentRiskAno()` cannot reach the DB at server start (and in
+ * tests where no DB is wired up). Production reads `config.currentRiskAno`
+ * which is resolved from `MAX(ano) FROM mv_delitos_municipal_yearly WHERE
+ * ano <= EXTRACT(YEAR FROM NOW())`. Audit W5 (2026-05-05) closed by the
+ * runtime resolver; this constant remains as the airbag.
  */
 export const RISK_DEFAULT_CURRENT_ANO = 2025;
 /** Default lookback for the YoY-change column. 5 years covers the canonical
