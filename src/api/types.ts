@@ -556,6 +556,134 @@ export interface AgebFarmaciaOpportunityResult {
 }
 
 // ---------------------------------------------------------------------------
+// Generic opportunity engine (v0.2.5 — agnostic vertical targeting)
+//
+// v0.2.4 hard-coded `clase_actividad_id IN ('464111','464112')` for farmacias.
+// v0.2.5 generalizes by accepting comma-separated SCIAN codes at any level
+// (2/3/4/5/6 digits) and dispatching to the matching `*_actividad_id` column.
+// All codes within a single request must share the same length — mixing
+// `46,461` rejects at the handler boundary.
+// ---------------------------------------------------------------------------
+
+/**
+ * Single SCIAN code: 2-6 digits. Used per-element after the comma split.
+ * The `target_scian` parameter as a whole is validated by length-uniformity
+ * + per-element length in `parseTargetScian()`. We don't combine into a
+ * single regex because the same-length constraint is easier to express in
+ * code than in regex.
+ */
+export const SCIAN_CODE_RE = /^\d{2,6}$/;
+
+/** Comma-separated raw param shape — each component validated separately. */
+export const TARGET_SCIAN_LIST_RE = /^\d{2,6}(,\d{2,6})*$/;
+
+/** Max number of SCIAN codes accepted in a single `target_scian` param. */
+export const TARGET_SCIAN_MAX_CODES = 10;
+
+/** Default + cap for /analytics/opportunity-by-ageb. */
+export const OPPORTUNITY_AGEB_DEFAULT_LIMIT = 20;
+export const OPPORTUNITY_AGEB_MAX_LIMIT = 100;
+
+/** Default + cap for /analytics/opportunity-by-colonia. */
+export const OPPORTUNITY_COLONIA_DEFAULT_LIMIT = 50;
+export const OPPORTUNITY_COLONIA_MAX_LIMIT = 200;
+
+/** Default + cap for /analytics/colonias-by-municipio. */
+export const COLONIAS_DEFAULT_LIMIT = 50;
+export const COLONIAS_MAX_LIMIT = 200;
+
+/** SCIAN level labels — matches `establecimientos.{sector,subsector,rama,subrama,clase}_actividad_id`. */
+export type ScianLevel = "sector" | "subsector" | "rama" | "subrama" | "clase";
+
+/** order_by for /analytics/opportunity-by-ageb. */
+export const OPPORTUNITY_AGEB_ORDER_BY = [
+  "score",
+  "pobtot",
+  "target_count",
+  "total_estab",
+] as const;
+export type OpportunityAgebOrderBy = (typeof OPPORTUNITY_AGEB_ORDER_BY)[number];
+
+/** order_by for /analytics/opportunity-by-colonia. */
+export const OPPORTUNITY_COLONIA_ORDER_BY = [
+  "score",
+  "target_count",
+  "total_estab",
+  "colonia",
+] as const;
+export type OpportunityColoniaOrderBy =
+  (typeof OPPORTUNITY_COLONIA_ORDER_BY)[number];
+
+/** order_by for /analytics/colonias-by-municipio. */
+export const COLONIAS_ORDER_BY = ["num_establecimientos", "colonia"] as const;
+export type ColoniasOrderBy = (typeof COLONIAS_ORDER_BY)[number];
+
+export interface OpportunityByAgebRow {
+  cvegeo: string;
+  ambito: "Urbana" | "Rural" | null;
+  centroid_lat: number | null;
+  centroid_lon: number | null;
+  area_km2: number | null;
+  /** AGEB population from censo_ageb urbana 2020. null for rural AGEBs. */
+  pobtot: number | null;
+  /** Count of establecimientos in this AGEB matching the requested SCIAN target. */
+  target_count: number;
+  /** Total establecimientos in this AGEB (foot-traffic / market-activity proxy). */
+  total_estab: number;
+  /**
+   * Population per existing target competitor: `pobtot / NULLIF(target_count, 0)`.
+   * Higher = more underserved. NULL when pobtot is null/0 OR target_count is 0
+   * (greenfield AGEB — no existing competition; sort by `pobtot` to find these).
+   */
+  score: number | null;
+}
+
+export interface OpportunityByAgebResult {
+  cve_mun: string;
+  scian_level: ScianLevel;
+  target_scian: string[];
+  order_by: OpportunityAgebOrderBy;
+  total_returned: number;
+  agebs: OpportunityByAgebRow[];
+}
+
+export interface OpportunityByColoniaRow {
+  colonia: string;
+  /** Count of establecimientos in this colonia matching the SCIAN target. */
+  target_count: number;
+  /** Total establecimientos in this colonia. */
+  total_estab: number;
+  /**
+   * Activity-per-target proxy: `total_estab / NULLIF(target_count, 0)`.
+   * Higher = more market activity per existing target competitor. NULL when
+   * target_count is 0 (greenfield colonia — sort by `total_estab` to surface).
+   * Less robust than AGEB-level score because there's no population denominator.
+   */
+  score: number | null;
+}
+
+export interface OpportunityByColoniaResult {
+  cve_mun: string;
+  scian_level: ScianLevel;
+  target_scian: string[];
+  order_by: OpportunityColoniaOrderBy;
+  total_returned: number;
+  colonias: OpportunityByColoniaRow[];
+}
+
+export interface ColoniasByMunicipioRow {
+  colonia: string;
+  num_establecimientos: number;
+}
+
+export interface ColoniasByMunicipioResult {
+  cve_mun: string;
+  order_by: ColoniasOrderBy;
+  total_returned: number;
+  colonias: ColoniasByMunicipioRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

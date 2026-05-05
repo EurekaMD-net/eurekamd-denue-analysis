@@ -20,10 +20,13 @@ import type {
   AgebFarmaciaOpportunityResult,
   AgebsByMunicipioResult,
   ApiServerConfig,
+  ColoniasByMunicipioResult,
   MortalitySummaryResult,
   MortalityTrendResult,
   MunicipiosAnalyticsResult,
   NationalTreemapResult,
+  OpportunityByAgebResult,
+  OpportunityByColoniaResult,
   RiskSummaryResult,
   RiskTrendResult,
   SectorGradeMatrixResult,
@@ -2284,6 +2287,433 @@ describe("AGEB endpoints — SQL-injection contract", () => {
     const res = await app.request(
       "/analytics/ageb-farmacia-opportunity?cve_mun=21114&limit=" +
         encodeURIComponent("10);DROP TABLE--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.5 — vertical-agnostic opportunity engine
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/opportunity-by-ageb (v0.2.5)", () => {
+  it("rejects missing target_scian", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing cve_mun even if target_scian is set", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?target_scian=464111",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects mixed-length target_scian (3 + 6 digits)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=461,464111",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/misma longitud/);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects more than 10 SCIAN codes", async () => {
+    const tooMany = Array.from({ length: 11 }, (_, i) =>
+      String(46_4111 + i),
+    ).join(",");
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      `/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=${tooMany}`,
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects target_scian with letters or spaces (SQL-injection guard)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=" +
+        encodeURIComponent("464111';--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects bad order_by", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464111&order_by=banana",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("dispatches 6-digit code to clase_actividad_id column", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464111,464112",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("clase_actividad_id IN ('464111','464112')");
+    // Defensive: must NOT mention the wrong column
+    expect(sql).not.toContain("sector_actividad_id IN");
+  });
+
+  it("dispatches 2-digit code to sector_actividad_id column", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=46",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("sector_actividad_id IN ('46')");
+  });
+
+  it("dispatches 3-digit code to subsector_actividad_id column", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("subsector_actividad_id IN ('464')");
+  });
+
+  it("dispatches 4-digit code to rama_actividad_id column", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=4641",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("rama_actividad_id IN ('4641')");
+  });
+
+  it("dispatches 5-digit code to subrama_actividad_id column", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=46411",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("subrama_actividad_id IN ('46411')");
+  });
+
+  it("returns ranked AGEBs with score = pobtot / target_count + numeric coercion", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "0901400015214",
+          ambito: "Urbana",
+          centroid_lat: "19.36",
+          centroid_lon: "-99.07",
+          area_km2: "0.34",
+          pobtot: "5000",
+          target_count: "2",
+          total_estab: "180",
+          score: "2500.00",
+        },
+        {
+          cvegeo: "0901400015301",
+          ambito: "Urbana",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: "0.42",
+          pobtot: "3000",
+          target_count: "0", // greenfield → score null
+          total_estab: "120",
+          score: null,
+        },
+        {
+          cvegeo: "09014000153A1",
+          ambito: "Rural",
+          centroid_lat: "19.40",
+          centroid_lon: "-99.10",
+          area_km2: "1.20",
+          pobtot: null, // not in censo_ageb urbana
+          target_count: "1",
+          total_estab: "5",
+          score: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464111,464112",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpportunityByAgebResult;
+    expect(body.cve_mun).toBe("09014");
+    expect(body.scian_level).toBe("clase");
+    expect(body.target_scian).toEqual(["464111", "464112"]);
+    expect(body.order_by).toBe("score");
+    expect(body.total_returned).toBe(3);
+    expect(body.agebs[0]).toMatchObject({
+      cvegeo: "0901400015214",
+      pobtot: 5000,
+      target_count: 2,
+      total_estab: 180,
+      score: 2500,
+    });
+    expect(body.agebs[1].score).toBeNull();
+    expect(body.agebs[1].target_count).toBe(0);
+    expect(body.agebs[2].pobtot).toBeNull();
+    expect(body.agebs[2].score).toBeNull();
+  });
+
+  it("respects limit cap (101 → 400)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464111&limit=101",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("emits LEFT JOIN to censo_ageb (population denominator)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09014&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("LEFT JOIN censo_ageb cab");
+    expect(sql).toContain("cab.pobtot");
+    expect(sql).toMatch(/CASE\s+WHEN cab\.pobtot IS NULL OR cab\.pobtot = 0/);
+    expect(sql).toMatch(/WHEN COALESCE\(t\.cnt, 0\) = 0 THEN NULL/);
+  });
+});
+
+describe("GET /analytics/opportunity-by-colonia (v0.2.5)", () => {
+  it("rejects missing target_scian", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-colonia?cve_mun=09014",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("uses r.-qualified column refs in outer json_agg ORDER BY (production-bug regression)", async () => {
+    // 2026-05-05 production hit: unqualified `total_estab` / `target_count`
+    // in the OUTER json_agg ORDER BY ran against the subquery alias `r` and
+    // Postgres failed with "column total_estab does not exist". Unit tests
+    // mocked psql output so they passed. Lock the qualifier for every
+    // order_by branch that references a derived column.
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+
+    for (const orderBy of [
+      "score",
+      "target_count",
+      "total_estab",
+      "colonia",
+    ] as const) {
+      mockExec.mockClear();
+      mockExec.mockReturnValue(JSON.stringify([]));
+      await app.request(
+        `/analytics/opportunity-by-colonia?cve_mun=09014&target_scian=464111&order_by=${orderBy}`,
+        { headers: AUTH },
+      );
+      const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+      const sql = args?.[args.length - 1] ?? "";
+      // Extract the line carrying the OUTER json_agg ORDER BY clause.
+      const outerLine = sql
+        .split("\n")
+        .find((line) => line.includes("json_agg(row_to_json(r) ORDER BY"));
+      expect(outerLine, `order_by=${orderBy}`).toBeDefined();
+      if (orderBy === "score") {
+        expect(outerLine).toContain("r.total_estab");
+        expect(outerLine).toContain("r.target_count");
+      } else {
+        expect(outerLine).toContain(`r.${orderBy}`);
+      }
+    }
+  });
+
+  it("normalizes colonia case via UPPER+TRIM in SQL (collapse spelling drift)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-colonia?cve_mun=09014&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("UPPER(TRIM(colonia))");
+    expect(sql).toContain("GROUP BY UPPER(TRIM(colonia))");
+    // Excludes empty/null colonia rows
+    expect(sql).toContain("colonia IS NOT NULL");
+    expect(sql).toContain("TRIM(colonia) != ''");
+  });
+
+  it("returns top colonias with score = total_estab / target_count + null on greenfield", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          colonia: "ROMA NORTE",
+          target_count: "3",
+          total_estab: "250",
+          score: "83.33",
+        },
+        {
+          colonia: "POLANCO",
+          target_count: "0", // greenfield
+          total_estab: "180",
+          score: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-colonia?cve_mun=09014&target_scian=464111&order_by=score",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpportunityByColoniaResult;
+    expect(body.cve_mun).toBe("09014");
+    expect(body.scian_level).toBe("clase");
+    expect(body.total_returned).toBe(2);
+    expect(body.colonias[0]).toMatchObject({
+      colonia: "ROMA NORTE",
+      target_count: 3,
+      total_estab: 250,
+      score: 83.33,
+    });
+    expect(body.colonias[1].score).toBeNull();
+    expect(body.colonias[1].target_count).toBe(0);
+  });
+
+  it("filters out null-colonia rows from the response (DB hygiene)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          colonia: "CENTRO",
+          target_count: "2",
+          total_estab: "60",
+          score: "30",
+        },
+        // a row with null colonia shouldn't reach this layer (SQL excludes
+        // them) but if it did we'd drop it instead of crashing
+        { colonia: null, target_count: "1", total_estab: "10", score: "10" },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-colonia?cve_mun=09014&target_scian=464111",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpportunityByColoniaResult;
+    expect(body.total_returned).toBe(1);
+    expect(body.colonias).toHaveLength(1);
+    expect(body.colonias[0].colonia).toBe("CENTRO");
+  });
+
+  it("respects MAX_LIMIT cap (201 → 400)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-colonia?cve_mun=09014&target_scian=464111&limit=201",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /analytics/colonias-by-municipio (v0.2.5)", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/colonias-by-municipio", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects bad order_by", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-municipio?cve_mun=09014&order_by=score",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("returns colonias sorted by num_establecimientos by default", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        { colonia: "DEL VALLE CENTRO", num_establecimientos: "920" },
+        { colonia: "ROMA NORTE", num_establecimientos: "445" },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-municipio?cve_mun=09014",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ColoniasByMunicipioResult;
+    expect(body.cve_mun).toBe("09014");
+    expect(body.order_by).toBe("num_establecimientos");
+    expect(body.total_returned).toBe(2);
+    expect(body.colonias[0]).toMatchObject({
+      colonia: "DEL VALLE CENTRO",
+      num_establecimientos: 920,
+    });
+  });
+
+  it("emits UPPER+TRIM in SQL for casing-fold + excludes null/empty colonia", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/colonias-by-municipio?cve_mun=09014", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("UPPER(TRIM(colonia))");
+    expect(sql).toContain("colonia IS NOT NULL");
+    expect(sql).toContain("TRIM(colonia) != ''");
+  });
+
+  it("respects MAX_LIMIT cap (201 → 400)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-municipio?cve_mun=09014&limit=201",
       { headers: AUTH },
     );
     expect(res.status).toBe(400);

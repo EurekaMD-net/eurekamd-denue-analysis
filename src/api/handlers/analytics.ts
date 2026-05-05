@@ -55,25 +55,44 @@ import {
   AGEBS_DEFAULT_LIMIT,
   AGEBS_MAX_LIMIT,
   AGEBS_ORDER_BY,
+  COLONIAS_DEFAULT_LIMIT,
+  COLONIAS_MAX_LIMIT,
+  COLONIAS_ORDER_BY,
   CVE_MUN_RE,
   CVEGEO_RE,
   ENTIDAD_RE,
   MORTALITY_DEFAULT_CURRENT_ANO,
+  OPPORTUNITY_AGEB_DEFAULT_LIMIT,
+  OPPORTUNITY_AGEB_MAX_LIMIT,
+  OPPORTUNITY_AGEB_ORDER_BY,
+  OPPORTUNITY_COLONIA_DEFAULT_LIMIT,
+  OPPORTUNITY_COLONIA_MAX_LIMIT,
+  OPPORTUNITY_COLONIA_ORDER_BY,
   RISK_ANO_RE,
   RISK_DEFAULT_BASELINE_ANO,
   RISK_DEFAULT_CURRENT_ANO,
+  SCIAN_CODE_RE,
+  TARGET_SCIAN_LIST_RE,
+  TARGET_SCIAN_MAX_CODES,
   type AgebDetailResult,
   type AgebFarmaciaOpportunityResult,
   type AgebsByMunicipioResult,
   type AgebsOrderBy,
   type ApiServerConfig,
+  type ColoniasByMunicipioResult,
+  type ColoniasOrderBy,
   type IrsGrado,
   type MortalitySummaryResult,
   type MortalityTrendResult,
   type MunicipiosAnalyticsResult,
   type NationalTreemapResult,
+  type OpportunityAgebOrderBy,
+  type OpportunityByAgebResult,
+  type OpportunityByColoniaResult,
+  type OpportunityColoniaOrderBy,
   type RiskSummaryResult,
   type RiskTrendResult,
+  type ScianLevel,
   type SectorGradeMatrixResult,
   type StateCalibratorsResult,
   type StateCalibratorsRow,
@@ -2100,6 +2119,533 @@ export async function agebFarmaciaOpportunityHandler(
       population: r.population == null ? null : Number(r.population),
       score_per_1k: r.score_per_1k == null ? null : Number(r.score_per_1k),
     })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ===========================================================================
+// v0.2.5 — Generic opportunity engine (vertical-agnostic)
+//
+// Generalizes v0.2.4's farmacia-specific opportunity scoring. Operator passes
+// `target_scian` (comma-separated SCIAN codes, all same length 2-6) and the
+// handler dispatches to the matching `*_actividad_id` column.
+//
+// Semantic difference vs v0.2.4 ageb-farmacia-opportunity:
+//   - target_count / total_estab / pobtot are exposed RAW for the operator
+//     to interpret. The default `score` is `pobtot / NULLIF(target_count, 0)`
+//     (population per existing competitor — higher = more underserved).
+//   - No CLUES weight (v0.2.4-only signal — health-vertical specific). Verticals
+//     that want CLUES proximity still use the farmacia endpoint.
+//   - `score` is NULL when target_count = 0 (greenfield — sort by pobtot to find).
+// ===========================================================================
+
+/**
+ * Parse + validate the comma-separated `target_scian` query param.
+ *
+ * Rules enforced (exhaustive — every other validation site relies on this):
+ *   1. List-shape regex: only digits + commas, no whitespace, no empty parts.
+ *   2. ≤ TARGET_SCIAN_MAX_CODES (10) elements after the split.
+ *   3. Each element is 2-6 digits.
+ *   4. ALL elements share the same length within a single call. Mixed
+ *      lengths reject because the dispatch column depends on length.
+ *
+ * Returns the parsed codes plus the SCIAN level (column suffix used in SQL).
+ * Throws HttpError(400) on any rule violation.
+ *
+ * Why same-length: the SCIAN hierarchy is `46 / 461 / 4611 / 46111 / 461110`
+ * — each prefix is a different column in `establecimientos`. Mixing levels
+ * would require multiple `OR` clauses across columns, which is solvable but
+ * doubles the test surface and complicates index selection. v0.2.5 punts.
+ */
+function parseTargetScian(raw: string | undefined): {
+  codes: string[];
+  level: ScianLevel;
+  column: string;
+} {
+  if (!raw) {
+    throw new HttpError(
+      `target_scian es requerido. Pasa una o más claves SCIAN separadas por coma (mismo nivel, p.ej. "464111,464112").`,
+      400,
+      "validation.target_scian",
+    );
+  }
+  if (!TARGET_SCIAN_LIST_RE.test(raw)) {
+    throw new HttpError(
+      `target_scian inválido "${raw}". Debe ser dígitos separados por coma, sin espacios.`,
+      400,
+      "validation.target_scian",
+    );
+  }
+  const codes = raw.split(",");
+  if (codes.length > TARGET_SCIAN_MAX_CODES) {
+    throw new HttpError(
+      `target_scian acepta máximo ${TARGET_SCIAN_MAX_CODES} claves; recibí ${codes.length}.`,
+      400,
+      "validation.target_scian",
+    );
+  }
+  for (const code of codes) {
+    if (!SCIAN_CODE_RE.test(code)) {
+      throw new HttpError(
+        `target_scian: clave "${code}" inválida. Cada elemento debe ser 2-6 dígitos.`,
+        400,
+        "validation.target_scian",
+      );
+    }
+  }
+  const len = codes[0].length;
+  for (const code of codes) {
+    if (code.length !== len) {
+      throw new HttpError(
+        `target_scian: todas las claves deben tener la misma longitud. Mezclaste ${len} y ${code.length} dígitos.`,
+        400,
+        "validation.target_scian",
+      );
+    }
+  }
+  // Length → column dispatch. SCIAN hierarchy in establecimientos.
+  let level: ScianLevel;
+  let column: string;
+  switch (len) {
+    case 2:
+      level = "sector";
+      column = "sector_actividad_id";
+      break;
+    case 3:
+      level = "subsector";
+      column = "subsector_actividad_id";
+      break;
+    case 4:
+      level = "rama";
+      column = "rama_actividad_id";
+      break;
+    case 5:
+      level = "subrama";
+      column = "subrama_actividad_id";
+      break;
+    case 6:
+      level = "clase";
+      column = "clase_actividad_id";
+      break;
+    default:
+      // Unreachable given SCIAN_CODE_RE — defensive only.
+      throw new HttpError(
+        `target_scian: longitud ${len} no soportada (esperaba 2-6).`,
+        400,
+        "validation.target_scian",
+      );
+  }
+  return { codes, level, column };
+}
+
+/**
+ * Validate + parse the limit param against the per-endpoint default/max.
+ * Returns the resolved limit. Throws HttpError(400) on bad input.
+ */
+function parseLimit(
+  raw: string | undefined,
+  defaultLimit: number,
+  maxLimit: number,
+): number {
+  if (raw === undefined) return defaultLimit;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxLimit) {
+    throw new HttpError(
+      `limit inválido "${raw}". Debe ser entero entre 1 y ${maxLimit}.`,
+      400,
+      "validation.limit",
+    );
+  }
+  return parsed;
+}
+
+interface RawOpportunityAgebRow {
+  cvegeo: string;
+  ambito: string | null;
+  centroid_lat: string | number | null;
+  centroid_lon: string | number | null;
+  area_km2: string | number | null;
+  pobtot: string | number | null;
+  target_count: string | number | null;
+  total_estab: string | number | null;
+  score: string | number | null;
+}
+
+function opportunityByAgebSql(
+  cveMun: string,
+  scianColumn: string,
+  scianCodes: string[],
+  orderBy: OpportunityAgebOrderBy,
+  limit: number,
+): string {
+  // Validation upstream guarantees `scianColumn` is one of 5 known columns
+  // and `scianCodes` are all `\d{2,6}`. We still defense-in-depth quote them
+  // as SQL string literals (numeric SCIAN codes are stored as TEXT in DENUE
+  // — '46' lexicographically ≠ 46 the int).
+  const inList = scianCodes.map((c) => `'${c}'`).join(",");
+  // qa-audit W1 (2026-05-05): wrap pobtot in NULLIF(_, 0) so AGEBs with
+  // censused-but-empty population (pobtot=0) collapse to NULL in the score
+  // ranking, matching the inner CASE that returns NULL for the same input.
+  // Without this, pobtot=0 AGEBs sort as score=0 (above rural NULL rows)
+  // while their payload `score` is NULL — order disagrees with payload.
+  const orderExpr =
+    orderBy === "score"
+      ? "(NULLIF(cab.pobtot, 0)::numeric / NULLIF(COALESCE(t.cnt, 0), 0)) DESC NULLS LAST"
+      : orderBy === "pobtot"
+        ? "cab.pobtot DESC NULLS LAST"
+        : orderBy === "target_count"
+          ? "COALESCE(t.cnt, 0) DESC"
+          : /* total_estab */ "COALESCE(e.cnt, 0) DESC";
+  return `
+SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
+    .replace(/cab\.pobtot/g, "r.pobtot")
+    .replace(/COALESCE\(t\.cnt, 0\)/g, "r.target_count")
+    .replace(/COALESCE\(e\.cnt, 0\)/g, "r.total_estab")}) FROM (
+  SELECT
+    a.cvegeo,
+    NULLIF(TRIM(a.ambito), '') AS ambito,
+    ST_Y(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lat,
+    ST_X(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lon,
+    ROUND((ST_Area(a.geom::geography) / 1000000)::numeric, 4) AS area_km2,
+    cab.pobtot AS pobtot,
+    COALESCE(t.cnt, 0)::bigint AS target_count,
+    COALESCE(e.cnt, 0)::bigint AS total_estab,
+    CASE
+      WHEN cab.pobtot IS NULL OR cab.pobtot = 0 THEN NULL
+      WHEN COALESCE(t.cnt, 0) = 0 THEN NULL
+      ELSE ROUND((cab.pobtot::numeric / t.cnt)::numeric, 2)
+    END AS score
+  FROM ageb_polygons a
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    GROUP BY ageb
+  ) e ON e.ageb = a.cvegeo
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+      AND ${scianColumn} IN (${inList})
+    GROUP BY ageb
+  ) t ON t.ageb = a.cvegeo
+  LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
+  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
+  ORDER BY ${orderExpr}
+  LIMIT ${limit}
+) r;
+`;
+}
+
+/**
+ * GET /analytics/opportunity-by-ageb
+ *   ?cve_mun=NNNNN
+ *   &target_scian=NNNN[NN][,NNNN[NN]…]   (required)
+ *   &order_by=score|pobtot|target_count|total_estab   (default: score)
+ *   &limit=20                              (max 100)
+ *
+ * Vertical-agnostic AGEB-level opportunity ranking. Replaces the farmacia-
+ * specific v0.2.4 endpoint for any establishment class. For health-specific
+ * (CLUES-aware) scoring use /analytics/ageb-farmacia-opportunity.
+ *
+ * Score = pobtot / NULLIF(target_count, 0) → "people per existing competitor."
+ * Higher = more underserved. NULL when target_count=0 (greenfield — sort by
+ * pobtot DESC to surface), pobtot is NULL (rural AGEB not in censo_ageb
+ * urbana), or pobtot=0 (urban AGEB the census found empty/abandoned).
+ */
+export async function opportunityByAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+  const { codes, level, column } = parseTargetScian(
+    c.req.query("target_scian"),
+  );
+
+  const orderByRaw = c.req.query("order_by") ?? "score";
+  if (
+    !OPPORTUNITY_AGEB_ORDER_BY.includes(orderByRaw as OpportunityAgebOrderBy)
+  ) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Valores válidos: ${OPPORTUNITY_AGEB_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as OpportunityAgebOrderBy;
+  const limit = parseLimit(
+    c.req.query("limit"),
+    OPPORTUNITY_AGEB_DEFAULT_LIMIT,
+    OPPORTUNITY_AGEB_MAX_LIMIT,
+  );
+
+  const rows = runJsonQuery<RawOpportunityAgebRow[]>(
+    config,
+    opportunityByAgebSql(cveMun, column, codes, orderBy, limit),
+  );
+  const result: OpportunityByAgebResult = {
+    cve_mun: cveMun,
+    scian_level: level,
+    target_scian: codes,
+    order_by: orderBy,
+    total_returned: rows.length,
+    agebs: rows.map((r) => ({
+      cvegeo: r.cvegeo,
+      ambito: r.ambito === "Urbana" || r.ambito === "Rural" ? r.ambito : null,
+      centroid_lat: r.centroid_lat == null ? null : Number(r.centroid_lat),
+      centroid_lon: r.centroid_lon == null ? null : Number(r.centroid_lon),
+      area_km2: r.area_km2 == null ? null : Number(r.area_km2),
+      pobtot: r.pobtot == null ? null : Number(r.pobtot),
+      target_count: Number(r.target_count ?? 0),
+      total_estab: Number(r.total_estab ?? 0),
+      score: r.score == null ? null : Number(r.score),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+interface RawOpportunityColoniaRow {
+  colonia: string | null;
+  target_count: string | number | null;
+  total_estab: string | number | null;
+  score: string | number | null;
+}
+
+function opportunityByColoniaSql(
+  cveMun: string,
+  scianColumn: string,
+  scianCodes: string[],
+  orderBy: OpportunityColoniaOrderBy,
+  limit: number,
+): string {
+  const inList = scianCodes.map((c) => `'${c}'`).join(",");
+  // SQL aliases for aggregate expressions don't reliably resolve inside the
+  // expressions of an ORDER BY clause at the same SELECT level (Postgres
+  // raises "column X does not exist" when the alias is wrapped in another
+  // expression like `total_estab::numeric / NULLIF(target_count, 0)`).
+  // Workaround: write the underlying SUM/COUNT expressions verbatim in the
+  // INNER ORDER BY, and use `r.<alias>` for the OUTER json_agg ORDER BY
+  // (table-qualified subquery refs always resolve). 2026-05-05 production
+  // smoke caught this — unit tests mock psql so the bug only surfaces live.
+  const targetCountExpr = `SUM(CASE WHEN ${scianColumn} IN (${inList}) THEN 1 ELSE 0 END)`;
+  const totalEstabExpr = `COUNT(*)`;
+  const innerOrderExpr =
+    orderBy === "score"
+      ? `(${totalEstabExpr}::numeric / NULLIF(${targetCountExpr}, 0)) DESC NULLS LAST`
+      : orderBy === "target_count"
+        ? `${targetCountExpr} DESC`
+        : orderBy === "total_estab"
+          ? `${totalEstabExpr} DESC`
+          : /* colonia */ "UPPER(TRIM(colonia)) ASC";
+  const outerOrderExpr =
+    orderBy === "score"
+      ? "(r.total_estab::numeric / NULLIF(r.target_count, 0)) DESC NULLS LAST"
+      : orderBy === "target_count"
+        ? "r.target_count DESC"
+        : orderBy === "total_estab"
+          ? "r.total_estab DESC"
+          : /* colonia */ "r.colonia ASC";
+  return `
+SELECT json_agg(row_to_json(r) ORDER BY ${outerOrderExpr}) FROM (
+  SELECT
+    UPPER(TRIM(colonia)) AS colonia,
+    ${targetCountExpr}::bigint AS target_count,
+    ${totalEstabExpr}::bigint AS total_estab,
+    CASE
+      WHEN ${targetCountExpr} = 0 THEN NULL
+      ELSE ROUND(
+        (${totalEstabExpr}::numeric / ${targetCountExpr})::numeric,
+        2
+      )
+    END AS score
+  FROM establecimientos
+  WHERE area_geo = '${cveMun}'
+    AND colonia IS NOT NULL
+    AND TRIM(colonia) != ''
+  GROUP BY UPPER(TRIM(colonia))
+  ORDER BY ${innerOrderExpr}
+  LIMIT ${limit}
+) r;
+`;
+}
+
+/**
+ * GET /analytics/opportunity-by-colonia
+ *   ?cve_mun=NNNNN
+ *   &target_scian=NNNN[NN][,NNNN[NN]…]
+ *   &order_by=score|target_count|total_estab|colonia
+ *   &limit=50  (max 200)
+ *
+ * Colonia-level supply-side ranking. Score = total_estab / target_count
+ * (activity per existing target competitor — higher = more market activity
+ * per competitor). NULL when target_count=0 (greenfield colonia).
+ *
+ * Less robust than AGEB-level because:
+ *   - colonia is free-text (different DENUE rows can write the same colonia
+ *     differently — "ROMA NORTE" vs "Roma Norte"). We UPPER+TRIM to fold
+ *     casing; spelling drift is unfixable here.
+ *   - No population denominator (colonia has no census mapping).
+ *
+ * Use AGEB-level when you need population-normalized comparisons.
+ */
+export async function opportunityByColoniaHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+  const { codes, level, column } = parseTargetScian(
+    c.req.query("target_scian"),
+  );
+
+  const orderByRaw = c.req.query("order_by") ?? "score";
+  if (
+    !OPPORTUNITY_COLONIA_ORDER_BY.includes(
+      orderByRaw as OpportunityColoniaOrderBy,
+    )
+  ) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Valores válidos: ${OPPORTUNITY_COLONIA_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as OpportunityColoniaOrderBy;
+  const limit = parseLimit(
+    c.req.query("limit"),
+    OPPORTUNITY_COLONIA_DEFAULT_LIMIT,
+    OPPORTUNITY_COLONIA_MAX_LIMIT,
+  );
+
+  const rows = runJsonQuery<RawOpportunityColoniaRow[]>(
+    config,
+    opportunityByColoniaSql(cveMun, column, codes, orderBy, limit),
+  );
+  const colonias = rows
+    .filter((r): r is RawOpportunityColoniaRow & { colonia: string } =>
+      Boolean(r.colonia),
+    )
+    .map((r) => ({
+      colonia: r.colonia,
+      target_count: Number(r.target_count ?? 0),
+      total_estab: Number(r.total_estab ?? 0),
+      score: r.score == null ? null : Number(r.score),
+    }));
+  const result: OpportunityByColoniaResult = {
+    cve_mun: cveMun,
+    scian_level: level,
+    target_scian: codes,
+    order_by: orderBy,
+    total_returned: colonias.length,
+    colonias,
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+interface RawColoniaListRow {
+  colonia: string | null;
+  num_establecimientos: string | number | null;
+}
+
+function coloniasByMunicipioSql(
+  cveMun: string,
+  orderBy: ColoniasOrderBy,
+  limit: number,
+): string {
+  const orderExpr =
+    orderBy === "num_establecimientos"
+      ? "num_establecimientos DESC"
+      : /* colonia */ "colonia ASC";
+  return `
+SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr}) FROM (
+  SELECT
+    UPPER(TRIM(colonia)) AS colonia,
+    COUNT(*)::bigint AS num_establecimientos
+  FROM establecimientos
+  WHERE area_geo = '${cveMun}'
+    AND colonia IS NOT NULL
+    AND TRIM(colonia) != ''
+  GROUP BY UPPER(TRIM(colonia))
+  ORDER BY ${orderExpr}
+  LIMIT ${limit}
+) r;
+`;
+}
+
+/**
+ * GET /analytics/colonias-by-municipio
+ *   ?cve_mun=NNNNN
+ *   &order_by=num_establecimientos|colonia   (default: num_establecimientos)
+ *   &limit=50  (max 200)
+ *
+ * Primitive listing of colonias in a municipio with total establecimientos
+ * count. Pre-step for `/analytics/opportunity-by-colonia` — operator picks
+ * a colonia from this list, then drills in with a target_scian query.
+ *
+ * Sister of `/analytics/agebs-by-municipio` for the colonia level.
+ */
+export async function coloniasByMunicipioHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const orderByRaw = c.req.query("order_by") ?? "num_establecimientos";
+  if (!COLONIAS_ORDER_BY.includes(orderByRaw as ColoniasOrderBy)) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Valores válidos: ${COLONIAS_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as ColoniasOrderBy;
+  const limit = parseLimit(
+    c.req.query("limit"),
+    COLONIAS_DEFAULT_LIMIT,
+    COLONIAS_MAX_LIMIT,
+  );
+
+  const rows = runJsonQuery<RawColoniaListRow[]>(
+    config,
+    coloniasByMunicipioSql(cveMun, orderBy, limit),
+  );
+  const colonias = rows
+    .filter((r): r is RawColoniaListRow & { colonia: string } =>
+      Boolean(r.colonia),
+    )
+    .map((r) => ({
+      colonia: r.colonia,
+      num_establecimientos: Number(r.num_establecimientos ?? 0),
+    }));
+  const result: ColoniasByMunicipioResult = {
+    cve_mun: cveMun,
+    order_by: orderBy,
+    total_returned: colonias.length,
+    colonias,
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
