@@ -1,8 +1,33 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
-const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
+// Tile handler runs psql via promisify(execFile) — async — so the mock has
+// to honor the callback-style API that promisify wraps. mockExec records the
+// (file, args, options) it was called with, then invokes the callback with
+// { stdout, stderr } shaped like the real execFile callback. Tests set the
+// resolved stdout via mockExec.__stdout (default ""), or simulate failure via
+// mockExec.__error.
+const { mockExec } = vi.hoisted(() => {
+  const fn = vi.fn(
+    (
+      _file: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (
+        err: Error | null,
+        result: { stdout: string; stderr: string },
+      ) => void,
+    ) => {
+      const err = (fn as unknown as { __error?: Error }).__error;
+      if (err) return cb(err, { stdout: "", stderr: "" });
+      const stdout = (fn as unknown as { __stdout?: string }).__stdout ?? "";
+      cb(null, { stdout, stderr: "" });
+    },
+  );
+  return { mockExec: fn };
+});
 vi.mock("node:child_process", () => ({
-  execFileSync: mockExec,
+  execFile: mockExec,
+  execFileSync: vi.fn(),
   execSync: vi.fn(),
 }));
 
@@ -17,14 +42,23 @@ const CONFIG: ApiServerConfig = {
 };
 const AUTH = { "X-Api-Key": "key" };
 
-beforeEach(() => mockExec.mockReset());
+// Set the stdout the next execFile invocation will resolve with.
+function setStdout(stdout: string): void {
+  (mockExec as unknown as { __stdout?: string }).__stdout = stdout;
+}
+
+beforeEach(() => {
+  mockExec.mockClear();
+  setStdout("");
+  (mockExec as unknown as { __error?: Error }).__error = undefined;
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe("GET /tiles/:z/:x/:y", () => {
   it("returns 200 + binary protobuf with cache headers", async () => {
     // Synthetic 4-byte MVT payload (real ones are larger; bytes are opaque)
     const fakeBytes = Buffer.from([0x1a, 0x05, 0x68, 0x69]).toString("base64");
-    mockExec.mockReturnValue(fakeBytes);
+    setStdout(fakeBytes);
     const app = createServer(CONFIG);
     const res = await app.request("/tiles/12/1900/2300.mvt", { headers: AUTH });
     expect(res.status).toBe(200);
@@ -35,7 +69,7 @@ describe("GET /tiles/:z/:x/:y", () => {
   });
 
   it("returns 0-byte body when DB returns empty (no features in tile)", async () => {
-    mockExec.mockReturnValue("");
+    setStdout("");
     const app = createServer(CONFIG);
     const res = await app.request("/tiles/12/1900/2300.mvt", { headers: AUTH });
     expect(res.status).toBe(200);
@@ -44,7 +78,7 @@ describe("GET /tiles/:z/:x/:y", () => {
   });
 
   it("composes SQL with the correct SCIAN offset (chars 6-7)", async () => {
-    mockExec.mockReturnValue("");
+    setStdout("");
     const app = createServer(CONFIG);
     await app.request("/tiles/10/512/512.mvt?entidad=09&sector=46", {
       headers: AUTH,
@@ -117,10 +151,14 @@ describe("GET /tiles/:z/:x/:y", () => {
     expect(res.status).toBe(401);
   });
 
-  // The 502 catch-path (when execFileSync throws) intentionally has no
-  // unit test here. Vitest 4's trackUnhandledErrors flags raw throws inside
-  // vi.fn even when caught downstream — this test file specifically triggers
-  // that, while the equivalent test in sectors.test.ts passes (cause unknown).
-  // The handler's catch logic is identical to sectors.ts and is exercised by
-  // sectors.test.ts; manual smoke tests cover the wire behavior here.
+  it("returns 502 when psql fails (covers async catch path)", async () => {
+    (mockExec as unknown as { __error?: Error }).__error = new Error(
+      "ECONNREFUSED",
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/tiles/12/1900/2300.mvt", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgis.error");
+  });
 });

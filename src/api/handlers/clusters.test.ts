@@ -3,7 +3,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 // vi.mock is hoisted above all imports, including the const declaration.
 // Use vi.hoisted to define the mock before the hoisted vi.mock factory runs.
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({ execSync: mockExec }));
+vi.mock("node:child_process", () => ({
+  execSync: mockExec,
+  execFileSync: vi.fn(),
+  execFile: vi.fn(),
+}));
 
 // Now safe to import the server (which transitively imports the cluster runner)
 import { createServer } from "../server.js";

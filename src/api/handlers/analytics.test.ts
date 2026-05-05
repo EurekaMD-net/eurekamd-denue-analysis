@@ -4,6 +4,7 @@ const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
 vi.mock("node:child_process", () => ({
   execFileSync: mockExec,
   execSync: vi.fn(),
+  execFile: vi.fn(),
 }));
 
 import { createServer } from "../server.js";

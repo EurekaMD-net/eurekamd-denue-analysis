@@ -14,7 +14,10 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 
 // Mock child_process before any module imports
 const { mockExecFile } = vi.hoisted(() => ({ mockExecFile: vi.fn() }));
-vi.mock("node:child_process", () => ({ execFileSync: mockExecFile }));
+vi.mock("node:child_process", () => ({
+  execFileSync: mockExecFile,
+  execFile: vi.fn(),
+}));
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";

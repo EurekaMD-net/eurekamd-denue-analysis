@@ -23,8 +23,11 @@
  * string. There is no path for user input to reach SQL unparsed.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Context } from "hono";
+
+const execFileAsync = promisify(execFile);
 import { HttpError } from "../middleware/error.js";
 import {
   ENTIDAD_RE,
@@ -170,7 +173,7 @@ async function buildTile(
 
   let stdout: string;
   try {
-    stdout = execFileSync(
+    const result = await execFileAsync(
       "docker",
       [
         "exec",
@@ -186,7 +189,8 @@ async function buildTile(
         sql,
       ],
       { encoding: "utf-8", timeout: 30_000, maxBuffer: 50 * 1024 * 1024 },
-    ).trim();
+    );
+    stdout = result.stdout.trim();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new HttpError(`tile generation failed: ${msg}`, 502, "postgis.error");

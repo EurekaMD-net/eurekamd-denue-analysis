@@ -4,6 +4,10 @@ const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
 vi.mock("node:child_process", () => ({
   execFileSync: mockExec,
   execSync: vi.fn(),
+  // tiles.ts (transitively imported via server.ts) uses promisify(execFile);
+  // never called from this file but the mock must export it so module load
+  // succeeds.
+  execFile: vi.fn(),
 }));
 
 import { createServer } from "../server.js";
