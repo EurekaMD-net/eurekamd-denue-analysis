@@ -32,11 +32,17 @@ import { execFileSync } from "node:child_process";
 import type { Context } from "hono";
 import { HttpError } from "../middleware/error.js";
 import {
+  CVE_MUN_RE,
   ENTIDAD_RE,
+  RISK_ANO_RE,
+  RISK_DEFAULT_BASELINE_ANO,
+  RISK_DEFAULT_CURRENT_ANO,
   type ApiServerConfig,
   type IrsGrado,
   type MunicipiosAnalyticsResult,
   type NationalTreemapResult,
+  type RiskSummaryResult,
+  type RiskTrendResult,
   type SectorGradeMatrixResult,
   type TopSectorsResult,
 } from "../types.js";
@@ -482,6 +488,250 @@ export async function topSectorsByEntidadHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=300");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/risk-summary?entidad=NN[&ano=YYYY&baseline_ano=YYYY]
+//
+// Per-municipio risk profile for one state. Reads mv_delitos_municipal_yearly
+// (~28k rows total, ~50-500 rows per state) joined to censo_municipios for
+// population normalization. Returns one row per municipio with current-year
+// totals across high-signal subtipos plus a percent-change vs `baseline_ano`.
+//
+// Defaults anchor to the latest fully-reported year in the data (2025) to
+// avoid the 2026 partial-quarter trap. Operator can override with `?ano=`
+// once SESNSP closes another year.
+// ---------------------------------------------------------------------------
+
+interface RawRiskSummaryRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | string | null;
+  total_delitos: number | string;
+  robo_negocio: number | string;
+  homicidio_doloso: number | string;
+  extorsion: number | string;
+  patrimoniales: number | string;
+  violentos: number | string;
+  total_baseline: number | string | null;
+  delitos_per_1k_pop: number | string | null;
+  delitos_change_pct: number | string | null;
+}
+
+function riskSummarySql(
+  entidad: string,
+  currentAno: number,
+  baselineAno: number,
+): string {
+  // entidad pre-validated by ENTIDAD_RE; ano values pre-validated by RISK_ANO_RE.
+  // We inline them as integer literals (no quotes) since psql -c can't bind.
+  return `
+WITH cur AS (
+  SELECT cve_mun, robo_negocio, homicidio_doloso, extorsion,
+         patrimoniales, violentos, total_delitos
+  FROM mv_delitos_municipal_yearly
+  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+),
+baseline AS (
+  SELECT cve_mun, total_delitos AS total_baseline
+  FROM mv_delitos_municipal_yearly
+  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+)
+SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
+  SELECT
+    cur.cve_mun,
+    cm.nom_mun                                         AS municipio,
+    cm.pobtot                                          AS poblacion,
+    cur.total_delitos,
+    cur.robo_negocio,
+    cur.homicidio_doloso,
+    cur.extorsion,
+    cur.patrimoniales,
+    cur.violentos,
+    b.total_baseline,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(cur.total_delitos::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS delitos_per_1k_pop,
+    CASE WHEN COALESCE(b.total_baseline, 0) > 0
+      THEN ROUND(
+        ((cur.total_delitos - b.total_baseline)::numeric / b.total_baseline) * 100.0,
+        1
+      )
+      ELSE NULL
+    END                                                AS delitos_change_pct
+  FROM cur
+  LEFT JOIN baseline b USING (cve_mun)
+  LEFT JOIN censo_municipios cm USING (cve_mun)
+) t;
+`;
+}
+
+export async function riskSummaryHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const entidad = c.req.query("entidad");
+  if (!entidad || !ENTIDAD_RE.test(entidad)) {
+    throw new HttpError(
+      `entidad inválida "${entidad ?? ""}"`,
+      400,
+      "validation.entidad",
+    );
+  }
+  const anoRaw = c.req.query("ano");
+  const baselineRaw = c.req.query("baseline_ano");
+  const currentAno = parseAnoArg(anoRaw, RISK_DEFAULT_CURRENT_ANO, "ano");
+  const baselineAno = parseAnoArg(
+    baselineRaw,
+    RISK_DEFAULT_BASELINE_ANO,
+    "baseline_ano",
+  );
+
+  const rows = runJsonQuery<RawRiskSummaryRow[]>(
+    config,
+    riskSummarySql(entidad, currentAno, baselineAno),
+  );
+  const result: RiskSummaryResult = {
+    entidad,
+    current_ano: currentAno,
+    baseline_ano: baselineAno,
+    municipios: rows.map((r) => ({
+      cve_mun: r.cve_mun,
+      municipio: r.municipio,
+      poblacion: r.poblacion === null ? null : Number(r.poblacion),
+      total_delitos: Number(r.total_delitos),
+      robo_negocio: Number(r.robo_negocio),
+      homicidio_doloso: Number(r.homicidio_doloso),
+      extorsion: Number(r.extorsion),
+      patrimoniales: Number(r.patrimoniales),
+      violentos: Number(r.violentos),
+      total_baseline:
+        r.total_baseline === null ? null : Number(r.total_baseline),
+      delitos_per_1k_pop:
+        r.delitos_per_1k_pop === null ? null : Number(r.delitos_per_1k_pop),
+      delitos_change_pct:
+        r.delitos_change_pct === null ? null : Number(r.delitos_change_pct),
+    })),
+  };
+  // Mat-view-backed; safe to cache aggressively. Refreshed manually after
+  // each SESNSP load — same cadence as mv_national_treemap.
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+function parseAnoArg(
+  raw: string | undefined,
+  fallback: number,
+  label: string,
+): number {
+  if (raw === undefined || raw === "") return fallback;
+  if (!RISK_ANO_RE.test(raw)) {
+    throw new HttpError(
+      `${label} inválido "${raw}". Debe ser año 2010-2039 (4 dígitos).`,
+      400,
+      `validation.${label}`,
+    );
+  }
+  return parseInt(raw, 10);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/risk-trend?cve_mun=NNNNN
+//
+// Monthly time series for one municipio: ~144 rows (12 years × 12 months,
+// minus months where no delitos were reported). Reads the live long-form
+// table directly because a per-(cve_mun) scan over the (cve_mun) btree is
+// already sub-100ms — no need for a per-month mat-view.
+// ---------------------------------------------------------------------------
+
+interface RawRiskTrendPoint {
+  ano: number | string;
+  mes: number | string;
+  robo_negocio: number | string;
+  homicidio_doloso: number | string;
+  extorsion: number | string;
+  total: number | string;
+}
+
+function riskTrendSql(cveMun: string): string {
+  // cveMun pre-validated by CVE_MUN_RE — exactly 5 digits, never a quote.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.ano, t.mes) FROM (
+  SELECT
+    ano, mes,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Robo a negocio'), 0)::bigint
+      AS robo_negocio,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Homicidio doloso'), 0)::bigint
+      AS homicidio_doloso,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Extorsión'), 0)::bigint
+      AS extorsion,
+    SUM(count)::bigint AS total
+  FROM sesnsp_delitos_municipal
+  WHERE cve_mun = '${cveMun}'
+  GROUP BY ano, mes
+) t;
+`;
+}
+
+interface RawMunicipioMeta {
+  municipio: string | null;
+  poblacion: number | string | null;
+}
+
+function municipioMetaSql(cveMun: string): string {
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT nom_mun AS municipio, pobtot AS poblacion
+  FROM censo_municipios
+  WHERE cve_mun = '${cveMun}'
+) t;
+`;
+}
+
+export async function riskTrendHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded (ENT01-32 + MUN001-999).`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const series = runJsonQuery<RawRiskTrendPoint[]>(
+    config,
+    riskTrendSql(cveMun),
+  );
+  const meta = runJsonQuery<RawMunicipioMeta[]>(
+    config,
+    municipioMetaSql(cveMun),
+  );
+  const metaRow = meta[0] ?? null;
+
+  const result: RiskTrendResult = {
+    cve_mun: cveMun,
+    municipio: metaRow?.municipio ?? null,
+    poblacion:
+      metaRow?.poblacion === null || metaRow?.poblacion === undefined
+        ? null
+        : Number(metaRow.poblacion),
+    series: series.map((p) => ({
+      ano: Number(p.ano),
+      mes: Number(p.mes),
+      robo_negocio: Number(p.robo_negocio),
+      homicidio_doloso: Number(p.homicidio_doloso),
+      extorsion: Number(p.extorsion),
+      total: Number(p.total),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
   return c.json(result);
 }

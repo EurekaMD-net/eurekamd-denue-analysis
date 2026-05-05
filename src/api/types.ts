@@ -194,6 +194,73 @@ export interface TopSectorsResult {
 }
 
 // ---------------------------------------------------------------------------
+// Risk surface (SESNSP) — see scripts/perf-matviews.sql for the underlying
+// mv_delitos_municipal_yearly aggregation.
+// ---------------------------------------------------------------------------
+
+/**
+ * 4-digit year. Hard-bounded at the handler boundary by `RISK_ANO_RE` so SQL
+ * composition cannot receive arbitrary text.
+ */
+export const RISK_ANO_RE = /^(20[1-3][0-9])$/;
+
+/**
+ * 5-char zero-padded cve_mun. Same bounds as the existing CONEVAL / Censo
+ * join key (entidad 01-32, municipio 001-999).
+ */
+export const CVE_MUN_RE = /^(0[1-9]|[12][0-9]|3[0-2])[0-9]{3}$/;
+
+/**
+ * Default "current year" for risk-summary comparisons. 2026 is partial (only
+ * Q1 reported as of the loader run on 2026-05-05) so the rolling baseline
+ * prefers the latest full year. Reset when SESNSP closes the next full year.
+ */
+export const RISK_DEFAULT_CURRENT_ANO = 2025;
+/** Default lookback for the YoY-change column. 5 years covers the canonical
+ * "did this municipality get safer or worse" question. */
+export const RISK_DEFAULT_BASELINE_ANO = 2020;
+
+export interface RiskSummaryRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | null;
+  total_delitos: number;
+  robo_negocio: number;
+  homicidio_doloso: number;
+  extorsion: number;
+  patrimoniales: number;
+  violentos: number;
+  total_baseline: number | null;
+  /** Total delitos per 1k inhabitants — null when poblacion is 0/null. */
+  delitos_per_1k_pop: number | null;
+  /** Percent change vs `baseline_ano`. null when baseline=0 or missing. */
+  delitos_change_pct: number | null;
+}
+
+export interface RiskSummaryResult {
+  entidad: string;
+  current_ano: number;
+  baseline_ano: number;
+  municipios: RiskSummaryRow[];
+}
+
+export interface RiskTrendPoint {
+  ano: number;
+  mes: number;
+  robo_negocio: number;
+  homicidio_doloso: number;
+  extorsion: number;
+  total: number;
+}
+
+export interface RiskTrendResult {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | null;
+  series: RiskTrendPoint[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

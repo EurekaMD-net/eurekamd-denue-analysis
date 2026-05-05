@@ -17,6 +17,8 @@ import type {
   ApiServerConfig,
   MunicipiosAnalyticsResult,
   NationalTreemapResult,
+  RiskSummaryResult,
+  RiskTrendResult,
   SectorGradeMatrixResult,
 } from "../types.js";
 
@@ -658,5 +660,243 @@ describe("GET /analytics/top-sectors error paths", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sectors: unknown[] };
     expect(body.sectors).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/risk-summary?entidad=NN[&ano=YYYY&baseline_ano=YYYY]
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/risk-summary", () => {
+  it("returns per-municipio rows with current + baseline + per-1k normalization", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          municipio: "Cuauhtémoc",
+          poblacion: 545884,
+          total_delitos: 31858,
+          robo_negocio: 1205,
+          homicidio_doloso: 71,
+          extorsion: 194,
+          patrimoniales: 18000,
+          violentos: 850,
+          total_baseline: 27971,
+          delitos_per_1k_pop: 58.36,
+          delitos_change_pct: 13.9,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskSummaryResult;
+    expect(body.entidad).toBe("09");
+    expect(body.current_ano).toBe(2025);
+    expect(body.baseline_ano).toBe(2020);
+    expect(body.municipios).toHaveLength(1);
+    expect(body.municipios[0]).toMatchObject({
+      cve_mun: "09015",
+      total_delitos: 31858,
+      robo_negocio: 1205,
+      delitos_per_1k_pop: 58.36,
+      delitos_change_pct: 13.9,
+    });
+  });
+
+  it("inlines the entidad + ano values verbatim into the SQL", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/risk-summary?entidad=14&ano=2024&baseline_ano=2019",
+      { headers: AUTH },
+    );
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/LEFT\(cve_mun, 2\) = '14'/);
+    expect(sql).toMatch(/ano = 2024/);
+    expect(sql).toMatch(/ano = 2019/);
+    expect(sql).toMatch(/mv_delitos_municipal_yearly/);
+  });
+
+  it("rejects invalid entidad with 400 / validation.entidad", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=99", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.entidad");
+  });
+
+  it("rejects invalid ano with 400 / validation.ano", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/risk-summary?entidad=09&ano=abcd",
+      {
+        headers: AUTH,
+      },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.ano");
+  });
+
+  it("rejects invalid baseline_ano with 400 / validation.baseline_ano", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/risk-summary?entidad=09&baseline_ano=99",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.baseline_ano");
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=09");
+    expect(res.status).toBe(401);
+  });
+
+  it("preserves null baseline / null per-1k when sources are missing", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "32018",
+          municipio: "X",
+          poblacion: null,
+          total_delitos: 5,
+          robo_negocio: 0,
+          homicidio_doloso: 0,
+          extorsion: 0,
+          patrimoniales: 1,
+          violentos: 0,
+          total_baseline: null,
+          delitos_per_1k_pop: null,
+          delitos_change_pct: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=32", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as RiskSummaryResult;
+    expect(body.municipios[0]).toMatchObject({
+      poblacion: null,
+      total_baseline: null,
+      delitos_per_1k_pop: null,
+      delitos_change_pct: null,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/risk-trend?cve_mun=NNNNN
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/risk-trend", () => {
+  it("returns the monthly series + municipio metadata", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            ano: 2025,
+            mes: 1,
+            robo_negocio: 100,
+            homicidio_doloso: 6,
+            extorsion: 12,
+            total: 2451,
+          },
+          {
+            ano: 2025,
+            mes: 2,
+            robo_negocio: 92,
+            homicidio_doloso: 5,
+            extorsion: 10,
+            total: 2210,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([{ municipio: "Cuauhtémoc", poblacion: 545884 }]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskTrendResult;
+    expect(body.cve_mun).toBe("09015");
+    expect(body.municipio).toBe("Cuauhtémoc");
+    expect(body.poblacion).toBe(545884);
+    expect(body.series).toHaveLength(2);
+    expect(body.series[0]).toMatchObject({
+      ano: 2025,
+      mes: 1,
+      robo_negocio: 100,
+      total: 2451,
+    });
+  });
+
+  it("inlines cve_mun verbatim and selects from the long-form table", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/risk-trend?cve_mun=14039", { headers: AUTH });
+    const seriesArgs = mockExec.mock.calls[0]?.[1] as string[];
+    const seriesSql = seriesArgs[seriesArgs.length - 1] ?? "";
+    expect(seriesSql).toMatch(/cve_mun = '14039'/);
+    expect(seriesSql).toMatch(/sesnsp_delitos_municipal\b/);
+    expect(seriesSql).toMatch(/GROUP BY ano, mes/);
+  });
+
+  it("returns null municipio + poblacion when the cve_mun is unknown to censo", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskTrendResult;
+    expect(body.municipio).toBeNull();
+    expect(body.poblacion).toBeNull();
+    expect(body.series).toEqual([]);
+  });
+
+  it("rejects invalid cve_mun (non-digit) with 400 / validation.cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=foo", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cve_mun");
+  });
+
+  it("rejects cve_mun with bad entidad prefix (e.g. 99XXX)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=99001", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cve_mun");
+  });
+
+  it("rejects cve_mun with wrong length", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=0901", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=09015");
+    expect(res.status).toBe(401);
   });
 });

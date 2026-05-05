@@ -18,6 +18,9 @@
  *   GET /analytics/national-treemap            — 32-entidad join (P2 Locust)
  *   GET /analytics/sector-grade-matrix         — SCIAN×IRS heatmap (P2 Locust)
  *   GET /analytics/municipios?entidad=XX       — per-municipio joined view (P2 Locust)
+ *   GET /analytics/top-sectors?entidad=XX      — top SCIAN sectors by entidad
+ *   GET /analytics/risk-summary?entidad=XX     — per-municipio SESNSP risk profile
+ *   GET /analytics/risk-trend?cve_mun=NNNNN    — monthly delitos time series
  *
  * All routes except /health require X-Api-Key header matching config.apiKey.
  * /tiles is additionally rate-limited per IP (60 req/sec, sized for
@@ -41,6 +44,8 @@ import { tilesHandler } from "./handlers/tiles.js";
 import {
   municipiosAnalyticsHandler,
   nationalTreemapHandler,
+  riskSummaryHandler,
+  riskTrendHandler,
   sectorGradeMatrixHandler,
   topSectorsByEntidadHandler,
 } from "./handlers/analytics.js";
@@ -109,6 +114,8 @@ export function createServer(config: ApiServerConfig): Hono {
   app.get("/analytics/top-sectors", (c) =>
     topSectorsByEntidadHandler(c, config),
   );
+  app.get("/analytics/risk-summary", (c) => riskSummaryHandler(c, config));
+  app.get("/analytics/risk-trend", (c) => riskTrendHandler(c, config));
 
   return app;
 }
