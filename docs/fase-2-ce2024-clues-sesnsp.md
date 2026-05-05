@@ -1,21 +1,21 @@
 # Fase 2 — CE 2024 + CLUES + SESNSP
 
-**Estatus:** Pendiente (prerrequisito: Fase 1 Censo + CONEVAL)  
+**Estatus:** CLUES ✅ shipped 2026-05-04. CE 2024 + SESNSP **bloqueados — requieren URLs operadas por humano.** Re-probado 2026-05-05 (ver §"Verificación 2026-05-05" al final).  
 **Estimado:** 2-3 días de trabajo activo  
-**Fecha documento:** 2026-05-03  
+**Fecha documento:** 2026-05-03 (actualizado 2026-05-05)
 
 ---
 
 ## Contexto del roadmap
 
-| Fase | Fuentes | Estimado real |
-|------|---------|---------------|
-| **0 — DENUE base** | DENUE nacional | ✅ Completada 2026-05-03 |
-| **1 — Censo + CONEVAL** | Censo 2020, CONEVAL | 1-2 días (siguiente) |
-| **2 — CE 2024 + CLUES + SESNSP** | Censo Económico, infraestructura médica, seguridad | **2-3 días** |
-| **3 — Datatur + SINAIS + ENOE** | Turismo, mortalidad, empleo | 1-2 días |
-| **Modo Mapa** | MapLibre + deck.gl | 2-3 días (frontend sobre API Fase 5) |
-| **Modo Locust** | ECharts: barras, radar, 3D | 2-3 días (paralelo al mapa) |
+| Fase                             | Fuentes                                            | Estimado real                        |
+| -------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| **0 — DENUE base**               | DENUE nacional                                     | ✅ Completada 2026-05-03             |
+| **1 — Censo + CONEVAL**          | Censo 2020, CONEVAL                                | 1-2 días (siguiente)                 |
+| **2 — CE 2024 + CLUES + SESNSP** | Censo Económico, infraestructura médica, seguridad | **2-3 días**                         |
+| **3 — Datatur + SINAIS + ENOE**  | Turismo, mortalidad, empleo                        | 1-2 días                             |
+| **Modo Mapa**                    | MapLibre + deck.gl                                 | 2-3 días (frontend sobre API Fase 5) |
+| **Modo Locust**                  | ECharts: barras, radar, 3D                         | 2-3 días (paralelo al mapa)          |
 
 **Total acumulado realista: ~10-12 días de trabajo activo para stack funcional y refinable.**
 
@@ -28,6 +28,7 @@
 **Qué es:** Levantamiento quinquenal de INEGI sobre actividad económica de todos los establecimientos del país. 2024 es el más reciente.
 
 **Qué agrega que DENUE no tiene:**
+
 - `valor_agregado` — producción neta por sector/municipio
 - `remuneraciones` — masa salarial → proxy de formalidad
 - `personal_ocupado_total` — empleo formal vs. DENUE que usa rangos
@@ -35,6 +36,7 @@
 - `ingresos_por_suministro_de_bienes_y_servicios` — revenue real (no proxy)
 
 **Mecánica de carga:**
+
 - CSV por entidad federativa (32 archivos)
 - Join por `cve_mun` (6 dígitos: 2 entidad + 3 municipio)
 - Tabla destino: `ce2024_municipal` (~2,469 filas al colapsar a municipio)
@@ -48,12 +50,14 @@
 **Qué es:** Registro nacional de todas las unidades médicas públicas y algunas privadas del Sistema de Salud mexicano.
 
 **Qué agrega:**
+
 - Ubicación GPS de hospitales, clínicas, IMSS, ISSSTE, SSA, SEDENA, PEMEX, IMSS-Bienestar
 - `tipo_unidad` — primer nivel (consultorios), segundo (especialidades), tercer nivel (hospitales de alta complejidad)
 - `consultorios`, `camas_censables`, `camas_no_censables`
 - `institucion` — diferencia IMSS vs SSA vs ISSSTE
 
 **Mecánica de carga:**
+
 - Un solo CSV nacional (~25,000 registros)
 - Tiene coordenadas lat/lon → carga directa a PostGIS o Supabase con columna `geom`
 - Join con DENUE por proximidad geoespacial (ST_DWithin) + por `cve_mun`
@@ -67,12 +71,14 @@
 **Qué es:** Cifras mensuales de delitos del fuero común denunciados por municipio, reportadas por las fiscalías estatales.
 
 **Qué agrega:**
+
 - `robo_a_negocio` — riesgo operacional directo para cualquier establecimiento
 - `homicidio_doloso` — proxy de violencia general del municipio
 - `extorsion` — impacto en rentabilidad real de negocios
 - Series históricas mensuales → permite ver tendencia, no solo snapshot
 
 **Mecánica de carga:**
+
 - CSV mensual descargable, acumulable por año
 - Join por `cve_mun`
 - Tabla destino: `sesnsp_municipal` con columna `periodo` (YYYY-MM)
@@ -110,23 +116,25 @@
 ### Combinadas — El score definitivo
 
 16. **Score de ubicación Fase 2:**
+
     ```
-    score = (ivaf_v2 × 0.4) 
-          + (revenue_ce_normalizado × 0.2) 
-          + (clues_proximidad × 0.15) 
+    score = (ivaf_v2 × 0.4)
+          + (revenue_ce_normalizado × 0.2)
+          + (clues_proximidad × 0.15)
           + (seguridad_inversa × 0.25)
     ```
+
     → Una sola cifra por municipio para decisión de apertura
 
 17. **Matriz de decisión completa:**
 
-| Zona | Diagnóstico |
-|------|-------------|
-| IVAF alto + CE alto + CLUES lejos + seguridad alta | ⭐⭐⭐ Prioridad máxima de apertura |
+| Zona                                                 | Diagnóstico                               |
+| ---------------------------------------------------- | ----------------------------------------- |
+| IVAF alto + CE alto + CLUES lejos + seguridad alta   | ⭐⭐⭐ Prioridad máxima de apertura       |
 | IVAF alto + CE medio + CLUES cerca + seguridad media | ⭐⭐ Evaluar modelo (Similares vs cadena) |
-| IVAF alto + pobreza extrema + CE bajo | 🔴 Necesidad social — no rentable |
-| IVAF bajo + CE alto + seguridad baja | 🟡 Zona saturada — no entrar |
-| Cualquier perfil + `robo_a_negocio` > umbral | ⛔ Descartar hasta mejorar seguridad |
+| IVAF alto + pobreza extrema + CE bajo                | 🔴 Necesidad social — no rentable         |
+| IVAF bajo + CE alto + seguridad baja                 | 🟡 Zona saturada — no entrar              |
+| Cualquier perfil + `robo_a_negocio` > umbral         | ⛔ Descartar hasta mejorar seguridad      |
 
 ---
 
@@ -179,7 +187,7 @@ CREATE TABLE sesnsp_municipal (
 
 ```sql
 -- Municipios con alta oportunidad Y baja seguridad (a descartar)
-SELECT 
+SELECT
   m.nombre_municipio,
   m.entidad,
   ivaf.score AS ivaf_v2,
@@ -198,7 +206,7 @@ LIMIT 20;
 
 -- Desiertos totales de salud (sin farmacia + sin CLUES en 2km)
 -- Requiere PostGIS o cálculo por cve_mun aproximado
-SELECT 
+SELECT
   m.cve_mun,
   m.nombre_municipio,
   COUNT(DISTINCT e.id) AS farmacias_en_municipio,
@@ -206,7 +214,7 @@ SELECT
   censo.psinder,
   censo.p60ymas
 FROM municipios m
-LEFT JOIN establecimientos e 
+LEFT JOIN establecimientos e
   ON e.cve_mun = m.cve_mun AND e.codigo_act IN ('46591','46592')
 LEFT JOIN clues c ON c.cve_mun = m.cve_mun
 LEFT JOIN censo_municipal censo ON censo.cve_mun = m.cve_mun
@@ -257,15 +265,15 @@ LIMIT 50;
 
 ## Estimado de implementación
 
-| Tarea | Tiempo |
-|-------|--------|
-| Descarga y limpieza CE 2024 (32 CSVs por entidad) | 4-6 horas |
-| Carga CE 2024 a Supabase + validación | 2-3 horas |
-| Descarga CLUES + normalización + carga | 2-3 horas |
-| Descarga SESNSP (2024-2026) + carga | 1-2 horas |
-| Queries de validación y vistas materializadas | 3-4 horas |
-| Documentación de hallazgos | 1-2 horas |
-| **Total** | **13-20 horas (~2-3 días activos)** |
+| Tarea                                             | Tiempo                              |
+| ------------------------------------------------- | ----------------------------------- |
+| Descarga y limpieza CE 2024 (32 CSVs por entidad) | 4-6 horas                           |
+| Carga CE 2024 a Supabase + validación             | 2-3 horas                           |
+| Descarga CLUES + normalización + carga            | 2-3 horas                           |
+| Descarga SESNSP (2024-2026) + carga               | 1-2 horas                           |
+| Queries de validación y vistas materializadas     | 3-4 horas                           |
+| Documentación de hallazgos                        | 1-2 horas                           |
+| **Total**                                         | **13-20 horas (~2-3 días activos)** |
 
 ---
 
@@ -273,17 +281,14 @@ LIMIT 50;
 
 El mismo stack CE 2024 + CLUES + SESNSP aplica a **cualquier vertical**:
 
-| Vertical | CE 2024 (código SCIAN) | CLUES relevante | SESNSP relevante |
-|----------|------------------------|-----------------|------------------|
-| Farmacias | 465 | Todas las unidades | Robo a negocio |
-| Hospitales privados | 622 | Hospitales públicos como competencia/referencia | Robo + homicidio |
-| Restaurantes | 722 | N/A | Robo a negocio + extorsión |
-| Escuelas privadas | 611 | N/A | Homicidio (seguridad perimetral) |
-| Gimnasios | 713 | N/A | Robo + extorsión |
-| Conveniencia/abarrotes | 461 | N/A | Robo a negocio |
-
-
-
+| Vertical               | CE 2024 (código SCIAN) | CLUES relevante                                 | SESNSP relevante                 |
+| ---------------------- | ---------------------- | ----------------------------------------------- | -------------------------------- |
+| Farmacias              | 465                    | Todas las unidades                              | Robo a negocio                   |
+| Hospitales privados    | 622                    | Hospitales públicos como competencia/referencia | Robo + homicidio                 |
+| Restaurantes           | 722                    | N/A                                             | Robo a negocio + extorsión       |
+| Escuelas privadas      | 611                    | N/A                                             | Homicidio (seguridad perimetral) |
+| Gimnasios              | 713                    | N/A                                             | Robo + extorsión                 |
+| Conveniencia/abarrotes | 461                    | N/A                                             | Robo a negocio                   |
 
 ---
 
@@ -295,14 +300,39 @@ El mismo stack CE 2024 + CLUES + SESNSP aplica a **cualquier vertical**:
 
 **Dónde sí aplica:** Como **tabla de parámetros estáticos** que calibran el modelo analítico después de que el IVAF esté construido.
 
-| Parámetro que provee ENIGH | Uso concreto |
-|---|---|
-| Gasto mensual en medicamentos por decil de ingreso | Estima revenue potencial por zona una vez que tienes el IRS sintético |
-| % del ingreso destinado a salud por estrato | Calibra el ticket esperado en el score IVAF v2 |
-| Distribución farmacia vs consulta vs hospitalización | Segmenta la demanda dentro del sector salud |
-| Elasticidad precio por decil | Ajusta proyecciones de revenue en zonas de pobreza media |
+| Parámetro que provee ENIGH                           | Uso concreto                                                          |
+| ---------------------------------------------------- | --------------------------------------------------------------------- |
+| Gasto mensual en medicamentos por decil de ingreso   | Estima revenue potencial por zona una vez que tienes el IRS sintético |
+| % del ingreso destinado a salud por estrato          | Calibra el ticket esperado en el score IVAF v2                        |
+| Distribución farmacia vs consulta vs hospitalización | Segmenta la demanda dentro del sector salud                           |
+| Elasticidad precio por decil                         | Ajusta proyecciones de revenue en zonas de pobreza media              |
 
 **Cuándo usarlo:** En Fase 3 junto con ENOE — ambas son fuentes regionales que **calibran parámetros del modelo**, no fuentes de join. Se cargan como una sola tabla de referencia estática (`parametros_enigh_decil`) que se consulta al momento de construir el score final, no en cada query operacional.
 
 **Resumen:**
+
 > ENIGH = metadatos de calibración. Entra como constante en la fórmula, no como fila en el join.
+
+---
+
+## Verificación 2026-05-05 — qué bloquea CE 2024 + SESNSP
+
+Re-probadas las dos fuentes pendientes de v0.2.2. Ambas siguen requiriendo intervención humana, con confirmación adicional sobre el mecanismo de bloqueo:
+
+### CE 2024 (Censos Económicos 2024 — INEGI)
+
+- `https://www.censoseconomicos2024.mx/datosabiertos/` → 404
+- Probes directos a candidatos de ZIP/CSV en `inegi.org.mx/contenidos/programas/ce/2024/datosabiertos/*` → todos 200 con HTML de **2,263 bytes** (decoy de UA-gating estándar de INEGI). Idéntico al resultado del 2026-05-04.
+- **Bloqueo:** la SPA de `censoseconomicos2024.mx` renderiza los enlaces de descarga vía JS; las URLs reales se generan client-side y no son externamente derivables.
+- **Acción del operador:** abrir el sitio en navegador, copiar las URLs reales de la pestaña "Datos abiertos" y pasármelas para escribir el loader.
+
+### SESNSP (Incidencia Delictiva del Fuero Común)
+
+- `gob.mx/sesnsp/acciones-y-programas/datos-abiertos-de-incidencia-delictiva` → 200, **pero el cuerpo es 1,869 bytes con `<title>Challenge Validation</title>`** (gate anti-bot tipo Cloudflare). Lo mismo aplica al slug `incidencia-delictiva-del-fuero-comun-nueva-metodologia`.
+- Probes directos a `gob.mx/cms/uploads/attachment/file/*/IDEFC_NM_*.csv` (patrones documentados en otras fuentes) → mismo gate de 1,869 bytes. **Cambio respecto al 2026-05-04**: ese día los slugs devolvían 404; ahora hay un challenge wall activo. La descarga directa con `curl`/`wget` es imposible.
+- `datos.gob.mx` CKAN (`/busca/api/3/action/package_search`) no devuelve resultados para "incidencia delictiva" sin auth/UA específico.
+- **Acción del operador:** descargar el CSV mensual desde el navegador (autenticado por la sesión que pasa el challenge), guardarlo localmente y pasarme la ruta para alimentar el loader.
+
+### Implicación de calendario
+
+Se cierra v0.2.2 como **parcialmente entregada** (CLUES ✅, CE 2024 + SESNSP deferidas). El roadmap de Fase 2 no avanza sin operator-input; los loaders están diseñados (esquema, índices, mecánica de join) pero no se pueden cablear hasta tener bytes reales.
