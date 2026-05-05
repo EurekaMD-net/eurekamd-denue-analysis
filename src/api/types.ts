@@ -481,6 +481,27 @@ export interface AgebCensusFields {
   tvivpar: number | null;
   vph_inter: number | null;
   vph_autom: number | null;
+  /**
+   * v0.2.7 health-coverage block — derechohabiencia a servicios de salud,
+   * Censo 2020. Replaces the rejected IMSS PDA loader (PDA's cve_municipio
+   * is IMSS internal subdelegation codes, not joinable to INEGI cve_mun).
+   *
+   * `psinder` = population WITHOUT institutional derechohabiencia (IMSS /
+   * ISSSTE / IMSS-Bienestar / Seguro Popular successor). It does NOT
+   * include `pafil_ipriv` (privately-insured folks). For a strict "private-
+   * pharma-dependent" estimate combine `psinder + pafil_ipriv` — the
+   * institutionally-covered get free meds at SUS clinics, while private-
+   * insurance holders typically still buy at retail. We surface both here
+   * and let the operator choose the combination per use case.
+   */
+  pder_ss: number | null;
+  pder_imss: number | null;
+  pder_imssb: number | null;
+  pder_iste: number | null;
+  pder_istee: number | null;
+  pder_segp: number | null;
+  pafil_ipriv: number | null;
+  psinder: number | null;
 }
 
 /**
@@ -736,6 +757,27 @@ export interface OpportunityByAgebRow {
    * filter was applied — operator sees the rezago context inline.
    */
   rezago_grado: RezagoGrado | null;
+  /**
+   * v0.2.7: % of AGEB population WITHOUT institutional derechohabiencia
+   * (= psinder / pobtot × 100). Strict reading — does NOT add `pafil_ipriv`
+   * (privately-insured). Use as a baseline coverage gap; combine with
+   * `census.pafil_ipriv` if you want the wider "private-pharma-dependent"
+   * estimate. NULL when pobtot is null/0 or psinder is null. Drawn from
+   * Censo 2020 derechohabiencia at AGEB granularity.
+   */
+  pct_sin_cobertura_salud: number | null;
+  /**
+   * v0.2.7: avg monthly active DM2 cases at the **municipio** level (not
+   * AGEB — SINBA reports by CLUES + muni). Same value broadcasts to every
+   * AGEB inside the muni; treat as a muni-scale demand multiplier rather
+   * than an AGEB-discriminating feature. NULL when SINBA didn't report
+   * the muni in 2023 (~265 munis missing, mostly tiny rural).
+   */
+  casos_dm2_muni: number | null;
+  /** v0.2.7: avg monthly active HTA cases at muni level. Same caveats as casos_dm2_muni. */
+  casos_hta_muni: number | null;
+  /** v0.2.7: avg monthly active obesidad cases at muni level. */
+  casos_obesidad_muni: number | null;
 }
 
 export interface OpportunityByAgebResult {

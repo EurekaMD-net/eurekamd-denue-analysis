@@ -3050,3 +3050,172 @@ describe("GET /analytics/opportunity-by-ageb rezago_grado filter (v0.2.6)", () =
     expect(body.agebs[2].rezago_grado).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// v0.2.7 — health-coverage gap (Censo derechohabiencia) + SINBA morbidity
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/opportunity-by-ageb v0.2.7 fields", () => {
+  it("emits LEFT JOIN to sinba_morbidity_municipal in the SQL", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("LEFT JOIN (");
+    expect(sql).toContain("FROM sinba_morbidity_municipal");
+    expect(sql).toContain("anio = (SELECT MAX(anio)");
+    // Casos columns must project as the response field names
+    expect(sql).toContain("smm.casos_dm2_promedio AS casos_dm2_muni");
+    expect(sql).toContain("smm.casos_hta_promedio AS casos_hta_muni");
+    expect(sql).toContain("smm.casos_obesidad_promedio AS casos_obesidad_muni");
+  });
+
+  it("emits pct_sin_cobertura_salud computation with NULL guards (pobtot=0/null + psinder=null)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toMatch(
+      /WHEN cab\.pobtot IS NULL OR cab\.pobtot = 0 THEN NULL/,
+    );
+    expect(sql).toMatch(/WHEN cab\.psinder IS NULL THEN NULL/);
+    expect(sql).toContain("cab.psinder::numeric / cab.pobtot * 100");
+  });
+
+  it("returns pct_sin_cobertura_salud + casos_*_muni with numeric coercion", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "0900700011053",
+          ambito: "Urbana",
+          centroid_lat: "19.354",
+          centroid_lon: "-99.055",
+          area_km2: "0.30",
+          pobtot: "7253",
+          target_count: "1",
+          total_estab: "218",
+          score: "7253",
+          rezago_grado: "Bajo",
+          pct_sin_cobertura_salud: "32.7",
+          casos_dm2_muni: "8780.4",
+          casos_hta_muni: "6917.8",
+          casos_obesidad_muni: "3362.6",
+        },
+        {
+          // rural / not-in-censo AGEB — all v0.2.7 fields should null-fold
+          cvegeo: "1099900020001",
+          ambito: "Rural",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: "5.0",
+          pobtot: null,
+          target_count: "0",
+          total_estab: "2",
+          score: null,
+          rezago_grado: null,
+          pct_sin_cobertura_salud: null,
+          casos_dm2_muni: null,
+          casos_hta_muni: null,
+          casos_obesidad_muni: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as OpportunityByAgebResult;
+    expect(body.agebs[0].pct_sin_cobertura_salud).toBeCloseTo(32.7, 1);
+    expect(body.agebs[0].casos_dm2_muni).toBeCloseTo(8780.4, 1);
+    expect(body.agebs[0].casos_hta_muni).toBeCloseTo(6917.8, 1);
+    expect(body.agebs[0].casos_obesidad_muni).toBeCloseTo(3362.6, 1);
+    expect(body.agebs[1].pct_sin_cobertura_salud).toBeNull();
+    expect(body.agebs[1].casos_dm2_muni).toBeNull();
+    expect(body.agebs[1].casos_hta_muni).toBeNull();
+    expect(body.agebs[1].casos_obesidad_muni).toBeNull();
+  });
+});
+
+describe("GET /analytics/ageb-detail v0.2.7 census derechohabiencia", () => {
+  it("returns derechohabiencia fields in census block when AGEB is in censo_ageb", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0900700010017",
+            cve_ent: "09",
+            cve_mun: "007",
+            cve_loc: "0001",
+            cve_ageb: "0017",
+            ambito: "Urbana",
+            area_km2: "0.5",
+            centroid_lat: "19.36",
+            centroid_lon: "-99.07",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 1, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            pobtot: "5868",
+            pobfem: "3000",
+            pobmas: "2868",
+            p_60ymas: "800",
+            p_15ymas: "4500",
+            p_18ymas: "4200",
+            pea: "2500",
+            pocupada: "2400",
+            graproes: "10.5",
+            tvivhab: "1645",
+            tvivpar: "1645",
+            vph_inter: "1200",
+            vph_autom: "800",
+            // v0.2.7 derechohabiencia
+            pder_ss: "3670",
+            pder_imss: "2430",
+            pder_imssb: null,
+            pder_iste: "100",
+            pder_istee: "50",
+            pder_segp: "1090",
+            pafil_ipriv: "200",
+            psinder: "2196",
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=0900700010017",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.census).not.toBeNull();
+    expect(body.census!.psinder).toBe(2196);
+    expect(body.census!.pder_imss).toBe(2430);
+    expect(body.census!.pder_iste).toBe(100);
+    expect(body.census!.pafil_ipriv).toBe(200);
+    expect(body.census!.pder_imssb).toBeNull();
+  });
+});

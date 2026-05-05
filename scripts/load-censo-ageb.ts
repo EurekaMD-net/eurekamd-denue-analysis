@@ -217,7 +217,21 @@ SELECT
   NULLIF(tvivhab, '*')::int   AS tvivhab,
   NULLIF(tvivpar, '*')::int   AS tvivpar,
   NULLIF(vph_inter, '*')::int AS vph_inter,
-  NULLIF(vph_autom, '*')::int AS vph_autom
+  NULLIF(vph_autom, '*')::int AS vph_autom,
+  -- v0.2.7: derechohabiencia a servicios de salud (Censo 2020). Inverts the
+  -- IMSS-PDA-dataset need from the v0.2.7 proposal: Censo already has it at
+  -- AGEB granularity, while IMSS PDAs cve_municipio is IMSS internal
+  -- subdelegation codes (A01, H46, ...) not INEGI cve_mun. Pharma demand
+  -- inference: pct_sin_cobertura approx private-pharma-dependent population
+  -- (the IMSS/ISSSTE-covered get free meds at SUS clinics).
+  NULLIF(pder_ss, '*')::int   AS pder_ss,
+  NULLIF(pder_imss, '*')::int AS pder_imss,
+  NULLIF(pder_imssb, '*')::int AS pder_imssb,
+  NULLIF(pder_iste, '*')::int AS pder_iste,
+  NULLIF(pder_istee, '*')::int AS pder_istee,
+  NULLIF(pder_segp, '*')::int AS pder_segp,
+  NULLIF(pafil_ipriv, '*')::int AS pafil_ipriv,
+  NULLIF(psinder, '*')::int   AS psinder
 FROM censo_ageb_raw
 WHERE mza = '000'
   AND ageb != '0000' AND ageb != '*'

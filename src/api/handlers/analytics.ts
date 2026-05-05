@@ -1718,7 +1718,9 @@ SELECT json_agg(row_to_json(t)) FROM (
     pobtot, pobfem, pobmas,
     p_60ymas, p_15ymas, p_18ymas,
     pea, pocupada, graproes,
-    tvivhab, tvivpar, vph_inter, vph_autom
+    tvivhab, tvivpar, vph_inter, vph_autom,
+    pder_ss, pder_imss, pder_imssb, pder_iste, pder_istee, pder_segp,
+    pafil_ipriv, psinder
   FROM censo_ageb
   WHERE cvegeo = '${cvegeo}'
   LIMIT 1
@@ -1740,6 +1742,14 @@ interface RawAgebCensusRow {
   tvivpar: number | string | null;
   vph_inter: number | string | null;
   vph_autom: number | string | null;
+  pder_ss: number | string | null;
+  pder_imss: number | string | null;
+  pder_imssb: number | string | null;
+  pder_iste: number | string | null;
+  pder_istee: number | string | null;
+  pder_segp: number | string | null;
+  pafil_ipriv: number | string | null;
+  psinder: number | string | null;
 }
 
 /**
@@ -2004,6 +2014,14 @@ export async function agebDetailHandler(
           tvivpar: num(censusRow.tvivpar),
           vph_inter: num(censusRow.vph_inter),
           vph_autom: num(censusRow.vph_autom),
+          pder_ss: num(censusRow.pder_ss),
+          pder_imss: num(censusRow.pder_imss),
+          pder_imssb: num(censusRow.pder_imssb),
+          pder_iste: num(censusRow.pder_iste),
+          pder_istee: num(censusRow.pder_istee),
+          pder_segp: num(censusRow.pder_segp),
+          pafil_ipriv: num(censusRow.pafil_ipriv),
+          psinder: num(censusRow.psinder),
         }
       : null,
     rezago_social:
@@ -2405,6 +2423,10 @@ interface RawOpportunityAgebRow {
   total_estab: string | number | null;
   score: string | number | null;
   rezago_grado: string | null;
+  pct_sin_cobertura_salud: string | number | null;
+  casos_dm2_muni: string | number | null;
+  casos_hta_muni: string | number | null;
+  casos_obesidad_muni: string | number | null;
 }
 
 function opportunityByAgebSql(
@@ -2460,7 +2482,15 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
       WHEN COALESCE(t.cnt, 0) = 0 THEN NULL
       ELSE ROUND((cab.pobtot::numeric / t.cnt)::numeric, 2)
     END AS score,
-    cga.grado AS rezago_grado
+    cga.grado AS rezago_grado,
+    CASE
+      WHEN cab.pobtot IS NULL OR cab.pobtot = 0 THEN NULL
+      WHEN cab.psinder IS NULL THEN NULL
+      ELSE ROUND((cab.psinder::numeric / cab.pobtot * 100)::numeric, 1)
+    END AS pct_sin_cobertura_salud,
+    smm.casos_dm2_promedio AS casos_dm2_muni,
+    smm.casos_hta_promedio AS casos_hta_muni,
+    smm.casos_obesidad_promedio AS casos_obesidad_muni
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
@@ -2475,6 +2505,15 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
   ) t ON t.ageb = a.cvegeo
   LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
   LEFT JOIN coneval_grs_ageb cga ON cga.cvegeo = a.cvegeo
+  -- v0.2.7: muni-level SINBA morbidity. Same value broadcasts to every AGEB
+  -- in the muni. Subquery cap at most-recent year so multi-year SINBA loads
+  -- don't double-count. 2023 is the latest publicly available SINBA bulk.
+  LEFT JOIN (
+    SELECT cve_mun, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio
+    FROM sinba_morbidity_municipal
+    WHERE anio = (SELECT MAX(anio) FROM sinba_morbidity_municipal WHERE cve_mun = '${cveMun}')
+      AND cve_mun = '${cveMun}'
+  ) smm ON true
   WHERE a.cve_ent || a.cve_mun = '${cveMun}'
   ${rezagoWhere}ORDER BY ${orderExpr}
   LIMIT ${limit}
@@ -2554,6 +2593,16 @@ export async function opportunityByAgebHandler(
       total_estab: Number(r.total_estab ?? 0),
       score: r.score == null ? null : Number(r.score),
       rezago_grado: isRezagoGrado(r.rezago_grado) ? r.rezago_grado : null,
+      pct_sin_cobertura_salud:
+        r.pct_sin_cobertura_salud == null
+          ? null
+          : Number(r.pct_sin_cobertura_salud),
+      casos_dm2_muni:
+        r.casos_dm2_muni == null ? null : Number(r.casos_dm2_muni),
+      casos_hta_muni:
+        r.casos_hta_muni == null ? null : Number(r.casos_hta_muni),
+      casos_obesidad_muni:
+        r.casos_obesidad_muni == null ? null : Number(r.casos_obesidad_muni),
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
