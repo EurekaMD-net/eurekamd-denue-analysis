@@ -1841,18 +1841,74 @@ describe("GET /analytics/ageb-detail", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("rejects cvegeo with wrong length (not 13 digits)", async () => {
+  it("rejects cvegeo with wrong length or interior non-digit", async () => {
     const app = createServer(CONFIG);
     const r1 = await app.request(
       "/analytics/ageb-detail?cvegeo=21114000104120",
       { headers: AUTH },
     );
+    // Letter at position 11 (interior) — only the LAST char may be letter.
     const r2 = await app.request(
       "/analytics/ageb-detail?cvegeo=2111400010X12",
       { headers: AUTH },
     );
     expect(r1.status).toBe(400);
     expect(r2.status).toBe(400);
+  });
+
+  it("rejects LOWERCASE letter suffix (INEGI's convention is uppercase only)", async () => {
+    // qa-audit W5: regex is /^[0-9]{12}[0-9A-Z]$/ — case-sensitive on the
+    // letter at position 13. A request with '086a' must be rejected before
+    // any psql call so we don't waste a query on a guaranteed-empty row.
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=211140001086a",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("ACCEPTS cvegeo with letter-suffix AGEB (INEGI assigns A-Z to ~9% of AGEBs)", async () => {
+    // v0.2.4-B fix: 7,461 of 81,451 AGEBs have letter suffix at position 13
+    // (e.g. 211140001086A — when AGEB 0010 was subdivided, daughter is 010A).
+    // Original CVEGEO_RE = /^[0-9]{13}$/ rejected them all. New regex is
+    // /^[0-9]{12}[0-9A-Z]$/. This test pins the relaxed acceptance.
+    mockExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          cvegeo: "211140001086A",
+          cve_ent: "21",
+          cve_mun: "114",
+          cve_loc: "0001",
+          cve_ageb: "086A",
+          ambito: "Urbana",
+          area_km2: "0.5",
+          centroid_lat: "19.05",
+          centroid_lon: "-98.20",
+          bbox_minlon: null,
+          bbox_minlat: null,
+          bbox_maxlon: null,
+          bbox_maxlat: null,
+        },
+      ]),
+    );
+    mockExec
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=211140001086A",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
   });
 
   it("returns 404 when AGEB not in ageb_polygons", async () => {
@@ -1913,7 +1969,26 @@ describe("GET /analytics/ageb-detail", () => {
           },
         ]),
       )
-      .mockReturnValueOnce(JSON.stringify([42]));
+      .mockReturnValueOnce(JSON.stringify([42]))
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            pobtot: "2175",
+            pobfem: "1130",
+            pobmas: "1045",
+            p_60ymas: "354",
+            p_15ymas: "1794",
+            p_18ymas: "1683",
+            pea: "1042",
+            pocupada: "1010",
+            graproes: "11.5",
+            tvivhab: "650",
+            tvivpar: "640",
+            vph_inter: "458",
+            vph_autom: "128",
+          },
+        ]),
+      );
 
     const app = createServer(CONFIG);
     const res = await app.request(
@@ -1941,6 +2016,64 @@ describe("GET /analytics/ageb-detail", () => {
     expect(body.clues_count).toBe(42);
     expect(body.clues_sample).toHaveLength(1);
     expect(body.clues_sample[0]?.clues).toBe("PLSSA001234");
+    // v0.2.4-B: AGEB-level census fields
+    expect(body.population).toBe(2175);
+    expect(body.census).toMatchObject({
+      pobtot: 2175,
+      pobfem: 1130,
+      pobmas: 1045,
+      p_60ymas: 354,
+      vph_inter: 458,
+      vph_autom: 128,
+    });
+    expect(body.census?.graproes).toBe(11.5);
+  });
+
+  it("returns null AGEB census fields when AGEB is rural / not in censo_ageb", async () => {
+    // Identity + locality found, but censo_ageb empty → census stays null,
+    // population stays null, loc_population fallback is unaffected.
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "1099900020001",
+            cve_ent: "10",
+            cve_mun: "999",
+            cve_loc: "0002",
+            cve_ageb: "0001",
+            ambito: "Rural",
+            area_km2: "5.0",
+            centroid_lat: "23.5",
+            centroid_lon: "-104.0",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([{ loc_population: "120", loc_name: "El Rancho" }]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=1099900020001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.population).toBeNull();
+    expect(body.census).toBeNull();
+    expect(body.loc_population).toBe(120);
+    expect(body.ambito).toBe("Rural");
   });
 
   it("splits cvegeo into entidad/mun/loc chunks for locality lookup SQL", async () => {
@@ -1970,7 +2103,8 @@ describe("GET /analytics/ageb-detail", () => {
       )
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([]))
-      .mockReturnValueOnce(JSON.stringify([0]));
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]));
 
     const app = createServer(CONFIG);
     const res = await app.request(
@@ -2010,7 +2144,7 @@ describe("GET /analytics/ageb-farmacia-opportunity", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("returns ranked AGEBs with score + numeric coercion", async () => {
+  it("returns ranked AGEBs with score + numeric coercion + v0.2.4-B population/score_per_1k", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
         {
@@ -2022,7 +2156,10 @@ describe("GET /analytics/ageb-farmacia-opportunity", () => {
           num_establecimientos: "180",
           num_farmacias: "0",
           num_clues: "8",
+          population: "1500",
           score: "58.0",
+          // 58 / 1500 * 1000 = 38.667
+          score_per_1k: "38.667",
         },
         {
           cvegeo: "0900700015301",
@@ -2033,7 +2170,9 @@ describe("GET /analytics/ageb-farmacia-opportunity", () => {
           num_establecimientos: "120",
           num_farmacias: "1",
           num_clues: "3",
+          population: null, // rural / not in censo_ageb
           score: "36.5",
+          score_per_1k: null,
         },
       ]),
     );
@@ -2052,10 +2191,30 @@ describe("GET /analytics/ageb-farmacia-opportunity", () => {
       num_farmacias: 0,
       num_clues: 8,
       score: 58,
+      population: 1500,
+      score_per_1k: 38.667,
     });
     expect(body.agebs[1]?.score).toBe(36.5);
     expect(body.agebs[1]?.centroid_lat).toBeNull();
+    expect(body.agebs[1]?.population).toBeNull();
+    expect(body.agebs[1]?.score_per_1k).toBeNull();
     expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
+  });
+
+  it("emits LEFT JOIN to censo_ageb for population (v0.2.4-B)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/ageb-farmacia-opportunity?cve_mun=21114", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("LEFT JOIN censo_ageb cab");
+    expect(sql).toContain("cab.pobtot");
+    // score_per_1k uses CASE to null-guard when population is null/0
+    expect(sql).toMatch(
+      /WHEN cab\.pobtot IS NULL OR cab\.pobtot = 0 THEN NULL/,
+    );
   });
 
   it("emits the score formula in the SQL ORDER BY", async () => {

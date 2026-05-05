@@ -401,10 +401,12 @@ export interface StateCalibratorsResult {
 /**
  * 13-character AGEB key: ENT(2)+MUN(3)+LOC(4)+AGEB(4). Same shape as the
  * `cvegeo` column in `ageb_polygons` and the `ageb` column in
- * `establecimientos`. Stricter than CVE_MUN_RE — every digit position is
- * constrained because INEGI never assigns codes outside these ranges.
+ * `establecimientos`. INEGI assigns letter suffixes to ~9% of AGEBs
+ * (e.g. `211140001086A`) when an existing AGEB is subdivided — the first
+ * 12 chars are always digits, the last is digit or uppercase A-Z.
+ * v0.2.4-B fix: previous `^[0-9]{13}$` rejected 7,461 valid AGEBs.
  */
-export const CVEGEO_RE = /^[0-9]{13}$/;
+export const CVEGEO_RE = /^[0-9]{12}[0-9A-Z]$/;
 
 /** order_by for /analytics/agebs-by-municipio. Constrains the SQL ORDER BY. */
 export const AGEBS_ORDER_BY = [
@@ -459,6 +461,28 @@ export interface AgebDetailClues {
   lon: number;
 }
 
+/**
+ * AGEB-level census fields from INEGI Censo 2020 RESAGEBURB (urban only).
+ * v0.2.4-B (2026-05-05): loaded for 64,313 urban AGEBs across 32 entidades.
+ * Rural AGEBs (~17k of 81k total) are NOT in this dataset — fields are
+ * null when the cvegeo doesn't match a row in censo_ageb.
+ */
+export interface AgebCensusFields {
+  pobtot: number | null;
+  pobfem: number | null;
+  pobmas: number | null;
+  p_60ymas: number | null;
+  p_15ymas: number | null;
+  p_18ymas: number | null;
+  pea: number | null;
+  pocupada: number | null;
+  graproes: number | null;
+  tvivhab: number | null;
+  tvivpar: number | null;
+  vph_inter: number | null;
+  vph_autom: number | null;
+}
+
 export interface AgebDetailResult {
   cvegeo: string;
   cve_ent: string;
@@ -471,9 +495,20 @@ export interface AgebDetailResult {
   centroid_lon: number | null;
   /** Bounding box [minLon, minLat, maxLon, maxLat]. */
   bbox: [number, number, number, number] | null;
-  /** Population at the containing locality (closest proxy until census-AGEB). */
+  /** Population at the containing locality (locality-level, from censo_iter). */
   loc_population: number | null;
   loc_name: string | null;
+  /**
+   * Population at the AGEB itself (from censo_ageb 2020 urban dataset).
+   * null when AGEB is rural (not in RESAGEBURB) or not yet ingested.
+   * Prefer this over loc_population when non-null. v0.2.4-B addition.
+   */
+  population: number | null;
+  /**
+   * Demographic + dwelling breakdown at AGEB level (Censo 2020 urbana).
+   * null for rural AGEBs not in RESAGEBURB. v0.2.4-B addition.
+   */
+  census: AgebCensusFields | null;
   total_establecimientos: number;
   total_farmacias: number;
   top_sectors: AgebDetailTopSector[];
@@ -494,10 +529,24 @@ export interface AgebFarmaciaOpportunityRow {
   /**
    * Coarse demand-minus-supply proxy.
    *   score = num_clues × 0.5 + num_establecimientos × 0.3 − num_farmacias × 1.0
-   * Higher = more attractive AGEB to place a farmacia. NOT population-normalized
-   * (defer until census-AGEB ingest in v0.2.4-B). Use ranking, not absolute value.
+   * Higher = more attractive AGEB to place a farmacia. NOT population-normalized.
+   * Use ranking, not absolute value. v0.2.4-B adds `score_per_1k` for the
+   * population-aware variant.
    */
   score: number;
+  /**
+   * AGEB population from censo_ageb 2020 urbana. null for rural AGEBs.
+   * v0.2.4-B addition.
+   */
+  population: number | null;
+  /**
+   * Score normalized by AGEB population: `score / population × 1000`.
+   * null when population is null or 0. Use to compare opportunity per
+   * resident across AGEBs of different sizes — small AGEBs with no
+   * farmacias rank lower on raw score (less absolute demand) but can
+   * surface here. v0.2.4-B addition.
+   */
+  score_per_1k: number | null;
 }
 
 export interface AgebFarmaciaOpportunityResult {

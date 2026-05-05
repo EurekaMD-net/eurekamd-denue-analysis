@@ -1684,6 +1684,42 @@ SELECT json_agg(row_to_json(t)) FROM (
 `;
 }
 
+/**
+ * AGEB-level census from censo_ageb (Censo 2020 RESAGEBURB urbana).
+ * Returns at most one row. Empty result = AGEB is rural (not in dataset)
+ * or census not yet ingested. v0.2.4-B (2026-05-05).
+ */
+function agebCensusSql(cvegeo: string): string {
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    pobtot, pobfem, pobmas,
+    p_60ymas, p_15ymas, p_18ymas,
+    pea, pocupada, graproes,
+    tvivhab, tvivpar, vph_inter, vph_autom
+  FROM censo_ageb
+  WHERE cvegeo = '${cvegeo}'
+  LIMIT 1
+) t;
+`;
+}
+
+interface RawAgebCensusRow {
+  pobtot: number | string | null;
+  pobfem: number | string | null;
+  pobmas: number | string | null;
+  p_60ymas: number | string | null;
+  p_15ymas: number | string | null;
+  p_18ymas: number | string | null;
+  pea: number | string | null;
+  pocupada: number | string | null;
+  graproes: number | string | null;
+  tvivhab: number | string | null;
+  tvivpar: number | string | null;
+  vph_inter: number | string | null;
+  vph_autom: number | string | null;
+}
+
 function agebEstabSummarySql(cvegeo: string): string {
   return `
 SELECT json_agg(row_to_json(t)) FROM (
@@ -1817,6 +1853,13 @@ export async function agebDetailHandler(
   const cluesCount = Array.isArray(cluesCountRows)
     ? Number(cluesCountRows[0] ?? 0)
     : 0;
+  // v0.2.4-B: AGEB-level census from censo_ageb. May be missing for rural
+  // AGEBs not in RESAGEBURB urbana — falls back to null/loc_population.
+  const censusRows = runJsonQuery<RawAgebCensusRow[]>(
+    config,
+    agebCensusSql(cvegeo),
+  );
+  const censusRow = censusRows[0];
 
   // qa-audit S3 (2026-05-05): summary SQL is shaped to ALWAYS return one
   // row (COUNT(*) over a non-empty filter). If we ever see [] here, the SQL
@@ -1863,6 +1906,24 @@ export async function agebDetailHandler(
     loc_population:
       lm?.loc_population == null ? null : Number(lm.loc_population),
     loc_name: lm?.loc_name ?? null,
+    population: num(censusRow?.pobtot),
+    census: censusRow
+      ? {
+          pobtot: num(censusRow.pobtot),
+          pobfem: num(censusRow.pobfem),
+          pobmas: num(censusRow.pobmas),
+          p_60ymas: num(censusRow.p_60ymas),
+          p_15ymas: num(censusRow.p_15ymas),
+          p_18ymas: num(censusRow.p_18ymas),
+          pea: num(censusRow.pea),
+          pocupada: num(censusRow.pocupada),
+          graproes: num(censusRow.graproes),
+          tvivhab: num(censusRow.tvivhab),
+          tvivpar: num(censusRow.tvivpar),
+          vph_inter: num(censusRow.vph_inter),
+          vph_autom: num(censusRow.vph_autom),
+        }
+      : null,
     total_establecimientos: Number(summary.total_establecimientos ?? 0),
     total_farmacias: Number(summary.total_farmacias ?? 0),
     top_sectors: sectors.map((s) => ({
@@ -1897,7 +1958,9 @@ interface RawAgebOpportunityRow {
   num_establecimientos: number | string | null;
   num_farmacias: number | string | null;
   num_clues: number | string | null;
+  population: number | string | null;
   score: number | string | null;
+  score_per_1k: number | string | null;
 }
 
 function agebFarmaciaOpportunitySql(cveMun: string, limit: number): string {
@@ -1906,6 +1969,9 @@ function agebFarmaciaOpportunitySql(cveMun: string, limit: number): string {
   // between the LIMIT cut and the json_agg pass. Otherwise two AGEBs whose
   // raw scores differ in the 4th decimal but round to the same 3-decimal
   // `score` value can end up in arbitrary order in the response.
+  // v0.2.4-B: LEFT JOIN censo_ageb adds AGEB-level population + score_per_1k
+  // (raw score normalized to opportunity per 1000 residents). Rural AGEBs
+  // not in RESAGEBURB get population=NULL and score_per_1k=NULL.
   return `
 SELECT json_agg(row_to_json(t) ORDER BY (
   t.num_clues * 0.5 + t.num_establecimientos * 0.3 - t.num_farmacias * 1.0
@@ -1919,12 +1985,23 @@ SELECT json_agg(row_to_json(t) ORDER BY (
     COALESCE(e.cnt, 0)::bigint AS num_establecimientos,
     COALESCE(f.cnt, 0)::bigint AS num_farmacias,
     COALESCE(s.cnt, 0)::bigint AS num_clues,
+    cab.pobtot AS population,
     ROUND(
       (COALESCE(s.cnt, 0) * 0.5
        + COALESCE(e.cnt, 0) * 0.3
        - COALESCE(f.cnt, 0) * 1.0)::numeric,
       3
-    ) AS score
+    ) AS score,
+    CASE
+      WHEN cab.pobtot IS NULL OR cab.pobtot = 0 THEN NULL
+      ELSE ROUND(
+        ((COALESCE(s.cnt, 0) * 0.5
+          + COALESCE(e.cnt, 0) * 0.3
+          - COALESCE(f.cnt, 0) * 1.0) * 1000.0
+         / cab.pobtot)::numeric,
+        3
+      )
+    END AS score_per_1k
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
@@ -1952,6 +2029,7 @@ SELECT json_agg(row_to_json(t) ORDER BY (
       AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
     GROUP BY a2.cvegeo
   ) s ON s.cvegeo = a.cvegeo
+  LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
   WHERE a.cve_ent || a.cve_mun = '${cveMun}'
   ORDER BY (
     COALESCE(s.cnt, 0) * 0.5
@@ -1968,8 +2046,9 @@ SELECT json_agg(row_to_json(t) ORDER BY (
  *
  * Ranks AGEBs in a municipio by a coarse demand-minus-supply opportunity
  * score: (CLUES × 0.5 + establecimientos × 0.3 − farmacias × 1.0). Score
- * units are arbitrary; use rank, not absolute. Population normalization
- * deferred to v0.2.4-B (census-AGEB ingest).
+ * units are arbitrary; use rank, not absolute. v0.2.4-B added population
+ * + score_per_1k for the population-normalized variant — null on rural
+ * AGEBs not in RESAGEBURB urbana.
  */
 export async function agebFarmaciaOpportunityHandler(
   c: Context,
@@ -2018,6 +2097,8 @@ export async function agebFarmaciaOpportunityHandler(
       num_farmacias: Number(r.num_farmacias ?? 0),
       num_clues: Number(r.num_clues ?? 0),
       score: Number(r.score ?? 0),
+      population: r.population == null ? null : Number(r.population),
+      score_per_1k: r.score_per_1k == null ? null : Number(r.score_per_1k),
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
