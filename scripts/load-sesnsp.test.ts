@@ -11,7 +11,7 @@ import {
   normalizeHeader,
   RNID_VARIANTS,
   listFirstCsvInZip,
-  findVariantZip,
+  findVariantInputs,
 } from "./load-sesnsp.js";
 
 beforeEach(() => mockExec.mockReset());
@@ -145,37 +145,90 @@ describe("listFirstCsvInZip", () => {
   });
 });
 
-describe("findVariantZip", () => {
-  it("matches the zip whose name starts with the variant basename", () => {
-    mockExec.mockReturnValue(
-      [
-        "RNID-Delitos_Estatal-2026-mar2026.zip",
-        "RNID-Delitos_Municipal-2026-mar2026.zip",
-        "RNID-Victimas_Estatal-2026-mar2026.zip",
-        "RNID-Victimas_Municipal-2026-mar2026.zip",
-      ].join("\n"),
-    );
-    expect(findVariantZip("raw/sesnsp", "RNID-Victimas_Municipal")).toBe(
+describe("findVariantInputs", () => {
+  /**
+   * findVariantInputs calls execFileSync twice per zip: once via the `ls`
+   * inside the helper itself, then once per matched zip via listFirstCsvInZip's
+   * `unzip -l`. This dispatch mock distinguishes by the shell args — `ls *.zip`
+   * for the first call, `unzip -l <path>` for each follow-up.
+   */
+  function mockDir(zipNames: string[], csvNames: string[] = []): void {
+    mockExec.mockImplementation((cmd: string, args?: string[]) => {
+      const argsArr = args ?? [];
+      const argsStr = argsArr.join(" ");
+      if (cmd === "/bin/sh" && argsStr.includes("ls *.zip")) {
+        return [...zipNames, ...csvNames].join("\n");
+      }
+      if (cmd === "unzip" && argsArr[0] === "-l") {
+        // Synthesize a minimal unzip listing whose only CSV name is derived
+        // from the zip path (drop the dir, swap .zip → .csv).
+        const zipPath = argsArr[1] as string;
+        const inner = zipPath
+          .split("/")
+          .pop()!
+          .replace(/\.zip$/, ".csv");
+        return [
+          `Archive:  ${zipPath}`,
+          "  Length      Date    Time    Name",
+          "---------  ---------- -----   ----",
+          `   100  2026-04-10 13:15   ${inner}`,
+        ].join("\n");
+      }
+      return "";
+    });
+  }
+
+  it("returns one zip input when exactly one zip matches the basename", () => {
+    mockDir([
+      "RNID-Delitos_Estatal-2026-mar2026.zip",
+      "RNID-Delitos_Municipal-2026-mar2026.zip",
+      "RNID-Victimas_Estatal-2026-mar2026.zip",
       "RNID-Victimas_Municipal-2026-mar2026.zip",
-    );
+    ]);
+    const out = findVariantInputs("raw/sesnsp", "RNID-Victimas_Municipal");
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      kind: "zip",
+      zipPath: "raw/sesnsp/RNID-Victimas_Municipal-2026-mar2026.zip",
+      csvInside: "RNID-Victimas_Municipal-2026-mar2026.csv",
+    });
   });
 
   it("does not pick up Municipal when asked for Estatal (prefix is exact)", () => {
-    mockExec.mockReturnValue(
-      [
-        "RNID-Delitos_Estatal-2026-mar2026.zip",
-        "RNID-Delitos_Municipal-2026-mar2026.zip",
-      ].join("\n"),
-    );
-    expect(findVariantZip("raw/sesnsp", "RNID-Delitos_Estatal")).toBe(
+    mockDir([
       "RNID-Delitos_Estatal-2026-mar2026.zip",
+      "RNID-Delitos_Municipal-2026-mar2026.zip",
+    ]);
+    const out = findVariantInputs("raw/sesnsp", "RNID-Delitos_Estatal");
+    expect(out.map((i) => ("zipPath" in i ? i.zipPath : i.csvPath))).toEqual([
+      "raw/sesnsp/RNID-Delitos_Estatal-2026-mar2026.zip",
+    ]);
+  });
+
+  it("returns empty when no input matches the variant", () => {
+    mockDir(["RNID-Delitos_Estatal-2026-mar2026.zip"]);
+    expect(findVariantInputs("raw/sesnsp", "RNID-Victimas_Municipal")).toEqual(
+      [],
     );
   });
 
-  it("throws when no zip matches the variant", () => {
-    mockExec.mockReturnValue("RNID-Delitos_Estatal-2026-mar2026.zip\n");
-    expect(() =>
-      findVariantZip("raw/sesnsp", "RNID-Victimas_Municipal"),
-    ).toThrow(/no zip in raw\/sesnsp starts with "RNID-Victimas_Municipal"/);
+  it("returns BOTH zip + csv when present, sorted alphabetically", () => {
+    mockDir(
+      ["RNID-Delitos_Municipal-2026-mar2026.zip"],
+      ["RNID-Delitos_Municipal-Historical-2015-2025.csv"],
+    );
+    const out = findVariantInputs("raw/sesnsp", "RNID-Delitos_Municipal");
+    expect(out).toHaveLength(2);
+    // Lexical sort: "2026-mar…zip" < "Historical-…csv" because '2' (0x32)
+    // sorts before 'H' (0x48). Load order is a non-issue — the variant's
+    // raw table is a single append target after one DROP+CREATE.
+    expect(out[0]).toMatchObject({
+      kind: "zip",
+      zipPath: "raw/sesnsp/RNID-Delitos_Municipal-2026-mar2026.zip",
+    });
+    expect(out[1]).toMatchObject({
+      kind: "csv",
+      csvPath: "raw/sesnsp/RNID-Delitos_Municipal-Historical-2015-2025.csv",
+    });
   });
 });

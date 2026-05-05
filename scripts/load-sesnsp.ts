@@ -38,7 +38,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -284,53 +284,90 @@ function dockerCp(
 }
 
 /**
+ * Source of CSV bytes for a single variant load. Either a ZIP that contains
+ * one CSV (the canonical RNID-2026 single-year files) or a bare CSV (the
+ * historical 2015-2025 dump that ships pre-extracted, ~362 MB).
+ */
+export type RnidInput =
+  | { kind: "zip"; zipPath: string; csvInside: string }
+  | { kind: "csv"; csvPath: string };
+
+/**
  * Extract a CSV from a ZIP, iconv WINDOWS-1252 → UTF-8, rewrite header to
  * snake_case ASCII identifiers, and write the result to a temp file. Returns
  * the temp path. Caller is responsible for deletion.
+ *
+ * The body is streamed through a shell pipeline directly into the output
+ * file rather than buffered in Node — the 362 MB historical CSV would peak
+ * around 800 MB of V8 string heap if we held it as a JS string. The header
+ * is read in a separate small `head -1` invocation so we still get the
+ * snake_case rewrite.
  */
-function preparePreparedCsv(
-  zipPath: string,
-  csvNameInZip: string,
-  outDir: string,
-): string {
-  // unzip -p to stdout, iconv to UTF-8. Captured into a buffer so we can
-  // rewrite the header before writing. RNID files are <50 MB and 50 MB
-  // maxBuffer keeps everything in memory; this is bounded by the documented
-  // SESNSP file sizes (largest = ~41 MB).
-  const buf = execFileSync(
+function preparePreparedCsv(input: RnidInput, outDir: string): string {
+  const sourceLabel =
+    input.kind === "zip"
+      ? `${input.zipPath}!${input.csvInside}`
+      : input.csvPath;
+
+  // Build the source-bytes shell snippet once; both header and body
+  // pipelines reuse it so a future tweak (e.g. a `dos2unix` step) only
+  // happens in one place.
+  const sourceCmd =
+    input.kind === "zip" ? `unzip -p "$ZIP" "$INNER"` : `cat "$CSV"`;
+
+  const sourceEnv: NodeJS.ProcessEnv =
+    input.kind === "zip"
+      ? { ZIP: input.zipPath, INNER: input.csvInside }
+      : { CSV: input.csvPath };
+
+  // Step 1: read just the first line. iconv ensures any accented header
+  // characters land in the same encoding the body will be in.
+  const headerOut = execFileSync(
     "/bin/sh",
-    [
-      "-c",
-      // Single sh -c so the pipe is owned by sh, not Node. unzip + iconv.
-      `unzip -p "$1" "$2" | iconv -f WINDOWS-1252 -t UTF-8`,
-      "sh",
-      zipPath,
-      csvNameInZip,
-    ],
+    ["-c", `${sourceCmd} | iconv -f WINDOWS-1252 -t UTF-8 | head -1`],
     {
       encoding: "utf-8",
-      maxBuffer: 200 * 1024 * 1024,
-      timeout: 5 * 60_000,
+      env: { ...process.env, ...sourceEnv },
+      timeout: 60_000,
     },
   );
-
-  const nl = buf.indexOf("\n");
-  if (nl === -1) {
-    throw new Error(`loadSesnsp: ${csvNameInZip} has no newlines`);
+  const headerLine = headerOut.replace(/\r?\n.*/s, "").replace(/^﻿/, "");
+  if (headerLine.length === 0) {
+    throw new Error(`loadSesnsp: ${sourceLabel} has empty header`);
   }
-  const headerLine = buf.slice(0, nl).replace(/\r$/, "");
-  // Body is CRLF-encoded (SESNSP convention). Normalize to LF so the file
-  // doesn't end up with mixed endings after we rewrite the header — Postgres
-  // COPY tolerates CRLF or LF but not a stream that mixes the two.
-  const body = buf.slice(nl + 1).replace(/\r\n/g, "\n");
   const headers = headerLine.split(",").map((h) => normalizeHeader(h));
   const rewrittenHeader = headers.join(",");
 
+  // Step 2: stream the body straight into the output file. `tail -n +2`
+  // drops the original header (we replace it with the rewritten one). `tr
+  // -d '\r'` normalizes CRLF → LF — Postgres COPY rejects mid-stream
+  // ending changes which is what'd happen otherwise (header rewritten as
+  // pure-LF, body still CRLF). Header is prepended via `printf` so the
+  // file's first byte is always the new header.
   const outPath = join(
     outDir,
-    csvNameInZip.replace(/\.csv$/, "") + ".prep.csv",
+    sourceLabel
+      .replace(/[^a-zA-Z0-9_.-]/g, "_")
+      .replace(/\.csv$/, "")
+      .slice(-160) + ".prep.csv",
   );
-  writeFileSync(outPath, rewrittenHeader + "\n" + body, "utf-8");
+  execFileSync(
+    "/bin/sh",
+    [
+      "-c",
+      `{ printf '%s\\n' "$HEADER"; ${sourceCmd} | iconv -f WINDOWS-1252 -t UTF-8 | tail -n +2 | tr -d '\\r'; } > "$OUT"`,
+    ],
+    {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        ...sourceEnv,
+        HEADER: rewrittenHeader,
+        OUT: outPath,
+      },
+      timeout: 30 * 60_000,
+    },
+  );
   return outPath;
 }
 
@@ -350,23 +387,20 @@ export async function loadSesnsp(
 
   try {
     for (const variant of RNID_VARIANTS) {
-      // Find the matching zip (could be `<basename>-2026-mar2026.zip` or any
-      // dated suffix — operator may rev to a later month). Pick the one whose
-      // filename starts with the variant basename.
-      const zipName = findVariantZip(config.rnidDir, variant.basename);
-      // The CSV inside may have an accented name (e.g. zip "RNID-Victimas..."
-      // contains "RNID-Víctimas...csv"); query the zip index instead of
-      // assuming `.zip → .csv`.
-      const csvName = listFirstCsvInZip(join(config.rnidDir, zipName));
+      // Find every input matching the variant basename — could be one
+      // (the canonical 2026 single-year case) or several (zip + historical
+      // CSV for Delitos_Municipal). All must share the same schema; the
+      // loader trusts the variant flags and lets `\copy` fail loudly if a
+      // column count drifts.
+      const inputs = findVariantInputs(config.rnidDir, variant.basename);
+      if (inputs.length === 0) {
+        throw new Error(
+          `loadSesnsp: no input file in ${config.rnidDir} matches "${variant.basename}".`,
+        );
+      }
 
-      // Step 1: extract + iconv + header rewrite to local temp file.
-      const preparedPath = preparePreparedCsv(
-        join(config.rnidDir, zipName),
-        csvName,
-        tempDir,
-      );
-
-      // Step 2: build raw table (DROP+CREATE).
+      // Step 1: build raw table (DROP+CREATE) — once per variant before any
+      // \copy lands. Subsequent inputs append to the same table.
       dockerExec(
         config.dbContainer,
         [
@@ -381,28 +415,31 @@ export async function loadSesnsp(
         60_000,
       );
 
-      // Step 3: docker cp + \copy.
-      const containerPath = `/tmp/${variant.rawTable}.csv`;
-      dockerCp(config.dbContainer, preparedPath, containerPath, 5 * 60_000);
-      try {
-        dockerExec(
-          config.dbContainer,
-          [
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "postgres",
-            "-c",
-            `\\copy ${variant.rawTable} FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-          ],
-          10 * 60_000,
-        );
-      } finally {
+      // Step 2: prepare + \copy each input into the raw table.
+      for (let i = 0; i < inputs.length; i++) {
+        const preparedPath = preparePreparedCsv(inputs[i]!, tempDir);
+        const containerPath = `/tmp/${variant.rawTable}_${i}.csv`;
+        dockerCp(config.dbContainer, preparedPath, containerPath, 10 * 60_000);
         try {
-          dockerExec(config.dbContainer, ["rm", "-f", containerPath], 30_000);
-        } catch {
-          // best-effort
+          dockerExec(
+            config.dbContainer,
+            [
+              "psql",
+              "-U",
+              "postgres",
+              "-d",
+              "postgres",
+              "-c",
+              `\\copy ${variant.rawTable} FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+            ],
+            30 * 60_000,
+          );
+        } finally {
+          try {
+            dockerExec(config.dbContainer, ["rm", "-f", containerPath], 30_000);
+          } catch {
+            // best-effort
+          }
         }
       }
 
@@ -478,24 +515,50 @@ export function listFirstCsvInZip(zipPath: string): string {
   return matches[0] as string;
 }
 
-export function findVariantZip(dir: string, basename: string): string {
-  // Synchronous shell-out for simplicity; the dir is bounded to 4-ish files.
+/**
+ * Return every input file in `dir` whose name starts with `basename` and
+ * is either a `.zip` or a `.csv`. Multiple inputs per variant are supported
+ * for the historical-plus-current case (RNID-Delitos_Municipal-2026-mar2026.zip
+ * + RNID-Delitos_Municipal-Historical-2015-2025.csv → loader unions them
+ * into one raw table). Inputs are sorted alphabetically so the load order
+ * is deterministic and the historical file lands before the current one
+ * (lexically "Historical" < "20XX-mar20XX").
+ *
+ * Inner-CSV name for ZIPs is resolved via `listFirstCsvInZip` to handle the
+ * Víctimas zips' accented inner filename (`RNID-Víctimas_…csv` inside a zip
+ * named `RNID-Victimas_…zip`).
+ */
+export function findVariantInputs(dir: string, basename: string): RnidInput[] {
   const out = execFileSync(
     "/bin/sh",
-    ["-c", `cd "$1" && ls *.zip 2>/dev/null`, "sh", dir],
+    [
+      "-c",
+      // List both .zip and .csv files matching the prefix. `ls` returns 1
+      // when nothing matches but we tolerate that with `|| true`.
+      `cd "$1" && (ls *.zip *.csv 2>/dev/null || true)`,
+      "sh",
+      dir,
+    ],
     { encoding: "utf-8", timeout: 10_000 },
   );
-  const match = out
+  const matches = out
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
-    .find((name) => name.startsWith(basename));
-  if (!match) {
-    throw new Error(
-      `loadSesnsp: no zip in ${dir} starts with "${basename}". Found: ${out.replace(/\n/g, " ")}`,
-    );
-  }
-  return match;
+    .filter((name) => name.startsWith(basename))
+    .sort();
+
+  return matches.map<RnidInput>((name) => {
+    const fullPath = join(dir, name);
+    if (name.endsWith(".zip")) {
+      return {
+        kind: "zip",
+        zipPath: fullPath,
+        csvInside: listFirstCsvInZip(fullPath),
+      };
+    }
+    return { kind: "csv", csvPath: fullPath };
+  });
 }
 
 // ---------------------------------------------------------------------------
