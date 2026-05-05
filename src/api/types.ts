@@ -333,6 +333,44 @@ export interface MortalityTrendResult {
 }
 
 // ---------------------------------------------------------------------------
+// State calibrators (ENOE / ENIGH) — v0.2.3-C. Parameter tables keyed by
+// entidad that condition / multiply / contextualize the cve_mun-grain rows.
+// "Can't infer at municipio" ≠ "no value at municipio" (calibrator pattern).
+// ---------------------------------------------------------------------------
+
+export interface StateCalibratorsRow {
+  entidad: string;
+  /** ENIGH wave year (2024, 2026, ...). Null if no ENIGH row loaded yet. */
+  enigh_ano: number | null;
+  /** Hogares represented (factor sum, ~ENIGH-published total). */
+  hogares_estimados: number | null;
+  /** Población represented (factor * tot_integ sum). */
+  poblacion_estimada: number | null;
+  /** Ingreso corriente promedio MXN/año, factor-weighted. */
+  ingreso_corriente_promedio: number | null;
+  /** Mediana del ingreso corriente, factor-weighted. */
+  ingreso_corriente_mediana: number | null;
+  /** P10 del ingreso corriente. */
+  decil_1_ingreso: number | null;
+  /** P90 del ingreso corriente. */
+  decil_9_ingreso: number | null;
+  /** Gasto corriente promedio, factor-weighted. */
+  gasto_corriente_promedio: number | null;
+  /** % del gasto monetario en alimentos (Engel coefficient). */
+  pct_gasto_alimentos: number | null;
+  pct_gasto_vivienda: number | null;
+  pct_gasto_salud: number | null;
+  pct_gasto_transporte: number | null;
+  pct_gasto_educacion: number | null;
+}
+
+export interface StateCalibratorsResult {
+  entidad: string;
+  /** Single-row response: the calibrator parameters for the requested state. */
+  calibrators: StateCalibratorsRow;
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

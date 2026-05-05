@@ -23,6 +23,8 @@
  *   GET /analytics/risk-trend?cve_mun=NNNNN    — monthly delitos time series
  *   GET /analytics/mortality-summary?entidad=XX — per-municipio EDR mortality
  *   GET /analytics/mortality-trend?cve_mun=NNNNN — annual mortality time series
+ *   GET /analytics/state-calibrators?entidad=XX  — ENIGH state-level calibrator
+ *                                                  (income deciles, expense shares)
  *
  * All routes except /health require X-Api-Key header matching config.apiKey.
  * /tiles is additionally rate-limited per IP (60 req/sec, sized for
@@ -51,6 +53,7 @@ import {
   riskSummaryHandler,
   riskTrendHandler,
   sectorGradeMatrixHandler,
+  stateCalibratorsHandler,
   topSectorsByEntidadHandler,
 } from "./handlers/analytics.js";
 
@@ -125,6 +128,9 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/mortality-trend", (c) =>
     mortalityTrendHandler(c, config),
+  );
+  app.get("/analytics/state-calibrators", (c) =>
+    stateCalibratorsHandler(c, config),
   );
 
   return app;

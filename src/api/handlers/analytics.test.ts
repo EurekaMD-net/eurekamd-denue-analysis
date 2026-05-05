@@ -1452,3 +1452,149 @@ describe("GET /analytics/mortality-trend", () => {
     expect(liveSql).toMatch(/mun_resid = '007'/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /analytics/state-calibrators?entidad=NN — v0.2.3-C
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/state-calibrators", () => {
+  it("returns the latest ENIGH wave for the requested entidad", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          entidad: "19",
+          enigh_ano: 2024,
+          hogares_estimados: "1859166",
+          poblacion_estimada: "6129347",
+          ingreso_corriente_promedio: "117033.88",
+          ingreso_corriente_mediana: "83057.47",
+          decil_1_ingreso: "36579.55",
+          decil_9_ingreso: "197162.73",
+          gasto_corriente_promedio: "59192.24",
+          pct_gasto_alimentos: "34.73",
+          pct_gasto_vivienda: "10.81",
+          pct_gasto_salud: "3.5",
+          pct_gasto_transporte: "12.4",
+          pct_gasto_educacion: "5.1",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=19", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entidad: string;
+      calibrators: Record<string, number | null>;
+    };
+    expect(body.entidad).toBe("19");
+    expect(body.calibrators).toMatchObject({
+      entidad: "19",
+      enigh_ano: 2024,
+      hogares_estimados: 1859166,
+      ingreso_corriente_promedio: 117033.88,
+      decil_1_ingreso: 36579.55,
+      pct_gasto_alimentos: 34.73,
+    });
+  });
+
+  it("returns the empty-shaped row when the calibrators table doesn't exist", async () => {
+    mockExec.mockImplementationOnce(() => {
+      throw Object.assign(new Error("Command failed"), {
+        stderr: Buffer.from(
+          'ERROR:  relation "calibrators_enigh_state" does not exist',
+        ),
+      });
+    });
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=07", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entidad: string;
+      calibrators: Record<string, number | null>;
+    };
+    expect(body.entidad).toBe("07");
+    expect(body.calibrators.entidad).toBe("07");
+    expect(body.calibrators.enigh_ano).toBeNull();
+    expect(body.calibrators.ingreso_corriente_promedio).toBeNull();
+  });
+
+  it("returns the empty-shaped row when the entidad has no loaded data", async () => {
+    // Empty json_agg → "[]" stdout → handler maps to empty-shape.
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=32", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entidad: string;
+      calibrators: Record<string, number | null>;
+    };
+    expect(body.calibrators.entidad).toBe("32");
+    expect(body.calibrators.enigh_ano).toBeNull();
+  });
+
+  it("inlines entidad verbatim into the SQL (and ORDER BY DESC)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/state-calibrators?entidad=14", {
+      headers: AUTH,
+    });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/entidad = '14'/);
+    expect(sql).toMatch(/ORDER BY ano_levantamiento DESC/);
+    expect(sql).toMatch(/LIMIT 1/);
+    expect(sql).toMatch(/calibrators_enigh_state/);
+  });
+
+  it("rejects invalid entidad with 400 / validation.entidad", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=99", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.entidad");
+  });
+
+  it("rejects missing entidad with 400", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=09");
+    expect(res.status).toBe(401);
+  });
+
+  it("propagates non-relation-missing errors as 502", async () => {
+    // Malformed output (not the friendly 42P01 path) → 502 surfaces normally.
+    mockExec.mockReturnValue("not json");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgres.parse_error");
+  });
+
+  it("sets long Cache-Control + Vary on success", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
+    expect(res.headers.get("vary")).toMatch(/X-Api-Key/i);
+  });
+});

@@ -64,6 +64,8 @@ import {
   type RiskSummaryResult,
   type RiskTrendResult,
   type SectorGradeMatrixResult,
+  type StateCalibratorsResult,
+  type StateCalibratorsRow,
   type TopSectorsResult,
 } from "../types.js";
 import { ESTADOS, type EstadoClave } from "../../extractor/types.js";
@@ -1229,6 +1231,166 @@ export async function mortalityTrendHandler(
       def_externas: Number(p.def_externas),
     })),
   };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// State calibrators (v0.2.3-C) — single-row response per entidad backed by
+// `calibrators_enigh_state` (ENOE table will land in a follow-up under
+// the same endpoint). All `_calibrated` enrichment of municipal endpoints
+// is opt-in via LEFT JOIN — this endpoint is the introspection surface.
+// ---------------------------------------------------------------------------
+
+interface RawStateCalibratorsRow {
+  entidad: string;
+  enigh_ano: number | string | null;
+  hogares_estimados: number | string | null;
+  poblacion_estimada: number | string | null;
+  ingreso_corriente_promedio: number | string | null;
+  ingreso_corriente_mediana: number | string | null;
+  decil_1_ingreso: number | string | null;
+  decil_9_ingreso: number | string | null;
+  gasto_corriente_promedio: number | string | null;
+  pct_gasto_alimentos: number | string | null;
+  pct_gasto_vivienda: number | string | null;
+  pct_gasto_salud: number | string | null;
+  pct_gasto_transporte: number | string | null;
+  pct_gasto_educacion: number | string | null;
+}
+
+function stateCalibratorsSql(entidad: string): string {
+  // entidad pre-validated by ENTIDAD_RE. Picks the latest ano_levantamiento
+  // so multi-wave loads (2024 + 2026 + ...) automatically expose the most
+  // recent calibrator without a redeploy. json_agg + read [0] avoids the
+  // C1-class shape bug where runJsonQuery normalizes empty stdout to [].
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    '${entidad}'                                 AS entidad,
+    ano_levantamiento                            AS enigh_ano,
+    hogares_estimados,
+    poblacion_estimada,
+    ingreso_corriente_promedio,
+    ingreso_corriente_mediana,
+    decil_1_ingreso,
+    decil_9_ingreso,
+    gasto_corriente_promedio,
+    pct_gasto_alimentos,
+    pct_gasto_vivienda,
+    pct_gasto_salud,
+    pct_gasto_transporte,
+    pct_gasto_educacion
+  FROM calibrators_enigh_state
+  WHERE entidad = '${entidad}'
+  ORDER BY ano_levantamiento DESC
+  LIMIT 1
+) t;
+`;
+}
+
+/** Empty-shaped row used when no calibrator data exists yet for an entidad. */
+function emptyCalibratorRow(entidad: string): StateCalibratorsRow {
+  return {
+    entidad,
+    enigh_ano: null,
+    hogares_estimados: null,
+    poblacion_estimada: null,
+    ingreso_corriente_promedio: null,
+    ingreso_corriente_mediana: null,
+    decil_1_ingreso: null,
+    decil_9_ingreso: null,
+    gasto_corriente_promedio: null,
+    pct_gasto_alimentos: null,
+    pct_gasto_vivienda: null,
+    pct_gasto_salud: null,
+    pct_gasto_transporte: null,
+    pct_gasto_educacion: null,
+  };
+}
+
+export async function stateCalibratorsHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const entidad = c.req.query("entidad");
+  if (!entidad || !ENTIDAD_RE.test(entidad)) {
+    throw new HttpError(
+      `entidad inválida "${entidad ?? ""}"`,
+      400,
+      "validation.entidad",
+    );
+  }
+
+  // Graceful fallback: if `calibrators_enigh_state` doesn't exist yet
+  // (operator hasn't run load-enigh.ts), return an empty-shaped row instead
+  // of 502. The endpoint's contract says the row is always present for any
+  // valid entidad — null values mean "not loaded yet."
+  let raw: RawStateCalibratorsRow | null;
+  try {
+    const rows = runJsonQuery<RawStateCalibratorsRow[]>(
+      config,
+      stateCalibratorsSql(entidad),
+    );
+    raw = rows[0] ?? null;
+  } catch (err) {
+    if (isRelationMissingError(err)) {
+      raw = null;
+    } else {
+      throw err;
+    }
+  }
+
+  const calibrators: StateCalibratorsRow = raw
+    ? {
+        entidad,
+        enigh_ano: raw.enigh_ano === null ? null : Number(raw.enigh_ano),
+        hogares_estimados:
+          raw.hogares_estimados === null ? null : Number(raw.hogares_estimados),
+        poblacion_estimada:
+          raw.poblacion_estimada === null
+            ? null
+            : Number(raw.poblacion_estimada),
+        ingreso_corriente_promedio:
+          raw.ingreso_corriente_promedio === null
+            ? null
+            : Number(raw.ingreso_corriente_promedio),
+        ingreso_corriente_mediana:
+          raw.ingreso_corriente_mediana === null
+            ? null
+            : Number(raw.ingreso_corriente_mediana),
+        decil_1_ingreso:
+          raw.decil_1_ingreso === null ? null : Number(raw.decil_1_ingreso),
+        decil_9_ingreso:
+          raw.decil_9_ingreso === null ? null : Number(raw.decil_9_ingreso),
+        gasto_corriente_promedio:
+          raw.gasto_corriente_promedio === null
+            ? null
+            : Number(raw.gasto_corriente_promedio),
+        pct_gasto_alimentos:
+          raw.pct_gasto_alimentos === null
+            ? null
+            : Number(raw.pct_gasto_alimentos),
+        pct_gasto_vivienda:
+          raw.pct_gasto_vivienda === null
+            ? null
+            : Number(raw.pct_gasto_vivienda),
+        pct_gasto_salud:
+          raw.pct_gasto_salud === null ? null : Number(raw.pct_gasto_salud),
+        pct_gasto_transporte:
+          raw.pct_gasto_transporte === null
+            ? null
+            : Number(raw.pct_gasto_transporte),
+        pct_gasto_educacion:
+          raw.pct_gasto_educacion === null
+            ? null
+            : Number(raw.pct_gasto_educacion),
+      }
+    : emptyCalibratorRow(entidad);
+
+  const result: StateCalibratorsResult = { entidad, calibrators };
+  // Calibrators change once per ENIGH wave (~biennial). 1-hour cache fits.
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
   return c.json(result);

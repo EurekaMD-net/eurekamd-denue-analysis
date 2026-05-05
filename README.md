@@ -10,7 +10,7 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 **Live**: <https://uncharted.eurekamd.cloud/> (Caddy + LE TLS + dist/ + gzip + immutable cache, systemd-managed via `denue-analyzer.service`).
 
-Backend v0.1 + v0.2.1 + v0.2.2 + v0.2.3-A cargados en producción (**7 fuentes joinables por `cve_mun` 5-char**: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES × CE 2024 × EDR mortalidad 2024, plus SESNSP RNID Delitos Municipal 2015–2026 como capa de riesgo operacional). El analyzer (`web/`) tiene **dos modos** sobre el mismo dataset:
+Backend v0.1 + v0.2.1 + v0.2.2 + v0.2.3-A + v0.2.3-C cargados en producción (**7 fuentes joinables por `cve_mun` 5-char**: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES × CE 2024 × EDR mortalidad 2024, plus SESNSP RNID Delitos Municipal 2015–2026 como capa de riesgo operacional, plus **ENIGH 2024 calibrador estatal** keyed por entidad para anclar pobreza/ingreso al absoluto). El analyzer (`web/`) tiene **dos modos** sobre el mismo dataset:
 
 - **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints comerciales (`/analytics/national-treemap`, `/sector-grade-matrix`, `/municipios`, `/top-sectors`).
 - **Map mode**: MapLibre + Carto Positron/Dark Matter basemap, vector source sobre `/tiles/:z/:x/:y.mvt` con heatmap (zoom <14) + circles (zoom ≥11) y deck.gl `ScatterplotLayer` overlay para cluster centroids cuando entidad+sector están seleccionados. Click en punto → detalle del establecimiento via `/establishment/:clee`.
@@ -18,7 +18,9 @@ Backend v0.1 + v0.2.1 + v0.2.2 + v0.2.3-A cargados en producción (**7 fuentes j
 
 v0.2.3-A **shipped 2026-05-05**: EDR mortalidad 2024 (819,672 deaths registered, 809,063 con residencia válida en 2,472 municipios). Mat-view `mv_mortalidad_municipal_yearly` + 2 endpoints (`/analytics/mortality-summary`, `/analytics/mortality-trend`) con cause-of-death breakdown CIE-10 (circulatorio, neoplasias, endocrinas, externas, infantil) y tasa cruda por 1k habitantes. `currentMortalityAno` resuelto al boot vía `MAX(ano) WHERE COUNT >= 100k` para evitar lag-artifact years como default.
 
-v0.2.3 restante: **Datatur** = mixed (~50/70 destinos direct-join post-crosswalk; ~20 calibradores zonales) — pendiente crosswalk. **ENOE + ENIGH** = calibradores estatales — parameter tables keyed por entidad que entran a endpoints existentes vía `LEFT JOIN`. Patrón general: fuentes que no joinan a `cve_mun` no se descartan; condicionan / multiplican / contextualizan las filas municipales. Plan completo en [`docs/v0.2.3-plan.md`](docs/v0.2.3-plan.md).
+v0.2.3-C **shipped 2026-05-05**: ENIGH 2024 calibrador estatal (91,414 hogares aggregated to 32 entidades). Tabla `calibrators_enigh_state` con weighted percentile P10/P50/P90 (cumulative-sum-window — Postgres percentile_cont/disc no aceptan weights), ingreso/gasto promedio factor-weighted, y Engel coefficient (`pct_gasto_alimentos`). Endpoint `/analytics/state-calibrators?entidad=NN`. Live: NL 19 mean $117k vs Chiapas 07 mean $41k; Engel 35% vs 47% — separación poverty-signature limpia.
+
+v0.2.3 restante: **Datatur** = mixed (~50/70 destinos direct-join post-crosswalk; ~20 calibradores zonales) — pendiente crosswalk. **ENOE** = calibrador estatal — mismo patrón de ENIGH cuando llegue el ZIP. Patrón general: fuentes que no joinan a `cve_mun` no se descartan; condicionan / multiplican / contextualizan las filas municipales. Plan completo en [`docs/v0.2.3-plan.md`](docs/v0.2.3-plan.md).
 
 ---
 
@@ -60,16 +62,18 @@ v0.2.3 restante: **Datatur** = mixed (~50/70 destinos direct-join post-crosswalk
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión        | Fuentes                  | Descripción                                                                                                  | Estado              | Docs                                                                |
-| -------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------- | ------------------------------------------------------------------- |
-| **v0.1**       | DENUE                    | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done             | este README                                                         |
-| **v0.2.1**     | Censo 2020 + CONEVAL     | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2**     | CE 2024 + CLUES + SESNSP | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | ✅ Done             | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3-A**   | EDR mortalidad 2024      | 819,672 deaths × cve_mun + cause-of-death breakdown + tasa por 1k. Mat-view + 2 endpoints + boot resolver    | ✅ Done             | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
-| **v0.2.3-B/C** | Datatur + ENOE + ENIGH   | ENOE + ENIGH calibradores estatales (LEFT JOIN entidad); Datatur diferido por crosswalk destino↔cve_mun      | 📋 Plan listo       | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
-| **v0.3 P2**    | Locust mode (analyzer)   | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P3**    | Map mode (analyzer)      | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P4**    | Deploy                   | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión        | Fuentes                  | Descripción                                                                                                    | Estado              | Docs                                                                |
+| -------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| **v0.1**       | DENUE                    | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                           | ✅ Done             | este README                                                         |
+| **v0.2.1**     | Censo 2020 + CONEVAL     | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                               | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2**     | CE 2024 + CLUES + SESNSP | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                         | ✅ Done             | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3-A**   | EDR mortalidad 2024      | 819,672 deaths × cve_mun + cause-of-death breakdown + tasa por 1k. Mat-view + 2 endpoints + boot resolver      | ✅ Done             | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
+| **v0.2.3-C-1** | ENIGH 2024 calibrador    | 91,414 hogares → 32 entidades. Weighted decil P10/P50/P90 + Engel coefficient. 1 endpoint `/state-calibrators` | ✅ Done             | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
+| **v0.2.3-C-2** | ENOE calibrador          | Pendiente entrega operador. Mismo patrón ENIGH; tasa informalidad multiplica CE 2024 establishment counts      | 📋 Pending ZIP      | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
+| **v0.2.3-B**   | Datatur turismo          | Mixed: ~50/70 destinos direct-join post-crosswalk; ~20 = calibradores zonales                                  | ⏸ Defer crosswalk   | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
+| **v0.3 P2**    | Locust mode (analyzer)   | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`                 | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P3**    | Map mode (analyzer)      | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail   | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P4**    | Deploy                   | analyzer.denue.net via Caddy + Let's Encrypt                                                                   | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
