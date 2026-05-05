@@ -14,9 +14,9 @@ Backend v0.1 + v0.2.1 + v0.2.2 cargados en producción (**6 fuentes joinables po
 
 - **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints comerciales (`/analytics/national-treemap`, `/sector-grade-matrix`, `/municipios`, `/top-sectors`).
 - **Map mode**: MapLibre + Carto Positron/Dark Matter basemap, vector source sobre `/tiles/:z/:x/:y.mvt` con heatmap (zoom <14) + circles (zoom ≥11) y deck.gl `ScatterplotLayer` overlay para cluster centroids cuando entidad+sector están seleccionados. Click en punto → detalle del establecimiento via `/establishment/:clee`.
-- **Risk surface (backend only, sin UI todavía)**: 2 endpoints SESNSP — `/analytics/risk-summary?entidad=NN[&ano=&baseline_ano=]` (perfil per-municipio con totales por subtipo + per-1k normalización + cambio % vs baseline) y `/analytics/risk-trend?cve_mun=NNNNN` (serie mensual ~135 puntos 2015–2026 Mar). Mat-view `mv_delitos_municipal_yearly` con fallback gracioso a agregación live si la MV no existe. UI integration es la siguiente conversación.
+- **Risk surface (backend only, sin UI todavía)**: 2 endpoints SESNSP — `/analytics/risk-summary?entidad=NN[&ano=&baseline_ano=]` (perfil per-municipio con totales por subtipo + per-1k normalización + cambio % vs baseline) y `/analytics/risk-trend?cve_mun=NNNNN` (serie mensual ~135 puntos 2015–2026 Mar). Mat-view `mv_delitos_municipal_yearly` con fallback gracioso a agregación live si la MV no existe. El default `ano` se resuelve al arranque desde `MAX(ano)` con todos los 12 meses reportados (audit W5, 2026-05-05) — rollover automático cuando la siguiente carga de diciembre cierre el año. UI integration es la siguiente conversación.
 
-Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
+v0.2.3 acotado tras investigación 2026-05-05: **EDR/SINAIS mortalidad** confirmado como única fuente con join nativo a `cve_mun` — pendiente entrega del operador (INEGI bloquea descargas headless). **Datatur** diferido pendiente de crosswalk destino↔cve_mun. **ENOE + ENIGH** descartados (diseño muestral prohíbe inferencia municipal). Plan completo en [`docs/v0.2.3-plan.md`](docs/v0.2.3-plan.md).
 
 ---
 
@@ -58,15 +58,15 @@ Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión     | Fuentes                         | Descripción                                                                                                  | Estado              | Docs                                                                |
-| ----------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------- | ------------------------------------------------------------------- |
-| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done             | este README                                                         |
-| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | ✅ Done             | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado                     | 📋 Queued           | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P3** | Map mode (analyzer)             | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión     | Fuentes                  | Descripción                                                                                                  | Estado              | Docs                                                                |
+| ----------- | ------------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------- | ------------------------------------------------------------------- |
+| **v0.1**    | DENUE                    | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done             | este README                                                         |
+| **v0.2.1**  | Censo 2020 + CONEVAL     | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2**  | CE 2024 + CLUES + SESNSP | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | ✅ Done             | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3**  | EDR/SINAIS mortalidad    | Mortalidad municipal (defunciones × cve_mun, anual). Datatur diferido por crosswalk; ENOE+ENIGH descartados  | 📋 Plan listo       | [v0.2.3-plan.md](docs/v0.2.3-plan.md)                               |
+| **v0.3 P2** | Locust mode (analyzer)   | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P3** | Map mode (analyzer)      | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P4** | Deploy                   | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
