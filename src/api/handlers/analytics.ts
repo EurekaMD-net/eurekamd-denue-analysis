@@ -61,6 +61,7 @@ import {
   CVE_MUN_RE,
   CVEGEO_RE,
   ENTIDAD_RE,
+  isRezagoGrado,
   MORTALITY_DEFAULT_CURRENT_ANO,
   OPPORTUNITY_AGEB_DEFAULT_LIMIT,
   OPPORTUNITY_AGEB_MAX_LIMIT,
@@ -68,6 +69,7 @@ import {
   OPPORTUNITY_COLONIA_DEFAULT_LIMIT,
   OPPORTUNITY_COLONIA_MAX_LIMIT,
   OPPORTUNITY_COLONIA_ORDER_BY,
+  REZAGO_GRADOS,
   RISK_ANO_RE,
   RISK_DEFAULT_BASELINE_ANO,
   RISK_DEFAULT_CURRENT_ANO,
@@ -90,6 +92,7 @@ import {
   type OpportunityByAgebResult,
   type OpportunityByColoniaResult,
   type OpportunityColoniaOrderBy,
+  type RezagoGrado,
   type RiskSummaryResult,
   type RiskTrendResult,
   type ScianLevel,
@@ -1739,6 +1742,57 @@ interface RawAgebCensusRow {
   vph_autom: number | string | null;
 }
 
+/**
+ * CONEVAL GRS_AGEB urbana 2020 (v0.2.6) — single AGEB rezago social row.
+ *
+ * `grado` is the headline ordinal classifier (Muy bajo/Bajo/Medio/Alto/
+ * Muy alto). The 17 indicators are percentage breakdowns; some may be
+ * NULL per LSNIEG art. 37 (CONEVAL suppresses values for AGEBs with <3
+ * viviendas habitadas). The view filter ensures only the 5 valid grados
+ * pass through, so a NULL `grado` from this query means the AGEB is not
+ * in CONEVAL's dataset (rural / post-2020 subdivision / orphan).
+ */
+function agebRezagoSql(cvegeo: string): string {
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    grado, pobtot, vivpar_hab,
+    ind_analfabeta, ind_no_escuela_6_14, ind_no_escuela_15_24,
+    ind_basica_incompleta, ind_sin_salud, ind_hacinamiento,
+    ind_sin_agua, ind_sin_excusado, ind_sin_drenaje,
+    ind_sin_luz, ind_piso_tierra, ind_sin_lavadora,
+    ind_sin_refri, ind_sin_telfijo, ind_sin_celular,
+    ind_sin_compu, ind_sin_internet
+  FROM coneval_grs_ageb
+  WHERE cvegeo = '${cvegeo}'
+  LIMIT 1
+) t;
+`;
+}
+
+interface RawAgebRezagoRow {
+  grado: string | null;
+  pobtot: number | string | null;
+  vivpar_hab: number | string | null;
+  ind_analfabeta: number | string | null;
+  ind_no_escuela_6_14: number | string | null;
+  ind_no_escuela_15_24: number | string | null;
+  ind_basica_incompleta: number | string | null;
+  ind_sin_salud: number | string | null;
+  ind_hacinamiento: number | string | null;
+  ind_sin_agua: number | string | null;
+  ind_sin_excusado: number | string | null;
+  ind_sin_drenaje: number | string | null;
+  ind_sin_luz: number | string | null;
+  ind_piso_tierra: number | string | null;
+  ind_sin_lavadora: number | string | null;
+  ind_sin_refri: number | string | null;
+  ind_sin_telfijo: number | string | null;
+  ind_sin_celular: number | string | null;
+  ind_sin_compu: number | string | null;
+  ind_sin_internet: number | string | null;
+}
+
 function agebEstabSummarySql(cvegeo: string): string {
   return `
 SELECT json_agg(row_to_json(t)) FROM (
@@ -1879,6 +1933,15 @@ export async function agebDetailHandler(
     agebCensusSql(cvegeo),
   );
   const censusRow = censusRows[0];
+  // v0.2.6: CONEVAL Grado de Rezago Social at AGEB granularity. ~95% coverage
+  // of urban AGEBs; null for rural / post-2020 subdivisions. Resolves the
+  // muni-IRS-applied-to-AGEB statistical-noise trap (Iztapalapa AGEBs span
+  // Muy bajo to Muy alto rezago — muni-level IRS hides this entirely).
+  const rezagoRows = runJsonQuery<RawAgebRezagoRow[]>(
+    config,
+    agebRezagoSql(cvegeo),
+  );
+  const rezagoRow = rezagoRows[0];
 
   // qa-audit S3 (2026-05-05): summary SQL is shaped to ALWAYS return one
   // row (COUNT(*) over a non-empty filter). If we ever see [] here, the SQL
@@ -1943,6 +2006,33 @@ export async function agebDetailHandler(
           vph_autom: num(censusRow.vph_autom),
         }
       : null,
+    rezago_social:
+      rezagoRow && isRezagoGrado(rezagoRow.grado)
+        ? {
+            grado: rezagoRow.grado,
+            pobtot: num(rezagoRow.pobtot),
+            vivpar_hab: num(rezagoRow.vivpar_hab),
+            indicators: {
+              ind_analfabeta: num(rezagoRow.ind_analfabeta),
+              ind_no_escuela_6_14: num(rezagoRow.ind_no_escuela_6_14),
+              ind_no_escuela_15_24: num(rezagoRow.ind_no_escuela_15_24),
+              ind_basica_incompleta: num(rezagoRow.ind_basica_incompleta),
+              ind_sin_salud: num(rezagoRow.ind_sin_salud),
+              ind_hacinamiento: num(rezagoRow.ind_hacinamiento),
+              ind_sin_agua: num(rezagoRow.ind_sin_agua),
+              ind_sin_excusado: num(rezagoRow.ind_sin_excusado),
+              ind_sin_drenaje: num(rezagoRow.ind_sin_drenaje),
+              ind_sin_luz: num(rezagoRow.ind_sin_luz),
+              ind_piso_tierra: num(rezagoRow.ind_piso_tierra),
+              ind_sin_lavadora: num(rezagoRow.ind_sin_lavadora),
+              ind_sin_refri: num(rezagoRow.ind_sin_refri),
+              ind_sin_telfijo: num(rezagoRow.ind_sin_telfijo),
+              ind_sin_celular: num(rezagoRow.ind_sin_celular),
+              ind_sin_compu: num(rezagoRow.ind_sin_compu),
+              ind_sin_internet: num(rezagoRow.ind_sin_internet),
+            },
+          }
+        : null,
     total_establecimientos: Number(summary.total_establecimientos ?? 0),
     total_farmacias: Number(summary.total_farmacias ?? 0),
     top_sectors: sectors.map((s) => ({
@@ -2241,6 +2331,49 @@ function parseTargetScian(raw: string | undefined): {
 }
 
 /**
+ * Parse the optional `rezago_grado` query param into a typed list.
+ *
+ * Format: comma-separated grado names (any of the 5 CONEVAL ordinal levels).
+ * Spaces in "Muy bajo" / "Muy alto" must come URL-decoded already (Hono
+ * parses query strings, so `?rezago_grado=Muy%20bajo` arrives as "Muy bajo").
+ *
+ * Empty / undefined / whitespace-only → returns []. The handler treats an
+ * empty filter as "no constraint" and skips the WHERE clause entirely. This
+ * keeps the legacy v0.2.5 contract intact (no rezago filter = same query).
+ *
+ * Throws HttpError(400) on:
+ *   - Any element not in REZAGO_GRADOS (catches typos / SQL-injection attempts)
+ *   - Duplicate elements (probably a copy-paste error worth surfacing)
+ *
+ * v0.2.6 addition.
+ */
+function parseRezagoGradoFilter(raw: string | undefined): RezagoGrado[] {
+  if (!raw || raw.trim() === "") return [];
+  const parts = raw.split(",").map((p) => p.trim());
+  const seen = new Set<string>();
+  const out: RezagoGrado[] = [];
+  for (const part of parts) {
+    if (!isRezagoGrado(part)) {
+      throw new HttpError(
+        `rezago_grado: valor inválido "${part}". Valores válidos: ${REZAGO_GRADOS.join(", ")}.`,
+        400,
+        "validation.rezago_grado",
+      );
+    }
+    if (seen.has(part)) {
+      throw new HttpError(
+        `rezago_grado: valor duplicado "${part}".`,
+        400,
+        "validation.rezago_grado",
+      );
+    }
+    seen.add(part);
+    out.push(part);
+  }
+  return out;
+}
+
+/**
  * Validate + parse the limit param against the per-endpoint default/max.
  * Returns the resolved limit. Throws HttpError(400) on bad input.
  */
@@ -2271,6 +2404,7 @@ interface RawOpportunityAgebRow {
   target_count: string | number | null;
   total_estab: string | number | null;
   score: string | number | null;
+  rezago_grado: string | null;
 }
 
 function opportunityByAgebSql(
@@ -2279,11 +2413,13 @@ function opportunityByAgebSql(
   scianCodes: string[],
   orderBy: OpportunityAgebOrderBy,
   limit: number,
+  rezagoFilter: RezagoGrado[],
 ): string {
-  // Validation upstream guarantees `scianColumn` is one of 5 known columns
-  // and `scianCodes` are all `\d{2,6}`. We still defense-in-depth quote them
-  // as SQL string literals (numeric SCIAN codes are stored as TEXT in DENUE
-  // — '46' lexicographically ≠ 46 the int).
+  // Validation upstream guarantees `scianColumn` is one of 5 known columns,
+  // `scianCodes` are all `\d{2,6}`, and `rezagoFilter` entries are all from
+  // the REZAGO_GRADOS allowlist. We still defense-in-depth single-quote
+  // every literal (SCIAN codes are TEXT in DENUE — '46' lexicographically
+  // ≠ 46 the int; rezago grados contain spaces so quoting is mandatory).
   const inList = scianCodes.map((c) => `'${c}'`).join(",");
   // qa-audit W1 (2026-05-05): wrap pobtot in NULLIF(_, 0) so AGEBs with
   // censused-but-empty population (pobtot=0) collapse to NULL in the score
@@ -2298,6 +2434,13 @@ function opportunityByAgebSql(
         : orderBy === "target_count"
           ? "COALESCE(t.cnt, 0) DESC"
           : /* total_estab */ "COALESCE(e.cnt, 0) DESC";
+  // v0.2.6: optional CONEVAL Grado de Rezago Social filter. Always JOIN to
+  // surface `rezago_grado` in the row payload (so operator sees the rezago
+  // context for free); only WHERE-filter when the request actually narrows.
+  const rezagoWhere =
+    rezagoFilter.length === 0
+      ? ""
+      : `AND cga.grado IN (${rezagoFilter.map((g) => `'${g}'`).join(",")})\n  `;
   return `
 SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
     .replace(/cab\.pobtot/g, "r.pobtot")
@@ -2316,7 +2459,8 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
       WHEN cab.pobtot IS NULL OR cab.pobtot = 0 THEN NULL
       WHEN COALESCE(t.cnt, 0) = 0 THEN NULL
       ELSE ROUND((cab.pobtot::numeric / t.cnt)::numeric, 2)
-    END AS score
+    END AS score,
+    cga.grado AS rezago_grado
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
@@ -2330,8 +2474,9 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
     GROUP BY ageb
   ) t ON t.ageb = a.cvegeo
   LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
+  LEFT JOIN coneval_grs_ageb cga ON cga.cvegeo = a.cvegeo
   WHERE a.cve_ent || a.cve_mun = '${cveMun}'
-  ORDER BY ${orderExpr}
+  ${rezagoWhere}ORDER BY ${orderExpr}
   LIMIT ${limit}
 ) r;
 `;
@@ -2385,16 +2530,18 @@ export async function opportunityByAgebHandler(
     OPPORTUNITY_AGEB_DEFAULT_LIMIT,
     OPPORTUNITY_AGEB_MAX_LIMIT,
   );
+  const rezagoFilter = parseRezagoGradoFilter(c.req.query("rezago_grado"));
 
   const rows = runJsonQuery<RawOpportunityAgebRow[]>(
     config,
-    opportunityByAgebSql(cveMun, column, codes, orderBy, limit),
+    opportunityByAgebSql(cveMun, column, codes, orderBy, limit, rezagoFilter),
   );
   const result: OpportunityByAgebResult = {
     cve_mun: cveMun,
     scian_level: level,
     target_scian: codes,
     order_by: orderBy,
+    rezago_grado_filter: rezagoFilter,
     total_returned: rows.length,
     agebs: rows.map((r) => ({
       cvegeo: r.cvegeo,
@@ -2406,6 +2553,7 @@ export async function opportunityByAgebHandler(
       target_count: Number(r.target_count ?? 0),
       total_estab: Number(r.total_estab ?? 0),
       score: r.score == null ? null : Number(r.score),
+      rezago_grado: isRezagoGrado(r.rezago_grado) ? r.rezago_grado : null,
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");

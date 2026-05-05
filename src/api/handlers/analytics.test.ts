@@ -1904,6 +1904,8 @@ describe("GET /analytics/ageb-detail", () => {
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      // v0.2.6: agebRezagoSql — letter-suffix AGEBs typically not in CONEVAL
       .mockReturnValueOnce(JSON.stringify([]));
 
     const app = createServer(CONFIG);
@@ -1991,6 +1993,33 @@ describe("GET /analytics/ageb-detail", () => {
             vph_autom: "128",
           },
         ]),
+      )
+      // v0.2.6: agebRezagoSql — Puebla centro AGEB has Bajo grado
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            grado: "Bajo",
+            pobtot: "2175",
+            vivpar_hab: "640",
+            ind_analfabeta: "1.2",
+            ind_no_escuela_6_14: "0.5",
+            ind_no_escuela_15_24: "10.1",
+            ind_basica_incompleta: "12.3",
+            ind_sin_salud: "20.4",
+            ind_hacinamiento: "1.0",
+            ind_sin_agua: "0",
+            ind_sin_excusado: "0",
+            ind_sin_drenaje: "0",
+            ind_sin_luz: "0",
+            ind_piso_tierra: "0",
+            ind_sin_lavadora: "5.2",
+            ind_sin_refri: "1.1",
+            ind_sin_telfijo: "32.0",
+            ind_sin_celular: "2.1",
+            ind_sin_compu: "30.5",
+            ind_sin_internet: "18.7",
+          },
+        ]),
       );
 
     const app = createServer(CONFIG);
@@ -2064,6 +2093,8 @@ describe("GET /analytics/ageb-detail", () => {
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      // v0.2.6: agebRezagoSql — rural AGEB has no CONEVAL row
       .mockReturnValueOnce(JSON.stringify([]));
 
     const app = createServer(CONFIG);
@@ -2107,6 +2138,8 @@ describe("GET /analytics/ageb-detail", () => {
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([]))
       .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      // v0.2.6: agebRezagoSql
       .mockReturnValueOnce(JSON.stringify([]));
 
     const app = createServer(CONFIG);
@@ -2718,5 +2751,302 @@ describe("GET /analytics/colonias-by-municipio (v0.2.5)", () => {
     );
     expect(res.status).toBe(400);
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.6 — CONEVAL Grado de Rezago Social at AGEB
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/ageb-detail rezago_social field (v0.2.6)", () => {
+  it("returns rezago_social with all 17 indicators when AGEB is in CONEVAL", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0900700010017",
+            cve_ent: "09",
+            cve_mun: "007",
+            cve_loc: "0001",
+            cve_ageb: "0017",
+            ambito: "Urbana",
+            area_km2: "0.5",
+            centroid_lat: "19.36",
+            centroid_lon: "-99.07",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 5, total_farmacias: 1 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            grado: "Bajo",
+            pobtot: "5868",
+            vivpar_hab: "1645",
+            ind_analfabeta: "0.89",
+            ind_no_escuela_6_14: "3.46",
+            ind_no_escuela_15_24: "43.87",
+            ind_basica_incompleta: "16.61",
+            ind_sin_salud: "37.40",
+            ind_hacinamiento: "2.92",
+            ind_sin_agua: "0.12",
+            ind_sin_excusado: "0.24",
+            ind_sin_drenaje: "0.06",
+            ind_sin_luz: "0.06",
+            ind_piso_tierra: "0.30",
+            ind_sin_lavadora: "17.09",
+            ind_sin_refri: "5.96",
+            ind_sin_telfijo: "33.09",
+            ind_sin_celular: "7.18",
+            ind_sin_compu: "44.89",
+            ind_sin_internet: "25.97",
+          },
+        ]),
+      );
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=0900700010017",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.rezago_social).not.toBeNull();
+    expect(body.rezago_social!.grado).toBe("Bajo");
+    expect(body.rezago_social!.pobtot).toBe(5868);
+    expect(body.rezago_social!.indicators.ind_analfabeta).toBeCloseTo(0.89, 2);
+    expect(body.rezago_social!.indicators.ind_sin_internet).toBeCloseTo(
+      25.97,
+      2,
+    );
+  });
+
+  it("returns rezago_social=null when AGEB not in CONEVAL (rural / post-2020)", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "1099900020001",
+            cve_ent: "10",
+            cve_mun: "999",
+            cve_loc: "0002",
+            cve_ageb: "0001",
+            ambito: "Rural",
+            area_km2: "5.0",
+            centroid_lat: "23.5",
+            centroid_lon: "-104.0",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      // v0.2.6 rezago: empty array — AGEB has no CONEVAL row
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=1099900020001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.rezago_social).toBeNull();
+  });
+
+  it("returns rezago_social=null when grado is not in the CONEVAL allowlist", async () => {
+    // Defense in depth: even if a malformed row escapes the view filter, the
+    // handler's isRezagoGrado() guard collapses unknown grados to null
+    // rather than passing through an unsanctioned string.
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0900700010017",
+            cve_ent: "09",
+            cve_mun: "007",
+            cve_loc: "0001",
+            cve_ageb: "0017",
+            ambito: "Urbana",
+            area_km2: "0.5",
+            centroid_lat: "19.36",
+            centroid_lon: "-99.07",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 1, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      // Adversarial: garbage grado that should NOT pass to the response
+      .mockReturnValueOnce(
+        JSON.stringify([{ grado: "NOT_A_VALID_GRADO", pobtot: "100" }]),
+      );
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=0900700010017",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.rezago_social).toBeNull();
+  });
+});
+
+describe("GET /analytics/opportunity-by-ageb rezago_grado filter (v0.2.6)", () => {
+  it("rejects rezago_grado with invalid value (catches typos and SQL injection)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111&rezago_grado=Banana",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects rezago_grado with adversarial payload (apostrophe SQL injection)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111&rezago_grado=" +
+        encodeURIComponent("Bajo';DROP TABLE--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate rezago_grado entries", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111&rezago_grado=Bajo,Bajo",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("accepts multi-valued rezago_grado (Alto + Muy alto)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111&rezago_grado=Alto,Muy%20alto",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OpportunityByAgebResult;
+    expect(body.rezago_grado_filter).toEqual(["Alto", "Muy alto"]);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("LEFT JOIN coneval_grs_ageb cga");
+    expect(sql).toContain("AND cga.grado IN ('Alto','Muy alto')");
+  });
+
+  it("LEFT JOINs coneval_grs_ageb even with no rezago_grado filter (surface grado)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    // JOIN must always be present so cga.grado projects into the row
+    expect(sql).toContain("LEFT JOIN coneval_grs_ageb cga");
+    expect(sql).toContain("cga.grado AS rezago_grado");
+    // No filter clause when the param is absent
+    expect(sql).not.toContain("AND cga.grado IN");
+  });
+
+  it("returns rezago_grado_filter=[] when param absent", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as OpportunityByAgebResult;
+    expect(body.rezago_grado_filter).toEqual([]);
+  });
+
+  it("propagates per-row rezago_grado from SQL into payload + null-folds bad values", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "0900700015658",
+          ambito: "Urbana",
+          centroid_lat: "19.36",
+          centroid_lon: "-99.07",
+          area_km2: "0.5",
+          pobtot: "7959",
+          target_count: "2",
+          total_estab: "120",
+          score: "3979.5",
+          rezago_grado: "Alto",
+        },
+        {
+          cvegeo: "0900700099999",
+          ambito: "Urbana",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: "1.0",
+          pobtot: null,
+          target_count: "0",
+          total_estab: "5",
+          score: null,
+          rezago_grado: null, // not in CONEVAL — null passthrough
+        },
+        {
+          cvegeo: "0900700088888",
+          ambito: "Urbana",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: "0.3",
+          pobtot: "1500",
+          target_count: "0",
+          total_estab: "10",
+          score: null,
+          rezago_grado: "BOGUS_VALUE", // adversarial — must collapse to null
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09007&target_scian=464111",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as OpportunityByAgebResult;
+    expect(body.agebs[0].rezago_grado).toBe("Alto");
+    expect(body.agebs[1].rezago_grado).toBeNull();
+    // Adversarial value MUST collapse to null at the type boundary
+    expect(body.agebs[2].rezago_grado).toBeNull();
   });
 });

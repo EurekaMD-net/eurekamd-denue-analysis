@@ -483,6 +483,89 @@ export interface AgebCensusFields {
   vph_autom: number | null;
 }
 
+/**
+ * CONEVAL "Grado de Rezago Social" — 5-level ordinal classification
+ * applied per AGEB urbana, derived from a composite of 17 indicators.
+ *
+ * Loaded from CONEVAL GRS_AGEB_urbana_2020.xlsx (v0.2.6 — 2026-05-05).
+ * 61,430 AGEBs — 95.5% of `censo_ageb` urbano. Rural AGEBs not in this
+ * dataset.
+ */
+export const REZAGO_GRADOS = [
+  "Muy bajo",
+  "Bajo",
+  "Medio",
+  "Alto",
+  "Muy alto",
+] as const;
+export type RezagoGrado = (typeof REZAGO_GRADOS)[number];
+
+/** Narrow an unknown SQL-returned value to RezagoGrado. */
+export function isRezagoGrado(v: unknown): v is RezagoGrado {
+  return (
+    typeof v === "string" && (REZAGO_GRADOS as readonly string[]).includes(v)
+  );
+}
+
+/**
+ * 17 rezago social indicators per AGEB. Each is a percentage (0..100).
+ * NULL when CONEVAL applied LSNIEG art. 37 confidentiality (AGEBs with
+ * <3 viviendas habitadas — ~0.5% of rows). Field names mirror loader's
+ * lowercase TEXT columns.
+ */
+export interface RezagoIndicators {
+  /** % población 15+ analfabeta */
+  ind_analfabeta: number | null;
+  /** % población 6-14 que no asiste a la escuela */
+  ind_no_escuela_6_14: number | null;
+  /** % población 15-24 que no asiste a la escuela */
+  ind_no_escuela_15_24: number | null;
+  /** % población 15+ con educación básica incompleta */
+  ind_basica_incompleta: number | null;
+  /** % población sin derechohabiencia a servicios de salud */
+  ind_sin_salud: number | null;
+  /** % viviendas con hacinamiento */
+  ind_hacinamiento: number | null;
+  /** % viviendas sin agua entubada */
+  ind_sin_agua: number | null;
+  /** % viviendas sin excusado/sanitario */
+  ind_sin_excusado: number | null;
+  /** % viviendas sin drenaje */
+  ind_sin_drenaje: number | null;
+  /** % viviendas sin energía eléctrica */
+  ind_sin_luz: number | null;
+  /** % viviendas con piso de tierra */
+  ind_piso_tierra: number | null;
+  /** % viviendas sin lavadora */
+  ind_sin_lavadora: number | null;
+  /** % viviendas sin refrigerador */
+  ind_sin_refri: number | null;
+  /** % viviendas sin teléfono fijo */
+  ind_sin_telfijo: number | null;
+  /** % viviendas sin celular */
+  ind_sin_celular: number | null;
+  /** % viviendas sin computadora */
+  ind_sin_compu: number | null;
+  /** % viviendas sin internet */
+  ind_sin_internet: number | null;
+}
+
+/**
+ * Composite rezago social bundle for one AGEB. v0.2.6 addition.
+ *
+ * `grado` is the headline 5-level classifier (CONEVAL methodology).
+ * `pobtot` and `vivpar_hab` are population/dwelling totals from the
+ * CONEVAL row — usually identical to `censo_ageb.pobtot` / `tvivpar` but
+ * occasionally differ (~few hundred AGEBs) because CONEVAL released its
+ * own censo extraction. We expose both so callers can detect drift.
+ */
+export interface RezagoSocial {
+  grado: RezagoGrado;
+  pobtot: number | null;
+  vivpar_hab: number | null;
+  indicators: RezagoIndicators;
+}
+
 export interface AgebDetailResult {
   cvegeo: string;
   cve_ent: string;
@@ -509,6 +592,16 @@ export interface AgebDetailResult {
    * null for rural AGEBs not in RESAGEBURB. v0.2.4-B addition.
    */
   census: AgebCensusFields | null;
+  /**
+   * CONEVAL Grado de Rezago Social + 17 indicators, AGEB granularity.
+   * null when AGEB is not in CONEVAL GRS_AGEB_urbana_2020 (rural or
+   * post-2020 subdivision). v0.2.6 addition.
+   *
+   * Resolves the "muni-IRS-applied-to-AGEB is statistical noise" trap
+   * that motivated v0.2.6: a single muni like Iztapalapa contains AGEBs
+   * spanning Muy bajo → Muy alto rezago.
+   */
+  rezago_social: RezagoSocial | null;
   total_establecimientos: number;
   total_farmacias: number;
   top_sectors: AgebDetailTopSector[];
@@ -636,6 +729,13 @@ export interface OpportunityByAgebRow {
    * (greenfield AGEB — no existing competition; sort by `pobtot` to find these).
    */
   score: number | null;
+  /**
+   * CONEVAL Grado de Rezago Social per AGEB (v0.2.6 addition). null when the
+   * AGEB is not in CONEVAL GRS_AGEB_urbana_2020 (rural / post-2020 / orphan).
+   * Returned in every row regardless of whether the `rezago_grado` query
+   * filter was applied — operator sees the rezago context inline.
+   */
+  rezago_grado: RezagoGrado | null;
 }
 
 export interface OpportunityByAgebResult {
@@ -643,6 +743,12 @@ export interface OpportunityByAgebResult {
   scian_level: ScianLevel;
   target_scian: string[];
   order_by: OpportunityAgebOrderBy;
+  /**
+   * If the request applied a `rezago_grado` filter, the parsed list. Empty
+   * array when no filter was applied (= no constraint, all AGEBs eligible).
+   * v0.2.6 addition.
+   */
+  rezago_grado_filter: RezagoGrado[];
   total_returned: number;
   agebs: OpportunityByAgebRow[];
 }
