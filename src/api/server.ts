@@ -50,6 +50,8 @@ import {
   agebFarmaciaOpportunityHandler,
   agebsByMunicipioHandler,
   coloniasByMunicipioHandler,
+  licensedPharmaciesByAgebHandler,
+  licensedPharmaciesByMunicipioHandler,
   mortalitySummaryHandler,
   mortalityTrendHandler,
   municipiosAnalyticsHandler,
@@ -153,6 +155,12 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/colonias-by-municipio", (c) =>
     coloniasByMunicipioHandler(c, config),
+  );
+  app.get("/analytics/licensed-pharmacies-by-municipio", (c) =>
+    licensedPharmaciesByMunicipioHandler(c, config),
+  );
+  app.get("/analytics/licensed-pharmacies-by-ageb", (c) =>
+    licensedPharmaciesByAgebHandler(c, config),
   );
 
   return app;

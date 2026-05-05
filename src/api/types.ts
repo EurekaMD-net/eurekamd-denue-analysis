@@ -832,6 +832,48 @@ export interface ColoniasByMunicipioResult {
 }
 
 // ---------------------------------------------------------------------------
+// COFEPRIS licensed pharmacies (v0.2.8 — 2026-05-05)
+//
+// Per-pharmacy table loaded from the COFEPRIS Padrón de Licencias Sanitarias
+// PDF (2,381 rows, 2,195 Vigente). 92.3% geocoded to AGEB via DENUE join on
+// (cve_ent, cp, colonia). The flag fields encode whether each license
+// authorizes that controlados class.
+//
+// Why this matters: DENUE knows there's a farmacia at the address; only
+// COFEPRIS knows what kind. Estupefacientes/Psicotrópicos/Vacunas/
+// Hemoderivados are the highest-margin SKUs in the entire pharma OTC
+// universe. This is the licensure floor for site-selection of any
+// higher-margin pharma network.
+// ---------------------------------------------------------------------------
+
+export interface LicensedPharmaciesByMunicipioResult {
+  cve_mun: string;
+  total_licenciadas: number;
+  con_estupefacientes: number;
+  con_psicotropicos: number;
+  con_vacunas: number;
+  con_toxoides: number;
+  con_sueros_antitoxinas: number;
+  con_hemoderivados: number;
+  hospitalarias: number;
+  boticas: number;
+  droguerias: number;
+}
+
+export interface LicensedPharmaciesByAgebResult {
+  cvegeo: string;
+  total_licenciadas: number;
+  /**
+   * Subset authorized for any controlados class (Estupefacientes, Psicotrópicos
+   * II/III, Vacunas, or Hemoderivados). Excludes Toxoides + Sueros + Antitoxinas
+   * which are largely co-licensed with Vacunas anyway and would inflate this
+   * count via double-counting. The single bundled flag is more decision-useful
+   * at AGEB granularity than 6 separate per-class counts on a small base.
+   */
+  con_controlados: number;
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

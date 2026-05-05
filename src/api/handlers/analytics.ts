@@ -84,6 +84,8 @@ import {
   type ColoniasByMunicipioResult,
   type ColoniasOrderBy,
   type IrsGrado,
+  type LicensedPharmaciesByAgebResult,
+  type LicensedPharmaciesByMunicipioResult,
   type MortalitySummaryResult,
   type MortalityTrendResult,
   type MunicipiosAnalyticsResult,
@@ -2844,6 +2846,159 @@ export async function coloniasByMunicipioHandler(
     total_returned: colonias.length,
     colonias,
   };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// COFEPRIS licensed pharmacies (v0.2.8)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /analytics/licensed-pharmacies-by-municipio?cve_mun=NNNNN
+ *
+ * Surface COFEPRIS Padrón counts per municipio. The view
+ * `cofepris_farmacias_by_municipio` only counts Vigente licenses (Suspendida
+ * / Cancelada are historical noise). Returns zeroes when the muni has no
+ * geocoded licensed pharmacies — better than 404 because the operator's
+ * follow-up question is "and what classes?" not "does this muni exist?".
+ *
+ * The 6 controlados-class flags are independent (a single license commonly
+ * covers Estupefacientes + Psicotrópicos + Vacunas + Sueros + Hemoderivados
+ * — these aren't mutually exclusive). For "active competition for the
+ * highest-margin SKU", read `con_estupefacientes`.
+ */
+export async function licensedPharmaciesByMunicipioHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const sql = `
+SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
+  SELECT
+    cve_mun,
+    total_licenciadas,
+    con_estupefacientes,
+    con_psicotropicos,
+    con_vacunas,
+    con_toxoides,
+    con_sueros_antitoxinas,
+    con_hemoderivados,
+    hospitalarias,
+    boticas,
+    droguerias
+  FROM cofepris_farmacias_by_municipio
+  WHERE cve_mun = '${cveMun}'
+) r;
+`;
+  const rows = runJsonQuery<
+    Array<{
+      cve_mun: string;
+      total_licenciadas: number;
+      con_estupefacientes: number;
+      con_psicotropicos: number;
+      con_vacunas: number;
+      con_toxoides: number;
+      con_sueros_antitoxinas: number;
+      con_hemoderivados: number;
+      hospitalarias: number;
+      boticas: number;
+      droguerias: number;
+    }>
+  >(config, sql);
+  const row = rows[0];
+  const result: LicensedPharmaciesByMunicipioResult = row
+    ? {
+        cve_mun: row.cve_mun,
+        total_licenciadas: Number(row.total_licenciadas ?? 0),
+        con_estupefacientes: Number(row.con_estupefacientes ?? 0),
+        con_psicotropicos: Number(row.con_psicotropicos ?? 0),
+        con_vacunas: Number(row.con_vacunas ?? 0),
+        con_toxoides: Number(row.con_toxoides ?? 0),
+        con_sueros_antitoxinas: Number(row.con_sueros_antitoxinas ?? 0),
+        con_hemoderivados: Number(row.con_hemoderivados ?? 0),
+        hospitalarias: Number(row.hospitalarias ?? 0),
+        boticas: Number(row.boticas ?? 0),
+        droguerias: Number(row.droguerias ?? 0),
+      }
+    : {
+        cve_mun: cveMun,
+        total_licenciadas: 0,
+        con_estupefacientes: 0,
+        con_psicotropicos: 0,
+        con_vacunas: 0,
+        con_toxoides: 0,
+        con_sueros_antitoxinas: 0,
+        con_hemoderivados: 0,
+        hospitalarias: 0,
+        boticas: 0,
+        droguerias: 0,
+      };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+/**
+ * GET /analytics/licensed-pharmacies-by-ageb?cvegeo=NNNNNNNNNNNNN
+ *
+ * AGEB-grain counterpart to `/licensed-pharmacies-by-municipio`. Sub-municipal
+ * variant for site-selection: combine with `/opportunity-by-ageb` to find AGEBs
+ * with high underserved demand AND zero licensed-controlados competitors.
+ *
+ * Returns zeroes when the AGEB has no geocoded licensed pharmacy — same
+ * convention as the muni endpoint. With 92.3% geocoding coverage, ~7.7% of
+ * COFEPRIS rows fall into the unmatched bucket and contribute to no AGEB count;
+ * those farmacias surface only at country/state granularity.
+ */
+export async function licensedPharmaciesByAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cvegeo = c.req.query("cvegeo");
+  if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
+    throw new HttpError(
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      400,
+      "validation.cvegeo",
+    );
+  }
+
+  const sql = `
+SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
+  SELECT cvegeo_ageb AS cvegeo, total_licenciadas, con_controlados
+  FROM cofepris_farmacias_by_ageb
+  WHERE cvegeo_ageb = '${cvegeo}'
+) r;
+`;
+  const rows = runJsonQuery<
+    Array<{
+      cvegeo: string;
+      total_licenciadas: number;
+      con_controlados: number;
+    }>
+  >(config, sql);
+  const row = rows[0];
+  const result: LicensedPharmaciesByAgebResult = row
+    ? {
+        cvegeo: row.cvegeo,
+        total_licenciadas: Number(row.total_licenciadas ?? 0),
+        con_controlados: Number(row.con_controlados ?? 0),
+      }
+    : {
+        cvegeo,
+        total_licenciadas: 0,
+        con_controlados: 0,
+      };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
   return c.json(result);

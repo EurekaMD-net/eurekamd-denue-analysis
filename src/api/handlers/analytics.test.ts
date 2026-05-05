@@ -21,6 +21,8 @@ import type {
   AgebsByMunicipioResult,
   ApiServerConfig,
   ColoniasByMunicipioResult,
+  LicensedPharmaciesByAgebResult,
+  LicensedPharmaciesByMunicipioResult,
   MortalitySummaryResult,
   MortalityTrendResult,
   MunicipiosAnalyticsResult,
@@ -3217,5 +3219,213 @@ describe("GET /analytics/ageb-detail v0.2.7 census derechohabiencia", () => {
     expect(body.census!.pder_iste).toBe(100);
     expect(body.census!.pafil_ipriv).toBe(200);
     expect(body.census!.pder_imssb).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.8 — COFEPRIS licensed pharmacies
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/licensed-pharmacies-by-municipio (v0.2.8)", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cve_mun (not 5 digits)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=invalid",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects 4-digit cve_mun (boundary)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=0901",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns full counts for a populated muni", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          total_licenciadas: "299",
+          con_estupefacientes: "117",
+          con_psicotropicos: "280",
+          con_vacunas: "201",
+          con_toxoides: "211",
+          con_sueros_antitoxinas: "170",
+          con_hemoderivados: "216",
+          hospitalarias: "10",
+          boticas: "0",
+          droguerias: "9",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=09015",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LicensedPharmaciesByMunicipioResult;
+    expect(body).toEqual({
+      cve_mun: "09015",
+      total_licenciadas: 299,
+      con_estupefacientes: 117,
+      con_psicotropicos: 280,
+      con_vacunas: 201,
+      con_toxoides: 211,
+      con_sueros_antitoxinas: 170,
+      con_hemoderivados: 216,
+      hospitalarias: 10,
+      boticas: 0,
+      droguerias: 9,
+    });
+  });
+
+  it("returns zeroes (not 404) when muni has no licensed pharmacies", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=20570",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LicensedPharmaciesByMunicipioResult;
+    expect(body).toEqual({
+      cve_mun: "20570",
+      total_licenciadas: 0,
+      con_estupefacientes: 0,
+      con_psicotropicos: 0,
+      con_vacunas: 0,
+      con_toxoides: 0,
+      con_sueros_antitoxinas: 0,
+      con_hemoderivados: 0,
+      hospitalarias: 0,
+      boticas: 0,
+      droguerias: 0,
+    });
+  });
+
+  it("queries the cofepris_farmacias_by_municipio view, not the raw table", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=09015",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM cofepris_farmacias_by_municipio");
+    expect(sql).toContain("cve_mun = '09015'");
+    // Endpoint must NOT touch the raw table — that would skip the Vigente filter.
+    expect(sql).not.toMatch(/FROM cofepris_farmacias\b(?! _by)/);
+  });
+
+  it("emits Cache-Control + Vary headers", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-municipio?cve_mun=09015",
+      { headers: AUTH },
+    );
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+});
+
+describe("GET /analytics/licensed-pharmacies-by-ageb (v0.2.8)", () => {
+  it("rejects missing cvegeo", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/licensed-pharmacies-by-ageb", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects 12-char cvegeo (boundary)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-ageb?cvegeo=090070001005",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts 13-char cvegeo with letter suffix", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-ageb?cvegeo=090070001005A",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("returns counts when AGEB has licensed pharmacies", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "0901500011024",
+          total_licenciadas: "8",
+          con_controlados: "5",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-ageb?cvegeo=0901500011024",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LicensedPharmaciesByAgebResult;
+    expect(body).toEqual({
+      cvegeo: "0901500011024",
+      total_licenciadas: 8,
+      con_controlados: 5,
+    });
+  });
+
+  it("returns zeroes for unmatched AGEB", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/licensed-pharmacies-by-ageb?cvegeo=2057001234567",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LicensedPharmaciesByAgebResult;
+    expect(body).toEqual({
+      cvegeo: "2057001234567",
+      total_licenciadas: 0,
+      con_controlados: 0,
+    });
+  });
+
+  it("queries the cofepris_farmacias_by_ageb view", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/licensed-pharmacies-by-ageb?cvegeo=0901500011024",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM cofepris_farmacias_by_ageb");
+    expect(sql).toContain("cvegeo_ageb = '0901500011024'");
   });
 });
