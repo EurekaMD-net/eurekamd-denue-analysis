@@ -792,6 +792,66 @@ describe("GET /analytics/risk-summary", () => {
       delitos_change_pct: null,
     });
   });
+
+  // Audit W1 (2026-05-05): the handler uses runJsonQueryMvFirst, so a missing
+  // mv_delitos_municipal_yearly should silently fall back to the live SQL
+  // path against sesnsp_delitos_municipal. Test pattern matches sector-grade-
+  // matrix's symmetric fallback test.
+  it("falls back to live SQL when mv_delitos_municipal_yearly is absent", async () => {
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_delitos_municipal_yearly" does not exist',
+          ),
+        });
+      })
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cve_mun: "09015",
+            municipio: "Cuauhtémoc",
+            poblacion: 545884,
+            total_delitos: 31858,
+            robo_negocio: 1205,
+            homicidio_doloso: 71,
+            extorsion: 194,
+            patrimoniales: 18000,
+            violentos: 850,
+            total_baseline: 27971,
+            delitos_per_1k_pop: 58.36,
+            delitos_change_pct: 13.9,
+          },
+        ]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskSummaryResult;
+    expect(body.municipios).toHaveLength(1);
+    // Two psql calls: one MV attempt + one live fallback.
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
+    const liveSql = liveArgs[liveArgs.length - 1] ?? "";
+    expect(liveSql).toMatch(/FROM sesnsp_delitos_municipal\b/);
+    expect(liveSql).not.toMatch(/mv_delitos_municipal_yearly/);
+  });
+
+  // Audit W2 (2026-05-05): symmetric malformed-JSON coverage with the other
+  // analytics endpoints. risk-summary goes through runJsonQueryMvFirst so the
+  // first (mv) call is what malforms here.
+  it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
+    mockExec.mockReturnValue("definitely not json");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgres.parse_error");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -898,5 +958,38 @@ describe("GET /analytics/risk-trend", () => {
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/risk-trend?cve_mun=09015");
     expect(res.status).toBe(401);
+  });
+
+  // Audit W3 (2026-05-05): inverse of the cve_mun-unknown-to-censo case —
+  // the series query's stdout is empty/blank but the meta call succeeds with
+  // a populated municipio. Exercises the runJsonQuery `null/empty → []` branch
+  // for the FIRST call. Series should land as [], meta still parsed.
+  it("returns empty series when the first psql call yields blank stdout", async () => {
+    mockExec
+      .mockReturnValueOnce("   ")
+      .mockReturnValueOnce(
+        JSON.stringify([{ municipio: "Cuauhtémoc", poblacion: 545884 }]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as RiskTrendResult;
+    expect(body.series).toEqual([]);
+    expect(body.municipio).toBe("Cuauhtémoc");
+  });
+
+  // Audit W2 (2026-05-05): symmetric malformed-JSON coverage. Series-call
+  // path returning unparseable text should produce 502 / postgres.parse_error.
+  it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
+    mockExec.mockReturnValue("definitely not json");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/risk-trend?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgres.parse_error");
   });
 });

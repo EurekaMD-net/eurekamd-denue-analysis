@@ -564,6 +564,9 @@ if (isMain) {
       console.log(
         `[load-sesnsp] done in ${(r.duration_ms / 1000).toFixed(1)}s`,
       );
+      console.log(
+        `[load-sesnsp] reminder: refresh analytics mat-views: scripts/refresh-matviews.sh`,
+      );
       process.exit(0);
     })
     .catch((err: unknown) => {

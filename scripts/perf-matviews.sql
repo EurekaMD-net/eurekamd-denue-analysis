@@ -117,7 +117,11 @@ SELECT
     AS violentos,
   SUM(count)::bigint AS total_delitos
 FROM sesnsp_delitos_municipal
-WHERE cve_mun IS NOT NULL
+-- Audit W4 (2026-05-05): require 5-char keys so orphan rows (4-char federal
+-- districts pre-2017, missing zero-pad) don't produce never-joining rollups.
+-- Matches CVE_MUN_RE on the API side. Removes ~0 rows in the current data
+-- but defends future emissions.
+WHERE cve_mun IS NOT NULL AND LENGTH(cve_mun) = 5
 GROUP BY cve_mun, ano;
 
 CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);

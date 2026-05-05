@@ -213,7 +213,13 @@ export const CVE_MUN_RE = /^(0[1-9]|[12][0-9]|3[0-2])[0-9]{3}$/;
 /**
  * Default "current year" for risk-summary comparisons. 2026 is partial (only
  * Q1 reported as of the loader run on 2026-05-05) so the rolling baseline
- * prefers the latest full year. Reset when SESNSP closes the next full year.
+ * prefers the latest full year.
+ *
+ * TODO (audit W5, 2026-05-05): bump to 2026 once the operator confirms 2026
+ * has at least Q3 reported (~Oct 2026), and to 2027 once that year closes.
+ * Long-term: derive from `MAX(ano) FROM mv_delitos_municipal_yearly WHERE
+ * ano <= EXTRACT(YEAR FROM NOW())` once at server start so this stops being
+ * a redeploy-coupled constant.
  */
 export const RISK_DEFAULT_CURRENT_ANO = 2025;
 /** Default lookback for the YoY-change column. 5 years covers the canonical

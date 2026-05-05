@@ -520,7 +520,7 @@ interface RawRiskSummaryRow {
   delitos_change_pct: number | string | null;
 }
 
-function riskSummarySql(
+function riskSummaryMvSql(
   entidad: string,
   currentAno: number,
   baselineAno: number,
@@ -538,6 +538,68 @@ baseline AS (
   SELECT cve_mun, total_delitos AS total_baseline
   FROM mv_delitos_municipal_yearly
   WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+)
+SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
+  SELECT
+    cur.cve_mun,
+    cm.nom_mun                                         AS municipio,
+    cm.pobtot                                          AS poblacion,
+    cur.total_delitos,
+    cur.robo_negocio,
+    cur.homicidio_doloso,
+    cur.extorsion,
+    cur.patrimoniales,
+    cur.violentos,
+    b.total_baseline,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(cur.total_delitos::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS delitos_per_1k_pop,
+    CASE WHEN COALESCE(b.total_baseline, 0) > 0
+      THEN ROUND(
+        ((cur.total_delitos - b.total_baseline)::numeric / b.total_baseline) * 100.0,
+        1
+      )
+      ELSE NULL
+    END                                                AS delitos_change_pct
+  FROM cur
+  LEFT JOIN baseline b USING (cve_mun)
+  LEFT JOIN censo_municipios cm USING (cve_mun)
+) t;
+`;
+}
+
+/**
+ * Live-aggregation fallback for risk-summary. Same shape as the mat-view
+ * read but does the FILTER aggregation directly against the 31.6M-row
+ * sesnsp_delitos_municipal table. Slower (~2-5s per state) but keeps the
+ * endpoint working on a freshly-bootstrapped DB before the operator runs
+ * `scripts/perf-matviews.sql`. Audit M1 (2026-05-05).
+ */
+function riskSummaryLiveSql(
+  entidad: string,
+  currentAno: number,
+  baselineAno: number,
+): string {
+  return `
+WITH cur AS (
+  SELECT
+    cve_mun,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Robo a negocio'), 0)::bigint AS robo_negocio,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Homicidio doloso'), 0)::bigint AS homicidio_doloso,
+    COALESCE(SUM(count) FILTER (WHERE subtipo_delito = 'Extorsión'), 0)::bigint AS extorsion,
+    COALESCE(SUM(count) FILTER (WHERE bien_juridico = 'El patrimonio'), 0)::bigint AS patrimoniales,
+    COALESCE(SUM(count) FILTER (WHERE bien_juridico = 'La vida y la Integridad corporal'), 0)::bigint AS violentos,
+    SUM(count)::bigint AS total_delitos
+  FROM sesnsp_delitos_municipal
+  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+  GROUP BY cve_mun
+),
+baseline AS (
+  SELECT cve_mun, SUM(count)::bigint AS total_baseline
+  FROM sesnsp_delitos_municipal
+  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+  GROUP BY cve_mun
 )
 SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
   SELECT
@@ -590,9 +652,12 @@ export async function riskSummaryHandler(
     "baseline_ano",
   );
 
-  const rows = runJsonQuery<RawRiskSummaryRow[]>(
+  // Mat-view first → falls back to live aggregation if the operator hasn't
+  // run scripts/perf-matviews.sql yet. Same pattern as nationalTreemapHandler.
+  const rows = runJsonQueryMvFirst<RawRiskSummaryRow[]>(
     config,
-    riskSummarySql(entidad, currentAno, baselineAno),
+    riskSummaryMvSql(entidad, currentAno, baselineAno),
+    riskSummaryLiveSql(entidad, currentAno, baselineAno),
   );
   const result: RiskSummaryResult = {
     entidad,
@@ -616,9 +681,13 @@ export async function riskSummaryHandler(
         r.delitos_change_pct === null ? null : Number(r.delitos_change_pct),
     })),
   };
-  // Mat-view-backed; safe to cache aggressively. Refreshed manually after
-  // each SESNSP load — same cadence as mv_national_treemap.
-  c.header("Cache-Control", "public, max-age=3600");
+  // Audit M2 (2026-05-05): mat-view refresh is manual + a missed `REFRESH
+  // MATERIALIZED VIEW mv_delitos_municipal_yearly` after a SESNSP loader rerun
+  // would silently serve stale data with no upper bound on staleness. 5-min
+  // cache matches /analytics/municipios for the same "lightly more dynamic"
+  // category; downstream caches still amortize but the worst-case staleness
+  // window stays bounded.
+  c.header("Cache-Control", "public, max-age=300");
   c.header("Vary", "X-Api-Key");
   return c.json(result);
 }
