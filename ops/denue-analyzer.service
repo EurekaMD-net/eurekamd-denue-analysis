@@ -1,0 +1,41 @@
+# Snapshot of /etc/systemd/system/denue-analyzer.service.
+#
+# Install on a fresh VPS:
+#   sudo cp ops/denue-analyzer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now denue-analyzer.service
+#
+# The unit runs `npx tsx --env-file=.env scripts/serve.ts` from the repo root,
+# binding to :3030 (overridable via API_PORT in .env). Caddy at
+# uncharted.eurekamd.cloud proxies /api/* to this port (see ops/Caddyfile.uncharted).
+#
+# tsx caches in /tmp/tsx-0/. After source edits, restart the service to pick
+# them up; the cache typically invalidates on its own, but in flaky cases
+# `rm -rf /tmp/tsx-0/ && systemctl restart denue-analyzer` is the hammer.
+#
+# Logs: `journalctl -u denue-analyzer -f`
+
+[Unit]
+Description=DENUE Data Analyzer API (uncharted.eurekamd.cloud)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/claude/projects/data-intelligence/denue-data-analysis
+ExecStart=/usr/bin/npx tsx --env-file=.env scripts/serve.ts
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=denue-analyzer
+
+EnvironmentFile=/root/claude/projects/data-intelligence/denue-data-analysis/.env
+Environment=NODE_ENV=production
+Environment=TZ=America/Mexico_City
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target
