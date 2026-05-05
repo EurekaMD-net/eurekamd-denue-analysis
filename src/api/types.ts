@@ -395,6 +395,118 @@ export interface StateCalibratorsResult {
 }
 
 // ---------------------------------------------------------------------------
+// AGEB analytics (v0.2.4-A — sub-municipal primitive)
+// ---------------------------------------------------------------------------
+
+/**
+ * 13-character AGEB key: ENT(2)+MUN(3)+LOC(4)+AGEB(4). Same shape as the
+ * `cvegeo` column in `ageb_polygons` and the `ageb` column in
+ * `establecimientos`. Stricter than CVE_MUN_RE — every digit position is
+ * constrained because INEGI never assigns codes outside these ranges.
+ */
+export const CVEGEO_RE = /^[0-9]{13}$/;
+
+/** order_by for /analytics/agebs-by-municipio. Constrains the SQL ORDER BY. */
+export const AGEBS_ORDER_BY = [
+  "establecimientos",
+  "farmacias",
+  "clues",
+  "area",
+] as const;
+export type AgebsOrderBy = (typeof AGEBS_ORDER_BY)[number];
+
+/** Default + cap for /analytics/agebs-by-municipio limit param. */
+export const AGEBS_DEFAULT_LIMIT = 50;
+export const AGEBS_MAX_LIMIT = 200;
+
+/** Default + cap for /analytics/ageb-farmacia-opportunity limit param. */
+export const AGEB_FARMACIA_DEFAULT_LIMIT = 20;
+export const AGEB_FARMACIA_MAX_LIMIT = 100;
+
+/** Cap on CLUES list length in /analytics/ageb-detail (response size guard). */
+export const AGEB_DETAIL_CLUES_CAP = 30;
+
+export interface AgebsByMunicipioRow {
+  cvegeo: string;
+  ambito: "Urbana" | "Rural" | null;
+  centroid_lat: number | null;
+  centroid_lon: number | null;
+  area_km2: number | null;
+  establecimientos: number;
+  farmacias: number;
+  clues: number;
+}
+
+export interface AgebsByMunicipioResult {
+  cve_mun: string;
+  order_by: AgebsOrderBy;
+  total_returned: number;
+  agebs: AgebsByMunicipioRow[];
+}
+
+export interface AgebDetailTopSector {
+  scian2: string;
+  /** "Industrias manufactureras" / "Comercio al por menor" / etc. */
+  nombre: string;
+  count: number;
+}
+
+export interface AgebDetailClues {
+  clues: string;
+  nombre: string;
+  tipo: string;
+  lat: number;
+  lon: number;
+}
+
+export interface AgebDetailResult {
+  cvegeo: string;
+  cve_ent: string;
+  cve_mun: string;
+  cve_loc: string;
+  cve_ageb: string;
+  ambito: "Urbana" | "Rural" | null;
+  area_km2: number | null;
+  centroid_lat: number | null;
+  centroid_lon: number | null;
+  /** Bounding box [minLon, minLat, maxLon, maxLat]. */
+  bbox: [number, number, number, number] | null;
+  /** Population at the containing locality (closest proxy until census-AGEB). */
+  loc_population: number | null;
+  loc_name: string | null;
+  total_establecimientos: number;
+  total_farmacias: number;
+  top_sectors: AgebDetailTopSector[];
+  clues_count: number;
+  /** Capped at AGEB_DETAIL_CLUES_CAP. */
+  clues_sample: AgebDetailClues[];
+}
+
+export interface AgebFarmaciaOpportunityRow {
+  cvegeo: string;
+  ambito: "Urbana" | "Rural" | null;
+  centroid_lat: number | null;
+  centroid_lon: number | null;
+  area_km2: number | null;
+  num_establecimientos: number;
+  num_farmacias: number;
+  num_clues: number;
+  /**
+   * Coarse demand-minus-supply proxy.
+   *   score = num_clues × 0.5 + num_establecimientos × 0.3 − num_farmacias × 1.0
+   * Higher = more attractive AGEB to place a farmacia. NOT population-normalized
+   * (defer until census-AGEB ingest in v0.2.4-B). Use ranking, not absolute value.
+   */
+  score: number;
+}
+
+export interface AgebFarmaciaOpportunityResult {
+  cve_mun: string;
+  total_returned: number;
+  agebs: AgebFarmaciaOpportunityRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

@@ -46,6 +46,9 @@ import { entidadesHandler } from "./handlers/entidades.js";
 import { sectorsHandler } from "./handlers/sectors.js";
 import { tilesHandler } from "./handlers/tiles.js";
 import {
+  agebDetailHandler,
+  agebFarmaciaOpportunityHandler,
+  agebsByMunicipioHandler,
   mortalitySummaryHandler,
   mortalityTrendHandler,
   municipiosAnalyticsHandler,
@@ -131,6 +134,13 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/state-calibrators", (c) =>
     stateCalibratorsHandler(c, config),
+  );
+  app.get("/analytics/agebs-by-municipio", (c) =>
+    agebsByMunicipioHandler(c, config),
+  );
+  app.get("/analytics/ageb-detail", (c) => agebDetailHandler(c, config));
+  app.get("/analytics/ageb-farmacia-opportunity", (c) =>
+    agebFarmaciaOpportunityHandler(c, config),
   );
 
   return app;

@@ -49,12 +49,23 @@ import { execFileSync } from "node:child_process";
 import type { Context } from "hono";
 import { HttpError } from "../middleware/error.js";
 import {
+  AGEB_DETAIL_CLUES_CAP,
+  AGEB_FARMACIA_DEFAULT_LIMIT,
+  AGEB_FARMACIA_MAX_LIMIT,
+  AGEBS_DEFAULT_LIMIT,
+  AGEBS_MAX_LIMIT,
+  AGEBS_ORDER_BY,
   CVE_MUN_RE,
+  CVEGEO_RE,
   ENTIDAD_RE,
   MORTALITY_DEFAULT_CURRENT_ANO,
   RISK_ANO_RE,
   RISK_DEFAULT_BASELINE_ANO,
   RISK_DEFAULT_CURRENT_ANO,
+  type AgebDetailResult,
+  type AgebFarmaciaOpportunityResult,
+  type AgebsByMunicipioResult,
+  type AgebsOrderBy,
   type ApiServerConfig,
   type IrsGrado,
   type MortalitySummaryResult,
@@ -1434,6 +1445,581 @@ export async function stateCalibratorsHandler(
 
   const result: StateCalibratorsResult = { entidad, calibrators };
   // Calibrators change once per ENIGH wave (~biennial). 1-hour cache fits.
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// AGEB analytics primitive (v0.2.4-A, 2026-05-05)
+// Spatial + count endpoints exposing the existing `ageb_polygons` ×
+// `establecimientos.ageb` × `clues_raw` infrastructure. No new tables — this
+// is purely an exposure layer. Census-AGEB indicators (population density,
+// % indigenous, vivienda) are deferred to v0.2.4-B pending operator URL
+// drop for INEGI's RESAGEBURB dataset (currently behind a gated portal per
+// jarvis-kb/projects/data-intelligence/README.md).
+// ---------------------------------------------------------------------------
+
+interface RawAgebsByMunicipioRow {
+  cvegeo: string;
+  ambito: string | null;
+  centroid_lat: number | string | null;
+  centroid_lon: number | string | null;
+  area_km2: number | string | null;
+  establecimientos: number | string | null;
+  farmacias: number | string | null;
+  clues: number | string | null;
+}
+
+const AGEBS_ORDER_BY_SQL: Record<AgebsOrderBy, string> = {
+  establecimientos: "establecimientos DESC",
+  farmacias: "farmacias DESC",
+  clues: "clues DESC",
+  area: "area_km2 DESC",
+};
+
+function agebsByMunicipioSql(
+  cveMun: string,
+  orderBy: AgebsOrderBy,
+  limit: number,
+): string {
+  // cveMun pre-validated by CVE_MUN_RE (5 digits). orderBy keyed off enum
+  // (AGEBS_ORDER_BY_SQL) — never user-controlled in the SQL string. limit is
+  // an integer clamped to AGEBS_MAX_LIMIT before reaching this function.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST) FROM (
+  SELECT
+    a.cvegeo,
+    NULLIF(TRIM(a.ambito), '') AS ambito,
+    ST_Y(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lat,
+    ST_X(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lon,
+    ROUND((ST_Area(a.geom::geography) / 1000000)::numeric, 4) AS area_km2,
+    COALESCE(e.cnt, 0)::bigint AS establecimientos,
+    COALESCE(f.cnt, 0)::bigint AS farmacias,
+    COALESCE(s.cnt, 0)::bigint AS clues
+  FROM ageb_polygons a
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    GROUP BY ageb
+  ) e ON e.ageb = a.cvegeo
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+      AND clase_actividad_id IN ('464111','464112')
+    GROUP BY ageb
+  ) f ON f.ageb = a.cvegeo
+  LEFT JOIN (
+    SELECT a2.cvegeo, COUNT(*) AS cnt
+    FROM ageb_polygons a2
+    JOIN clues_raw c ON ST_Contains(
+      a2.geom,
+      ST_SetSRID(ST_MakePoint(
+        NULLIF(c.longitud, '')::numeric,
+        NULLIF(c.latitud, '')::numeric
+      ), 4326)
+    )
+    WHERE a2.cve_ent || a2.cve_mun = '${cveMun}'
+      AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
+      AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    GROUP BY a2.cvegeo
+  ) s ON s.cvegeo = a.cvegeo
+  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
+  ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST
+  LIMIT ${limit}
+) t;
+`;
+}
+
+/**
+ * GET /analytics/agebs-by-municipio?cve_mun=NNNNN[&order_by=...][&limit=N]
+ *
+ * Lists AGEBs in a municipio with establishment / farmacia / CLUES counts +
+ * geometry summary. Direct SQL via docker exec psql; no mat-view since the
+ * scope is one cve_mun at a time (Mexico City's largest muni has ~5K AGEBs;
+ * even Iztapalapa returns in <2s without a pre-aggregation).
+ *
+ * Use this to pick top AGEBs inside a high-demand muni for downstream
+ * detail / opportunity queries.
+ */
+export async function agebsByMunicipioHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+  const orderByRaw = c.req.query("order_by") ?? "establecimientos";
+  if (!AGEBS_ORDER_BY.includes(orderByRaw as AgebsOrderBy)) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Debe ser uno de: ${AGEBS_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as AgebsOrderBy;
+  const limitRaw = c.req.query("limit");
+  let limit = AGEBS_DEFAULT_LIMIT;
+  if (limitRaw !== undefined) {
+    const parsed = Number(limitRaw);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > AGEBS_MAX_LIMIT) {
+      throw new HttpError(
+        `limit inválido "${limitRaw}". Debe ser entero entre 1 y ${AGEBS_MAX_LIMIT}.`,
+        400,
+        "validation.limit",
+      );
+    }
+    limit = parsed;
+  }
+
+  const rows = runJsonQuery<RawAgebsByMunicipioRow[]>(
+    config,
+    agebsByMunicipioSql(cveMun, orderBy, limit),
+  );
+  const result: AgebsByMunicipioResult = {
+    cve_mun: cveMun,
+    order_by: orderBy,
+    total_returned: rows.length,
+    agebs: rows.map((r) => ({
+      cvegeo: r.cvegeo,
+      ambito: r.ambito === "Urbana" || r.ambito === "Rural" ? r.ambito : null,
+      centroid_lat: r.centroid_lat === null ? null : Number(r.centroid_lat),
+      centroid_lon: r.centroid_lon === null ? null : Number(r.centroid_lon),
+      area_km2: r.area_km2 === null ? null : Number(r.area_km2),
+      establecimientos: Number(r.establecimientos ?? 0),
+      farmacias: Number(r.farmacias ?? 0),
+      clues: Number(r.clues ?? 0),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/ageb-detail
+// ---------------------------------------------------------------------------
+
+interface RawAgebDetailIdentity {
+  cvegeo: string;
+  cve_ent: string;
+  cve_mun: string;
+  cve_loc: string;
+  cve_ageb: string;
+  ambito: string | null;
+  area_km2: number | string | null;
+  centroid_lat: number | string | null;
+  centroid_lon: number | string | null;
+  bbox_minlon: number | string | null;
+  bbox_minlat: number | string | null;
+  bbox_maxlon: number | string | null;
+  bbox_maxlat: number | string | null;
+}
+
+interface RawAgebDetailLocMeta {
+  loc_population: number | string | null;
+  loc_name: string | null;
+}
+
+interface RawAgebDetailEstabSummary {
+  total_establecimientos: number | string | null;
+  total_farmacias: number | string | null;
+}
+
+interface RawAgebDetailTopSector {
+  scian2: string;
+  count: number | string;
+}
+
+interface RawAgebDetailClues {
+  clues: string;
+  nombre: string | null;
+  tipo: string | null;
+  lat: number | string | null;
+  lon: number | string | null;
+}
+
+function agebIdentitySql(cvegeo: string): string {
+  // cvegeo pre-validated by CVEGEO_RE (exactly 13 digits).
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    cvegeo,
+    cve_ent, cve_mun, cve_loc, cve_ageb,
+    NULLIF(TRIM(ambito), '') AS ambito,
+    ROUND((ST_Area(geom::geography) / 1000000)::numeric, 4) AS area_km2,
+    ST_Y(ST_Centroid(geom))::numeric(10,6) AS centroid_lat,
+    ST_X(ST_Centroid(geom))::numeric(10,6) AS centroid_lon,
+    ST_XMin(geom)::numeric(10,6) AS bbox_minlon,
+    ST_YMin(geom)::numeric(10,6) AS bbox_minlat,
+    ST_XMax(geom)::numeric(10,6) AS bbox_maxlon,
+    ST_YMax(geom)::numeric(10,6) AS bbox_maxlat
+  FROM ageb_polygons
+  WHERE cvegeo = '${cvegeo}'
+) t;
+`;
+}
+
+function agebLocMetaSql(cvegeo: string): string {
+  // Containing locality population proxy. censo_iter is keyed by entidad/mun/loc
+  // (3-tuple). cvegeo is ENT(2)+MUN(3)+LOC(4)+AGEB(4) — first 9 chars locate the
+  // containing locality. Cast to int because censo_iter columns are TEXT.
+  const ent = `'${cvegeo.slice(0, 2)}'`;
+  const mun = `'${cvegeo.slice(2, 5)}'`;
+  const loc = `'${cvegeo.slice(5, 9)}'`;
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    NULLIF(pobtot, '')::int AS loc_population,
+    nom_loc AS loc_name
+  FROM censo_iter
+  WHERE entidad = ${ent} AND mun = ${mun} AND loc = ${loc}
+  LIMIT 1
+) t;
+`;
+}
+
+function agebEstabSummarySql(cvegeo: string): string {
+  return `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    COUNT(*)::bigint AS total_establecimientos,
+    COUNT(*) FILTER (WHERE clase_actividad_id IN ('464111','464112'))::bigint
+      AS total_farmacias
+  FROM establecimientos
+  WHERE ageb = '${cvegeo}'
+) t;
+`;
+}
+
+function agebTopSectorsSql(cvegeo: string, limit: number): string {
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.count DESC) FROM (
+  SELECT
+    sector_actividad_id AS scian2,
+    COUNT(*)::bigint AS count
+  FROM establecimientos
+  WHERE ageb = '${cvegeo}' AND sector_actividad_id IS NOT NULL
+    AND sector_actividad_id != ''
+  GROUP BY sector_actividad_id
+  ORDER BY COUNT(*) DESC
+  LIMIT ${limit}
+) t;
+`;
+}
+
+function agebCluesSql(cvegeo: string, cap: number): string {
+  // ST_Contains uses gist index on ageb_polygons.geom and is fast for a
+  // single AGEB lookup. Filter clues_raw to numeric-safe lat/lon first.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.clues) FROM (
+  SELECT
+    c.clues,
+    c.nombre_de_la_unidad AS nombre,
+    c.nombre_tipo_establecimiento AS tipo,
+    NULLIF(c.latitud, '')::numeric AS lat,
+    NULLIF(c.longitud, '')::numeric AS lon
+  FROM ageb_polygons a
+  JOIN clues_raw c ON ST_Contains(
+    a.geom,
+    ST_SetSRID(ST_MakePoint(
+      NULLIF(c.longitud, '')::numeric,
+      NULLIF(c.latitud, '')::numeric
+    ), 4326)
+  )
+  WHERE a.cvegeo = '${cvegeo}'
+    AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+  LIMIT ${cap}
+) t;
+`;
+}
+
+function agebCluesCountSql(cvegeo: string): string {
+  // Separate full count so the response can show "120 CLUES, sample of 30".
+  return `
+SELECT json_build_array(COUNT(*)) FROM (
+  SELECT 1
+  FROM ageb_polygons a
+  JOIN clues_raw c ON ST_Contains(
+    a.geom,
+    ST_SetSRID(ST_MakePoint(
+      NULLIF(c.longitud, '')::numeric,
+      NULLIF(c.latitud, '')::numeric
+    ), 4326)
+  )
+  WHERE a.cvegeo = '${cvegeo}'
+    AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+) t;
+`;
+}
+
+/**
+ * GET /analytics/ageb-detail?cvegeo=NNNNNNNNNNNNN
+ *
+ * Full breakdown for one AGEB: identity + geometry + establishment counts +
+ * top 10 SCIAN sectors + CLUES sample. Uses the containing locality's
+ * population from censo_iter as the closest proxy until census-AGEB lands.
+ * Returns 404 if cvegeo is not in `ageb_polygons`.
+ */
+export async function agebDetailHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cvegeo = c.req.query("cvegeo");
+  if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
+    throw new HttpError(
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser exactamente 13 dígitos.`,
+      400,
+      "validation.cvegeo",
+    );
+  }
+
+  const idRows = runJsonQuery<RawAgebDetailIdentity[]>(
+    config,
+    agebIdentitySql(cvegeo),
+  );
+  const id = idRows[0];
+  if (!id) {
+    throw new HttpError(
+      `AGEB no encontrada: cvegeo "${cvegeo}".`,
+      404,
+      "ageb.not_found",
+    );
+  }
+
+  const locMeta = runJsonQuery<RawAgebDetailLocMeta[]>(
+    config,
+    agebLocMetaSql(cvegeo),
+  );
+  const summaryRows = runJsonQuery<RawAgebDetailEstabSummary[]>(
+    config,
+    agebEstabSummarySql(cvegeo),
+  );
+  const sectors = runJsonQuery<RawAgebDetailTopSector[]>(
+    config,
+    agebTopSectorsSql(cvegeo, 10),
+  );
+  const cluesSample = runJsonQuery<RawAgebDetailClues[]>(
+    config,
+    agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP),
+  );
+  const cluesCountRows = runJsonQuery<number[] | null>(
+    config,
+    agebCluesCountSql(cvegeo),
+  );
+  const cluesCount = Array.isArray(cluesCountRows)
+    ? Number(cluesCountRows[0] ?? 0)
+    : 0;
+
+  // qa-audit S3 (2026-05-05): summary SQL is shaped to ALWAYS return one
+  // row (COUNT(*) over a non-empty filter). If we ever see [] here, the SQL
+  // shape changed and we'd be silently substituting 0 for missing data —
+  // exactly the C1-class shape bug stateCalibratorsHandler defends against.
+  // Surface as 502 so the regression is caught loud.
+  if (summaryRows.length !== 1) {
+    throw new HttpError(
+      `analytics: ageb-detail summary returned ${summaryRows.length} rows, expected 1.`,
+      502,
+      "postgres.unexpected_shape",
+    );
+  }
+  const summary = summaryRows[0];
+  const lm = locMeta[0];
+
+  const scianNames = loadScianNames();
+
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+
+  const result: AgebDetailResult = {
+    cvegeo: id.cvegeo,
+    cve_ent: id.cve_ent,
+    cve_mun: id.cve_mun,
+    cve_loc: id.cve_loc,
+    cve_ageb: id.cve_ageb,
+    ambito: id.ambito === "Urbana" || id.ambito === "Rural" ? id.ambito : null,
+    area_km2: num(id.area_km2),
+    centroid_lat: num(id.centroid_lat),
+    centroid_lon: num(id.centroid_lon),
+    bbox:
+      id.bbox_minlon !== null &&
+      id.bbox_minlat !== null &&
+      id.bbox_maxlon !== null &&
+      id.bbox_maxlat !== null
+        ? [
+            Number(id.bbox_minlon),
+            Number(id.bbox_minlat),
+            Number(id.bbox_maxlon),
+            Number(id.bbox_maxlat),
+          ]
+        : null,
+    loc_population:
+      lm?.loc_population == null ? null : Number(lm.loc_population),
+    loc_name: lm?.loc_name ?? null,
+    total_establecimientos: Number(summary.total_establecimientos ?? 0),
+    total_farmacias: Number(summary.total_farmacias ?? 0),
+    top_sectors: sectors.map((s) => ({
+      scian2: s.scian2,
+      nombre: scianNames.sectors[s.scian2] ?? s.scian2,
+      count: Number(s.count),
+    })),
+    clues_count: cluesCount,
+    clues_sample: cluesSample.slice(0, AGEB_DETAIL_CLUES_CAP).map((cl) => ({
+      clues: cl.clues,
+      nombre: cl.nombre ?? "",
+      tipo: cl.tipo ?? "",
+      lat: Number(cl.lat ?? 0),
+      lon: Number(cl.lon ?? 0),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/ageb-farmacia-opportunity
+// ---------------------------------------------------------------------------
+
+interface RawAgebOpportunityRow {
+  cvegeo: string;
+  ambito: string | null;
+  centroid_lat: number | string | null;
+  centroid_lon: number | string | null;
+  area_km2: number | string | null;
+  num_establecimientos: number | string | null;
+  num_farmacias: number | string | null;
+  num_clues: number | string | null;
+  score: number | string | null;
+}
+
+function agebFarmaciaOpportunitySql(cveMun: string, limit: number): string {
+  // qa-audit W1 (2026-05-05): json_agg ORDER BY uses the raw score expression
+  // — same as the inner ORDER BY — so rounding ties don't reorder rows
+  // between the LIMIT cut and the json_agg pass. Otherwise two AGEBs whose
+  // raw scores differ in the 4th decimal but round to the same 3-decimal
+  // `score` value can end up in arbitrary order in the response.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY (
+  t.num_clues * 0.5 + t.num_establecimientos * 0.3 - t.num_farmacias * 1.0
+) DESC NULLS LAST) FROM (
+  SELECT
+    a.cvegeo,
+    NULLIF(TRIM(a.ambito), '') AS ambito,
+    ST_Y(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lat,
+    ST_X(ST_Centroid(a.geom))::numeric(10,6) AS centroid_lon,
+    ROUND((ST_Area(a.geom::geography) / 1000000)::numeric, 4) AS area_km2,
+    COALESCE(e.cnt, 0)::bigint AS num_establecimientos,
+    COALESCE(f.cnt, 0)::bigint AS num_farmacias,
+    COALESCE(s.cnt, 0)::bigint AS num_clues,
+    ROUND(
+      (COALESCE(s.cnt, 0) * 0.5
+       + COALESCE(e.cnt, 0) * 0.3
+       - COALESCE(f.cnt, 0) * 1.0)::numeric,
+      3
+    ) AS score
+  FROM ageb_polygons a
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    GROUP BY ageb
+  ) e ON e.ageb = a.cvegeo
+  LEFT JOIN (
+    SELECT ageb, COUNT(*) AS cnt FROM establecimientos
+    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+      AND clase_actividad_id IN ('464111','464112')
+    GROUP BY ageb
+  ) f ON f.ageb = a.cvegeo
+  LEFT JOIN (
+    SELECT a2.cvegeo, COUNT(*) AS cnt
+    FROM ageb_polygons a2
+    JOIN clues_raw c ON ST_Contains(
+      a2.geom,
+      ST_SetSRID(ST_MakePoint(
+        NULLIF(c.longitud, '')::numeric,
+        NULLIF(c.latitud, '')::numeric
+      ), 4326)
+    )
+    WHERE a2.cve_ent || a2.cve_mun = '${cveMun}'
+      AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
+      AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    GROUP BY a2.cvegeo
+  ) s ON s.cvegeo = a.cvegeo
+  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
+  ORDER BY (
+    COALESCE(s.cnt, 0) * 0.5
+    + COALESCE(e.cnt, 0) * 0.3
+    - COALESCE(f.cnt, 0) * 1.0
+  ) DESC NULLS LAST
+  LIMIT ${limit}
+) t;
+`;
+}
+
+/**
+ * GET /analytics/ageb-farmacia-opportunity?cve_mun=NNNNN[&limit=N]
+ *
+ * Ranks AGEBs in a municipio by a coarse demand-minus-supply opportunity
+ * score: (CLUES × 0.5 + establecimientos × 0.3 − farmacias × 1.0). Score
+ * units are arbitrary; use rank, not absolute. Population normalization
+ * deferred to v0.2.4-B (census-AGEB ingest).
+ */
+export async function agebFarmaciaOpportunityHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+  const limitRaw = c.req.query("limit");
+  let limit = AGEB_FARMACIA_DEFAULT_LIMIT;
+  if (limitRaw !== undefined) {
+    const parsed = Number(limitRaw);
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < 1 ||
+      parsed > AGEB_FARMACIA_MAX_LIMIT
+    ) {
+      throw new HttpError(
+        `limit inválido "${limitRaw}". Debe ser entero entre 1 y ${AGEB_FARMACIA_MAX_LIMIT}.`,
+        400,
+        "validation.limit",
+      );
+    }
+    limit = parsed;
+  }
+
+  const rows = runJsonQuery<RawAgebOpportunityRow[]>(
+    config,
+    agebFarmaciaOpportunitySql(cveMun, limit),
+  );
+  const result: AgebFarmaciaOpportunityResult = {
+    cve_mun: cveMun,
+    total_returned: rows.length,
+    agebs: rows.map((r) => ({
+      cvegeo: r.cvegeo,
+      ambito: r.ambito === "Urbana" || r.ambito === "Rural" ? r.ambito : null,
+      centroid_lat: r.centroid_lat === null ? null : Number(r.centroid_lat),
+      centroid_lon: r.centroid_lon === null ? null : Number(r.centroid_lon),
+      area_km2: r.area_km2 === null ? null : Number(r.area_km2),
+      num_establecimientos: Number(r.num_establecimientos ?? 0),
+      num_farmacias: Number(r.num_farmacias ?? 0),
+      num_clues: Number(r.num_clues ?? 0),
+      score: Number(r.score ?? 0),
+    })),
+  };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
   return c.json(result);

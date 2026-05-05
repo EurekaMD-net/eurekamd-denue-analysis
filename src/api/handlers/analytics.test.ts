@@ -16,6 +16,9 @@ import {
   runJsonQueryMvFirst,
 } from "./analytics.js";
 import type {
+  AgebDetailResult,
+  AgebFarmaciaOpportunityResult,
+  AgebsByMunicipioResult,
   ApiServerConfig,
   MortalitySummaryResult,
   MortalityTrendResult,
@@ -1671,5 +1674,460 @@ describe("GET /analytics/state-calibrators", () => {
     });
     expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
     expect(res.headers.get("vary")).toMatch(/X-Api-Key/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/agebs-by-municipio  (v0.2.4-A)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/agebs-by-municipio", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/agebs-by-municipio", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cve_mun (not 5 digits)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21X14",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects out-of-range entidad prefix (33xxx)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=33001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects unknown order_by", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114&order_by=hot",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects limit above AGEBS_MAX_LIMIT (200)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114&limit=201",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects negative or non-integer limit", async () => {
+    const app = createServer(CONFIG);
+    const r1 = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114&limit=0",
+      { headers: AUTH },
+    );
+    const r2 = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114&limit=3.5",
+      { headers: AUTH },
+    );
+    expect(r1.status).toBe(400);
+    expect(r2.status).toBe(400);
+  });
+
+  it("returns AGEB list with full numeric coercion + default order_by", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "2111400010412",
+          ambito: "Urbana",
+          centroid_lat: "19.047480",
+          centroid_lon: "-98.196916",
+          area_km2: "0.6231",
+          establecimientos: "3177",
+          farmacias: "18",
+          clues: "42",
+        },
+        {
+          cvegeo: "2111400010408",
+          ambito: "Urbana",
+          centroid_lat: "19.05",
+          centroid_lon: "-98.21",
+          area_km2: "0.65",
+          establecimientos: "2020",
+          farmacias: "25",
+          clues: "5",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebsByMunicipioResult;
+    expect(body.cve_mun).toBe("21114");
+    expect(body.order_by).toBe("establecimientos");
+    expect(body.total_returned).toBe(2);
+    expect(body.agebs[0]).toMatchObject({
+      cvegeo: "2111400010412",
+      ambito: "Urbana",
+      establecimientos: 3177,
+      farmacias: 18,
+      clues: 42,
+    });
+    expect(typeof body.agebs[0]?.centroid_lat).toBe("number");
+    expect(typeof body.agebs[0]?.area_km2).toBe("number");
+    expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
+  });
+
+  it("respects order_by=clues in the SQL ORDER BY", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=09007&order_by=clues",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toContain("clues DESC");
+    expect(sql).not.toContain("establecimientos DESC");
+  });
+
+  it("normalizes ambito enum (rejects unexpected values to null)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "2111400010412",
+          ambito: "Mixto",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: null,
+          establecimientos: 0,
+          farmacias: 0,
+          clues: 0,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=21114",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as AgebsByMunicipioResult;
+    expect(body.agebs[0]?.ambito).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/ageb-detail  (v0.2.4-A)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/ageb-detail", () => {
+  it("rejects missing cvegeo", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/ageb-detail", { headers: AUTH });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects cvegeo with wrong length (not 13 digits)", async () => {
+    const app = createServer(CONFIG);
+    const r1 = await app.request(
+      "/analytics/ageb-detail?cvegeo=21114000104120",
+      { headers: AUTH },
+    );
+    const r2 = await app.request(
+      "/analytics/ageb-detail?cvegeo=2111400010X12",
+      { headers: AUTH },
+    );
+    expect(r1.status).toBe(400);
+    expect(r2.status).toBe(400);
+  });
+
+  it("returns 404 when AGEB not in ageb_polygons", async () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=9999999999999",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns full breakdown with locality population proxy + top sectors", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "2111400010412",
+            cve_ent: "21",
+            cve_mun: "114",
+            cve_loc: "0001",
+            cve_ageb: "0412",
+            ambito: "Urbana",
+            area_km2: "0.6231",
+            centroid_lat: "19.047480",
+            centroid_lon: "-98.196916",
+            bbox_minlon: "-98.20",
+            bbox_minlat: "19.04",
+            bbox_maxlon: "-98.19",
+            bbox_maxlat: "19.05",
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([
+          { loc_population: "1542232", loc_name: "Heroica Puebla de Zaragoza" },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([
+          { total_establecimientos: "3177", total_farmacias: "18" },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([
+          { scian2: "46", count: "1200" },
+          { scian2: "72", count: "300" },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            clues: "PLSSA001234",
+            nombre: "Hospital Regional",
+            tipo: "HOSPITAL GENERAL",
+            lat: "19.047",
+            lon: "-98.197",
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([42]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=2111400010412",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.cvegeo).toBe("2111400010412");
+    expect(body.cve_ent).toBe("21");
+    expect(body.cve_mun).toBe("114");
+    expect(body.cve_loc).toBe("0001");
+    expect(body.cve_ageb).toBe("0412");
+    expect(body.ambito).toBe("Urbana");
+    expect(body.area_km2).toBe(0.6231);
+    expect(body.bbox).toEqual([-98.2, 19.04, -98.19, 19.05]);
+    expect(body.loc_population).toBe(1542232);
+    expect(body.loc_name).toBe("Heroica Puebla de Zaragoza");
+    expect(body.total_establecimientos).toBe(3177);
+    expect(body.total_farmacias).toBe(18);
+    expect(body.top_sectors).toHaveLength(2);
+    expect(body.top_sectors[0]?.scian2).toBe("46");
+    expect(typeof body.top_sectors[0]?.nombre).toBe("string");
+    expect(body.top_sectors[0]?.count).toBe(1200);
+    expect(body.clues_count).toBe(42);
+    expect(body.clues_sample).toHaveLength(1);
+    expect(body.clues_sample[0]?.clues).toBe("PLSSA001234");
+  });
+
+  it("splits cvegeo into entidad/mun/loc chunks for locality lookup SQL", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0900700010001",
+            cve_ent: "09",
+            cve_mun: "007",
+            cve_loc: "0001",
+            cve_ageb: "0001",
+            ambito: "Urbana",
+            area_km2: "1.0",
+            centroid_lat: "19.4",
+            centroid_lon: "-99.1",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=0900700010001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const args = mockExec.mock.calls[1]?.[1] as string[] | undefined;
+    const locSql = args?.[args.length - 1];
+    expect(locSql).toContain("entidad = '09'");
+    expect(locSql).toContain("mun = '007'");
+    expect(locSql).toContain("loc = '0001'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/ageb-farmacia-opportunity  (v0.2.4-A)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/ageb-farmacia-opportunity", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/ageb-farmacia-opportunity", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects limit above AGEB_FARMACIA_MAX_LIMIT (100)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-farmacia-opportunity?cve_mun=09007&limit=101",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("returns ranked AGEBs with score + numeric coercion", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo: "0900700015214",
+          ambito: "Urbana",
+          centroid_lat: "19.36",
+          centroid_lon: "-99.07",
+          area_km2: "0.34",
+          num_establecimientos: "180",
+          num_farmacias: "0",
+          num_clues: "8",
+          score: "58.0",
+        },
+        {
+          cvegeo: "0900700015301",
+          ambito: "Urbana",
+          centroid_lat: null,
+          centroid_lon: null,
+          area_km2: "0.42",
+          num_establecimientos: "120",
+          num_farmacias: "1",
+          num_clues: "3",
+          score: "36.5",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-farmacia-opportunity?cve_mun=09007",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebFarmaciaOpportunityResult;
+    expect(body.cve_mun).toBe("09007");
+    expect(body.total_returned).toBe(2);
+    expect(body.agebs[0]).toMatchObject({
+      cvegeo: "0900700015214",
+      num_establecimientos: 180,
+      num_farmacias: 0,
+      num_clues: 8,
+      score: 58,
+    });
+    expect(body.agebs[1]?.score).toBe(36.5);
+    expect(body.agebs[1]?.centroid_lat).toBeNull();
+    expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
+  });
+
+  it("emits the score formula in the SQL ORDER BY", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/ageb-farmacia-opportunity?cve_mun=21114&limit=5",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toMatch(/COALESCE\(s\.cnt, 0\) \* 0\.5/);
+    expect(sql).toMatch(/COALESCE\(e\.cnt, 0\) \* 0\.3/);
+    expect(sql).toMatch(/COALESCE\(f\.cnt, 0\) \* 1\.0/);
+    expect(sql).toContain("LIMIT 5");
+  });
+
+  it("uses the RAW score expression in json_agg ORDER BY (qa-audit W1)", async () => {
+    // Lock: both the inner ORDER BY and the json_agg ORDER BY use the raw
+    // num_clues * 0.5 + num_establecimientos * 0.3 - num_farmacias * 1.0
+    // expression, NOT the rounded `t.score` field. Otherwise rows tied at
+    // the 3-decimal rounded score get reordered between the two passes.
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/ageb-farmacia-opportunity?cve_mun=21114", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1];
+    expect(sql).toMatch(
+      /json_agg\(row_to_json\(t\) ORDER BY \(\s*t\.num_clues \* 0\.5/,
+    );
+    expect(sql).not.toMatch(/json_agg\(row_to_json\(t\) ORDER BY t\.score/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SQL-injection contract — pre-validation gates block adversarial input
+// before any docker exec call. Same pattern as ENTIDAD_RE / RISK_ANO_RE
+// elsewhere in this file. (qa-audit R1)
+// ---------------------------------------------------------------------------
+
+describe("AGEB endpoints — SQL-injection contract", () => {
+  it("agebs-by-municipio rejects ';DROP--' adversarial cve_mun without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=" +
+        encodeURIComponent("21114';DROP TABLE establecimientos;--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("ageb-detail rejects 13-char string with non-digits without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=" + encodeURIComponent("11111';--ABCDE"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("ageb-farmacia-opportunity rejects float limit without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-farmacia-opportunity?cve_mun=21114&limit=" +
+        encodeURIComponent("10);DROP TABLE--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 });
