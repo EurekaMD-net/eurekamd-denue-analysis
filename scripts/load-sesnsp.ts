@@ -206,16 +206,14 @@ CREATE INDEX idx_${v.longView}_subtipo ON ${v.longView} (subtipo_delito);
 `;
 }
 
+/**
+ * Only Municipal Delitos is currently used by the analyzer. The Estatal
+ * variant is redundant (we can re-aggregate from municipal at query time);
+ * Víctimas would only matter if we surfaced demographic-segmented analysis,
+ * which isn't on the roadmap. Keeping the schema flags + DDL/MV scaffolding
+ * around in this file so re-enabling a variant is a single-entry change here.
+ */
 export const RNID_VARIANTS: readonly RnidVariant[] = [
-  {
-    basename: "RNID-Delitos_Estatal",
-    level: "estatal",
-    metric: "delitos",
-    rawTable: "sesnsp_delitos_estatal_raw",
-    longView: "sesnsp_delitos_estatal",
-    hasMunicipio: false,
-    hasDemographics: false,
-  },
   {
     basename: "RNID-Delitos_Municipal",
     level: "municipal",
@@ -224,24 +222,6 @@ export const RNID_VARIANTS: readonly RnidVariant[] = [
     longView: "sesnsp_delitos_municipal",
     hasMunicipio: true,
     hasDemographics: false,
-  },
-  {
-    basename: "RNID-Victimas_Estatal",
-    level: "estatal",
-    metric: "victimas",
-    rawTable: "sesnsp_victimas_estatal_raw",
-    longView: "sesnsp_victimas_estatal",
-    hasMunicipio: false,
-    hasDemographics: true,
-  },
-  {
-    basename: "RNID-Victimas_Municipal",
-    level: "municipal",
-    metric: "victimas",
-    rawTable: "sesnsp_victimas_municipal_raw",
-    longView: "sesnsp_victimas_municipal",
-    hasMunicipio: true,
-    hasDemographics: true,
   },
 ];
 
@@ -571,7 +551,9 @@ const isMain =
 if (isMain) {
   const rnidDir = getArg("rnid-dir") ?? "raw/sesnsp";
   const dbContainer = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
-  console.log(`[load-sesnsp] loading 4 RNID files from ${rnidDir} ...`);
+  console.log(
+    `[load-sesnsp] loading ${RNID_VARIANTS.length} variant(s) from ${rnidDir} ...`,
+  );
   loadSesnsp({ rnidDir, dbContainer })
     .then((r) => {
       for (const v of r.variants) {

@@ -356,31 +356,26 @@ Operador descargó los archivos a través del navegador y los pasó a `raw/` y `
 
 ### SESNSP RNID
 
-- **Loader:** `scripts/load-sesnsp.ts` (~370 L, 14 mocked tests).
-- **Inputs:** 4 ZIPs en `raw/sesnsp/`:
-  - `RNID-Delitos_Estatal-2026-mar2026.zip`
-  - `RNID-Delitos_Municipal-2026-mar2026.zip`
-  - `RNID-Victimas_Estatal-2026-mar2026.zip` (CSV interno: `RNID-Víctimas_…`, con acento — el loader consulta el índice del ZIP, no asume `.zip → .csv` por nombre)
-  - `RNID-Victimas_Municipal-2026-mar2026.zip` (igual, acento interno)
+- **Loader:** `scripts/load-sesnsp.ts` (~370 L, 15 mocked tests).
+- **Scope:** sólo **Delitos Municipal**. Los otros tres datasets (Delitos Estatal + Víctimas Estatal/Municipal) se descartaron 2026-05-05 — Estatal es agregable desde Municipal y la segmentación demográfica de Víctimas no está en roadmap. Re-habilitar es agregar una entrada en `RNID_VARIANTS`; el resto del scaffolding (DDL/MV condicional con `hasMunicipio`/`hasDemographics`) se preserva.
+- **Inputs:** uno o más archivos en `raw/sesnsp/` cuyo nombre comience con `RNID-Delitos_Municipal`:
+  - `RNID-Delitos_Municipal-2026-mar2026.zip` (año actual, ~2 MB)
+  - `RNID-Delitos_Municipal-Historical-2015-2025.csv` (histórico 2015-2025, ~362 MB; ya extraído del ZIP que ship'eó SESNSP — el CSV interno está en una subcarpeta dentro del archivo original, así que el operador tuvo que extraerlo a mano)
+  - El loader detecta el caso accent-en-CSV-name (descubierto en las variantes Víctimas que ya no usamos) consultando el índice del ZIP en vez de asumir `.zip → .csv`.
 - **Pipeline por archivo:** `unzip -p` → `iconv WINDOWS-1252 → UTF-8` → reescribir header a snake_case (vía `HEADER_MAP` con keys ya normalizadas — incluye `año`, `cve._municipio`, `bien_jurídico_afectado`, `sexo`, `rango_de_edad`) → normalizar line endings CRLF→LF → `docker cp` → `\copy`.
-- **Variantes Víctimas** llevan dos columnas extra (`Sexo`, `Rango de edad`); el `RnidVariant` schema marca `hasMunicipio` + `hasDemographics` y el DDL/MV se generan condicionalmente.
-- **MV long-format** por variante (`sesnsp_<metric>_<level>`): unpivot de las 12 columnas mensuales vía `CROSS JOIN LATERAL (VALUES ...)`. Para variantes municipales se deriva `cve_mun = LPAD(cve_municipio, 5, '0')` — SESNSP serializa `entidad+municipio` sin zero-pad de la entidad (AGS municipio 001 ship'ea como `1001`, no `01001`).
-- **Multi-input por variante:** `findVariantInputs(dir, basename)` retorna todos los `<basename>*.{zip,csv}` en orden alfabético. La variante `RNID-Delitos_Municipal` recibe DOS archivos — el ZIP del año actual + un CSV histórico 2015–2025 — que se cargan en la misma raw table tras un único DROP+CREATE. Caso histórico ingestado 2026-05-05 noche.
+- **Scaffolding para Víctimas preservado** (no usado actualmente): `RnidVariant.hasDemographics` añade `Sexo` + `Rango de edad` al DDL/MV. Reactivar = una sola entrada nueva en `RNID_VARIANTS`.
+- **MV long-format `sesnsp_delitos_municipal`:** unpivot de las 12 columnas mensuales vía `CROSS JOIN LATERAL (VALUES ...)`. Deriva `cve_mun = LPAD(cve_municipio, 5, '0')` — SESNSP serializa `entidad+municipio` sin zero-pad de la entidad (AGS municipio 001 ship'ea como `1001`, no `01001`). Índices: `(cve_mun)`, `(ano, mes)`, `(subtipo_delito)`.
+- **Multi-input por variante:** `findVariantInputs(dir, basename)` retorna todos los `<basename>*.{zip,csv}` en orden alfabético. La variante `RNID-Delitos_Municipal` recibe DOS archivos — el ZIP del año actual + un CSV histórico 2015–2025 — que se cargan en la misma raw table tras un único DROP+CREATE.
 - **Streaming-style en preparación:** el CSV histórico es 362 MB y inflaría ~800 MB en heap V8 si se cargara como string. `preparePreparedCsv` lee el header con `head -1` y luego ejecuta el pipeline completo (`source | iconv | tail -n +2 | tr -d '\\r' > out`) directo a archivo, sin pasar por Node. Aplica también a los inputs pequeños — un solo path para todos.
-- **Conteos verificados live (post-histórico):**
+- **Conteos verificados live:**
 
-  | Variante                |       raw |       long |
-  | ----------------------- | --------: | ---------: |
-  | RNID-Delitos_Estatal    |     3,648 |     10,944 |
-  | RNID-Delitos_Municipal  | 2,849,134 | 31,614,348 |
-  | RNID-Victimas_Estatal   |    65,664 |    196,992 |
-  | RNID-Victimas_Municipal |   133,943 |    401,829 |
+  | Variante               |       raw |       long |
+  | ---------------------- | --------: | ---------: |
+  | RNID-Delitos_Municipal | 2,849,134 | 31,614,348 |
 
-- **Cobertura temporal Delitos_Municipal:** **2015–2026 Mar** (12 años, ~22.2 M delitos eventos totales). Distribución anual de eventos (suma de la columna `count`):
+- **Cobertura temporal:** **2015–2026 Mar** (12 años, ~22.2 M delitos eventos totales). Distribución anual de eventos (suma de la columna `count`):
   - 2015: 1.66M • 2016: 1.76M • 2017: 1.94M • 2018: 1.99M • 2019: 2.07M • 2020: 1.84M (efecto pandémico) • 2021: 2.04M • 2022: 2.14M • 2023: 2.17M • 2024: 2.09M • 2025: 2.02M • 2026 Q1: 0.48M
   - Filas long-form saltan de 2.27M (2015–2016) a ~2.91M (2017+) por la introducción de subtipos/modalidades adicionales en la nueva metodología SESNSP.
-
-- **Cobertura temporal Víctimas + Estatal:** sólo 2026 (Ene–Mar). Operador puede agregar archivos históricos siguiendo el mismo patrón (`<basename>-Historical-…csv` o `<basename>-…zip` en `raw/sesnsp/`) y rerunneando el loader.
 
 ### Operación
 
@@ -392,4 +387,4 @@ npx tsx --env-file=.env scripts/load-ce2024.ts --zip-dir=raw
 npx tsx --env-file=.env scripts/load-sesnsp.ts --rnid-dir=raw/sesnsp
 ```
 
-Ambos loaders son idempotentes (DROP+CREATE en cada run). Tiempos típicos: ~32 s (CE 2024) + ~11 s (SESNSP sólo 2026) o ~132 s (SESNSP con histórico 2015–2025 — el CSV de 362 MB domina, todo se procesa via shell pipeline sin pasar por heap V8).
+Ambos loaders son idempotentes (DROP+CREATE en cada run). Tiempos típicos: ~32 s (CE 2024) + ~125 s (SESNSP completo — el CSV histórico de 362 MB domina, todo se procesa via shell pipeline sin pasar por heap V8).

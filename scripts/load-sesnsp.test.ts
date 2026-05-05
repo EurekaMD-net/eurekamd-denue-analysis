@@ -65,29 +65,17 @@ describe("normalizeHeader", () => {
 });
 
 describe("RNID_VARIANTS", () => {
-  it("declares exactly the 4 datasets the loader expects", () => {
-    expect(RNID_VARIANTS).toHaveLength(4);
-    expect(RNID_VARIANTS.map((v) => v.basename).sort()).toEqual([
-      "RNID-Delitos_Estatal",
-      "RNID-Delitos_Municipal",
-      "RNID-Victimas_Estatal",
-      "RNID-Victimas_Municipal",
-    ]);
+  it("ships only the Municipal Delitos variant — Estatal/Víctimas explicitly excluded", () => {
+    expect(RNID_VARIANTS).toHaveLength(1);
+    expect(RNID_VARIANTS[0]?.basename).toBe("RNID-Delitos_Municipal");
   });
 
-  it("flags Municipal variants with hasMunicipio and Víctimas with hasDemographics", () => {
-    const byBasename = Object.fromEntries(
-      RNID_VARIANTS.map((v) => [v.basename, v]),
-    );
-    expect(byBasename["RNID-Delitos_Estatal"]?.hasMunicipio).toBe(false);
-    expect(byBasename["RNID-Delitos_Municipal"]?.hasMunicipio).toBe(true);
-    expect(byBasename["RNID-Victimas_Estatal"]?.hasMunicipio).toBe(false);
-    expect(byBasename["RNID-Victimas_Municipal"]?.hasMunicipio).toBe(true);
-
-    expect(byBasename["RNID-Delitos_Estatal"]?.hasDemographics).toBe(false);
-    expect(byBasename["RNID-Delitos_Municipal"]?.hasDemographics).toBe(false);
-    expect(byBasename["RNID-Victimas_Estatal"]?.hasDemographics).toBe(true);
-    expect(byBasename["RNID-Victimas_Municipal"]?.hasDemographics).toBe(true);
+  it("flags the Municipal Delitos variant correctly", () => {
+    const v = RNID_VARIANTS[0]!;
+    expect(v.level).toBe("municipal");
+    expect(v.metric).toBe("delitos");
+    expect(v.hasMunicipio).toBe(true);
+    expect(v.hasDemographics).toBe(false);
   });
 
   it("uses sesnsp_<metric>_<level>(_raw) as the table naming convention", () => {
