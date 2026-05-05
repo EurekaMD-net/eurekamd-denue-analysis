@@ -60,6 +60,45 @@ function readFirstLine(path: string): string {
   }
 }
 
+/**
+ * Parse the year of registration (`anio_regis`, column index 31 in
+ * EDR_COLUMNS) from the first data row of the CSV. Used by --append loads
+ * to purge prior-loaded rows for the same registration year before \copy
+ * (audit M1 — without this, re-running the same year doubles every
+ * aggregate silently). Returns the 4-digit year string, or null if the
+ * value is missing/malformed (caller treats as "skip purge"; load still
+ * proceeds on raw table append).
+ *
+ * Assumes the CSV is anio_regis-homogeneous, which INEGI EDR releases
+ * always are by design (one release = one calendar year of registrations,
+ * even though individual rows may have anio_ocur in earlier years).
+ */
+export function readAnioRegisFromFirstDataRow(path: string): string | null {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    const bytes = readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, bytes).toString("utf-8");
+    // Skip header line.
+    const firstNl = text.indexOf("\n");
+    if (firstNl === -1) return null;
+    const rest = text.slice(firstNl + 1);
+    const secondNl = rest.indexOf("\n");
+    const dataLine = secondNl === -1 ? rest : rest.slice(0, secondNl);
+    if (dataLine.trim().length === 0) return null;
+    // EDR_COLUMNS has anio_regis at index 31. CSV is comma-delimited with
+    // some columns wrapped in quotes; anio_regis is numeric so it ships
+    // unquoted, but a defensive split-and-strip handles both.
+    const fields = dataLine.split(",");
+    if (fields.length < 32) return null;
+    const raw = (fields[31] ?? "").trim().replace(/^"|"$/g, "");
+    if (!/^(19|20)[0-9]{2}$/.test(raw)) return null;
+    return raw;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function assertSafePath(label: string, p: string): void {
   if (p.length === 0 || p.startsWith("-")) {
     throw new Error(
@@ -220,7 +259,10 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
 
   const started = Date.now();
 
-  // 1. Create raw table (skip in append mode — caller is stacking)
+  // 1. Create raw table (skip in append mode — caller is stacking).
+  // In append mode, instead purge any prior load for the same anio_regis
+  // (audit M1 — without this, re-running the same year doubles every
+  // aggregate silently). The CSV is anio_regis-homogeneous by INEGI design.
   if (!config.append) {
     execFileSync(
       "docker",
@@ -238,6 +280,28 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
       ],
       { encoding: "utf-8", timeout: 120_000 },
     );
+  } else {
+    const year = readAnioRegisFromFirstDataRow(config.csvPath);
+    if (year !== null) {
+      // Year value is regex-validated (^(19|20)[0-9]{2}$) so safe to inline.
+      execFileSync(
+        "docker",
+        [
+          "exec",
+          config.dbContainer,
+          "psql",
+          "-U",
+          "postgres",
+          "-d",
+          "postgres",
+          "-c",
+          `DELETE FROM inegi_edr_defunciones_raw WHERE anio_regis = '${year}';`,
+        ],
+        { encoding: "utf-8", timeout: 5 * 60_000 },
+      );
+    }
+    // Year unparseable → skip purge. Loader still appends; operator can
+    // catch the duplication via the count assertions in the result.
   }
 
   // 2. Copy CSV in via temp container path + try/finally cleanup

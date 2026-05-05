@@ -181,10 +181,31 @@ describe("loadEdr", () => {
     ]);
   });
 
-  it("skips DDL when --append is passed (multi-year stacking)", async () => {
-    stubHeader(REAL_HEADER);
+  it("skips DDL when --append is passed and purges prior anio_regis (audit M1)", async () => {
+    // Header + first data row with anio_regis=2023 in column 32 (index 31).
+    // Build a synthetic data row by joining 74 placeholder values; index 31
+    // is anio_regis, set to "2023".
+    const dataFields = EDR_COLUMNS.map((_c, i) => (i === 31 ? "2023" : "1"));
+    const fakeFile = `${REAL_HEADER}\n${dataFields.join(",")}\n`;
+    mockOpen.mockReturnValue(7);
+    mockRead.mockImplementation(
+      (
+        _fd: number,
+        buf: Buffer,
+        offset: number,
+        length: number,
+        _pos: number,
+      ) => {
+        const bytes = Buffer.from(fakeFile, "utf-8");
+        bytes.copy(buf, offset, 0, Math.min(length, bytes.length));
+        return Math.min(length, bytes.length);
+      },
+    );
+    mockClose.mockReturnValue(undefined);
+
     mockExec
-      .mockReturnValueOnce("") // docker cp (no DDL first)
+      .mockReturnValueOnce("") // DELETE FROM ... WHERE anio_regis = '2023'
+      .mockReturnValueOnce("") // docker cp
       .mockReturnValueOnce("") // \copy
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("1639344") // raw_rows (2x)
@@ -197,9 +218,52 @@ describe("loadEdr", () => {
       append: true,
     });
 
-    // First call should be cp, not psql DDL — the DDL block is skipped.
-    const firstCall = mockExec.mock.calls[0];
-    expect(firstCall?.[1]?.[0]).toBe("cp");
+    // First call: DELETE keyed by the year extracted from line 2.
+    const purgeCall = mockExec.mock.calls[0];
+    expect(purgeCall?.[1]?.[0]).toBe("exec");
+    const purgeSql = purgeCall?.[1]?.[purgeCall[1].length - 1] ?? "";
+    expect(purgeSql).toMatch(/DELETE FROM inegi_edr_defunciones_raw/);
+    expect(purgeSql).toMatch(/anio_regis = '2023'/);
+    // Second call: cp (no DDL).
+    expect(mockExec.mock.calls[1]?.[1]?.[0]).toBe("cp");
+  });
+
+  it("--append with unparseable anio_regis skips purge (loader proceeds)", async () => {
+    // First data row missing anio_regis (column 31 empty).
+    const dataFields = EDR_COLUMNS.map((_c, i) => (i === 31 ? "" : "1"));
+    const fakeFile = `${REAL_HEADER}\n${dataFields.join(",")}\n`;
+    mockOpen.mockReturnValue(7);
+    mockRead.mockImplementation(
+      (
+        _fd: number,
+        buf: Buffer,
+        offset: number,
+        length: number,
+        _pos: number,
+      ) => {
+        const bytes = Buffer.from(fakeFile, "utf-8");
+        bytes.copy(buf, offset, 0, Math.min(length, bytes.length));
+        return Math.min(length, bytes.length);
+      },
+    );
+    mockClose.mockReturnValue(undefined);
+
+    mockExec
+      .mockReturnValueOnce("") // docker cp (no purge, no DDL)
+      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // rm cleanup
+      .mockReturnValueOnce("0")
+      .mockReturnValueOnce("0")
+      .mockReturnValueOnce("0");
+
+    await loadEdr({
+      csvPath: "/tmp/edr-bad.csv",
+      dbContainer: "supabase-db",
+      append: true,
+    });
+
+    // First call should jump straight to cp — purge is skipped on unparseable year.
+    expect(mockExec.mock.calls[0]?.[1]?.[0]).toBe("cp");
   });
 
   it("cleans up the container temp file even if \\copy throws", async () => {

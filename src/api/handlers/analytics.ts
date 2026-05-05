@@ -1116,9 +1116,9 @@ interface RawMortalityTrendMeta {
 }
 
 function mortalityTrendSql(cveMun: string): string {
-  // Reads directly from the mat-view (annual rollup is already at the right
-  // grain — no mat-view-vs-live split needed). cve_mun pre-validated by
-  // CVE_MUN_RE.
+  // Mat-view path. cve_mun pre-validated by CVE_MUN_RE. Audit W1: tighten
+  // year bounds to 2010..2039 to match RISK_ANO_RE — corrupt rows beyond
+  // that range are suppressed by both layers.
   return `
 SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
   SELECT
@@ -1131,14 +1131,52 @@ SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
     def_externas
   FROM mv_mortalidad_municipal_yearly
   WHERE cve_mun = '${cveMun}'
-    AND ano BETWEEN 2010 AND 2099
+    AND ano BETWEEN 2010 AND 2039
+) t;
+`;
+}
+
+/**
+ * Live-aggregation fallback for mortality-trend. Audit C2 (2026-05-05):
+ * sibling parity with mortality-summary's M1 fix. Aggregates directly
+ * against `inegi_edr_defunciones_raw` filtered by the input cve_mun's
+ * entidad and municipio components — same FILTER pattern as the mat-view,
+ * unrolled. Used when the operator hasn't run `scripts/perf-matviews.sql`
+ * yet on a fresh DB.
+ */
+function mortalityTrendLiveSql(cveMun: string): string {
+  // cveMun pre-validated by CVE_MUN_RE → ent (2 chars) + mun (3 chars).
+  const ent = cveMun.slice(0, 2);
+  const mun = cveMun.slice(2, 5);
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
+  SELECT
+    NULLIF(anio_ocur, '')::int                                     AS ano,
+    COUNT(*)::bigint                                               AS total_defunciones,
+    COUNT(*) FILTER (WHERE LEFT(edad, 1) IN ('1','2','3'))::bigint AS def_menores_1ano,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 9)::bigint  AS def_circulatorio,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 2)::bigint  AS def_neoplasias,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 4)::bigint  AS def_endocrinas,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 20)::bigint AS def_externas
+  FROM inegi_edr_defunciones_raw
+  WHERE ent_resid = '${ent}'
+    AND mun_resid = '${mun}'
+    AND anio_ocur ~ '^[0-9]{4}$'
+    AND NULLIF(anio_ocur, '')::int BETWEEN 2010 AND 2039
+  GROUP BY NULLIF(anio_ocur, '')::int
 ) t;
 `;
 }
 
 function mortalityTrendMetaSql(cveMun: string): string {
+  // Audit C1 (2026-05-05): use json_agg + index-into-array, mirroring
+  // riskTrendHandler. row_to_json on a 0-row inner SELECT emits an empty
+  // stdout string that runJsonQuery normalizes to `[]` — the handler then
+  // dereferences `meta?.municipio` on what's actually an array. Today
+  // it works by accident; multi-row censo (or a json shape change)
+  // could break it silently.
   return `
-SELECT row_to_json(t) FROM (
+SELECT json_agg(row_to_json(t)) FROM (
   SELECT nom_mun AS municipio, pobtot AS poblacion
   FROM censo_municipios
   WHERE cve_mun = '${cveMun}'
@@ -1159,14 +1197,20 @@ export async function mortalityTrendHandler(
     );
   }
 
-  const series = runJsonQuery<RawMortalityTrendPoint[]>(
+  // Audit C2 (2026-05-05): mat-view-first read with live aggregation
+  // fallback so a fresh DB without `scripts/perf-matviews.sql` still
+  // serves trend (same M1 pattern as mortality-summary).
+  const series = runJsonQueryMvFirst<RawMortalityTrendPoint[]>(
     config,
     mortalityTrendSql(cveMun),
+    mortalityTrendLiveSql(cveMun),
   );
-  const meta = runJsonQuery<RawMortalityTrendMeta | null>(
+  // Audit C1: meta SQL now returns json_agg([]) — match riskTrendHandler's shape.
+  const metaRows = runJsonQuery<RawMortalityTrendMeta[]>(
     config,
     mortalityTrendMetaSql(cveMun),
   );
+  const meta = metaRows[0] ?? null;
 
   const result: MortalityTrendResult = {
     cve_mun: cveMun,

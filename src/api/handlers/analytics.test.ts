@@ -1228,6 +1228,16 @@ describe("GET /analytics/mortality-summary", () => {
     const liveSql = liveArgs[liveArgs.length - 1] ?? "";
     expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
     expect(liveSql).not.toMatch(/mv_mortalidad_municipal_yearly/);
+    // Audit W3 (2026-05-05): pin the live SQL's filter shape so future
+    // edits can't drift from the mat-view's FILTER aggregation. If these
+    // diverge, the fallback path returns different numbers than the
+    // mat-view path — the worst kind of bug because both 200.
+    expect(liveSql).toMatch(/ent_resid = '09'/);
+    expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 9/);
+    expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 2/);
+    expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 4/);
+    expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 20/);
+    expect(liveSql).toMatch(/LEFT\(edad, 1\) IN \('1','2','3'\)/);
   });
 
   it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
@@ -1307,7 +1317,7 @@ describe("GET /analytics/mortality-trend", () => {
         ]),
       )
       .mockReturnValueOnce(
-        JSON.stringify({ municipio: "Iztapalapa", poblacion: 1835486 }),
+        JSON.stringify([{ municipio: "Iztapalapa", poblacion: 1835486 }]),
       );
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/mortality-trend?cve_mun=09007", {
@@ -1327,7 +1337,8 @@ describe("GET /analytics/mortality-trend", () => {
   });
 
   it("inlines cve_mun verbatim into the SQL", async () => {
-    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("null");
+    // Series mat-view call → "[]" (success, empty); meta call → empty array.
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("[]");
     const app = createServer(CONFIG);
     await app.request("/analytics/mortality-trend?cve_mun=14039", {
       headers: AUTH,
@@ -1374,7 +1385,9 @@ describe("GET /analytics/mortality-trend", () => {
   it("returns empty series when the municipio has no rows yet", async () => {
     mockExec
       .mockReturnValueOnce("[]")
-      .mockReturnValueOnce(JSON.stringify({ municipio: "X", poblacion: 100 }));
+      .mockReturnValueOnce(
+        JSON.stringify([{ municipio: "X", poblacion: 100 }]),
+      );
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/mortality-trend?cve_mun=32058", {
       headers: AUTH,
@@ -1393,5 +1406,49 @@ describe("GET /analytics/mortality-trend", () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("postgres.parse_error");
+  });
+
+  // Audit C2 (2026-05-05): trend now uses runJsonQueryMvFirst with a live
+  // aggregation fallback against inegi_edr_defunciones_raw. Mirrors the
+  // mortality-summary M1 fallback test.
+  it("falls back to live SQL when mv_mortalidad_municipal_yearly is absent", async () => {
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_mortalidad_municipal_yearly" does not exist',
+          ),
+        });
+      })
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            ano: 2024,
+            total_defunciones: 12121,
+            def_menores_1ano: 208,
+            def_circulatorio: 3350,
+            def_neoplasias: 1744,
+            def_endocrinas: 2053,
+            def_externas: 835,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([{ municipio: "Iztapalapa", poblacion: 1835486 }]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=09007", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MortalityTrendResult;
+    expect(body.series).toHaveLength(1);
+    // First call (mat-view) threw; second (live) succeeded; third (meta).
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
+    const liveSql = liveArgs[liveArgs.length - 1] ?? "";
+    expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
+    expect(liveSql).toMatch(/ent_resid = '09'/);
+    expect(liveSql).toMatch(/mun_resid = '007'/);
   });
 });
