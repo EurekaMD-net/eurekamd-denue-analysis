@@ -1,6 +1,6 @@
 # Fase 2 — CE 2024 + CLUES + SESNSP
 
-**Estatus:** CLUES ✅ shipped 2026-05-04. CE 2024 + SESNSP **bloqueados — requieren URLs operadas por humano.** Re-probado 2026-05-05 (ver §"Verificación 2026-05-05" al final).  
+**Estatus:** ✅ Completada 2026-05-05. CLUES (2026-05-04), CE 2024 + SESNSP (2026-05-05). Operador suministró URLs/archivos a través del navegador — ambas fuentes están detrás de gates anti-bot (decoy de 2,263 b en INEGI, "Challenge Validation" tipo Cloudflare en gob.mx) que `curl`/`wget` no pasan.  
 **Estimado:** 2-3 días de trabajo activo  
 **Fecha documento:** 2026-05-03 (actualizado 2026-05-05)
 
@@ -336,3 +336,54 @@ Re-probadas las dos fuentes pendientes de v0.2.2. Ambas siguen requiriendo inter
 ### Implicación de calendario
 
 Se cierra v0.2.2 como **parcialmente entregada** (CLUES ✅, CE 2024 + SESNSP deferidas). El roadmap de Fase 2 no avanza sin operator-input; los loaders están diseñados (esquema, índices, mecánica de join) pero no se pueden cablear hasta tener bytes reales.
+
+---
+
+## Cierre v0.2.2 — 2026-05-05 noche
+
+Operador descargó los archivos a través del navegador y los pasó a `raw/` y `raw/sesnsp/`. Ambos loaders shipped y verificados contra Supabase live:
+
+### CE 2024
+
+- **Loader:** `scripts/load-ce2024.ts` (~330 L, 12 mocked tests).
+- **Inputs:** 32 ZIPs `conjunto_de_datos_ce_<XXX>_2024_csv.zip` (un por entidad federativa, ~89 MB total). El `_nac_` rollup nacional se descargó pero no se carga — los archivos por estado contienen filas state-level + municipal-level mezcladas; el `_nac_` solo aporta agregados sin keys de join.
+- **Schema generado dinámicamente** desde el header de la primera ZIP (105 columnas TEXT en `ce2024_raw`), con `expectSafeIdentList` rechazando cualquier identificador fuera de `[a-z][a-z0-9_]*`. Cada estado verifica que su header tenga el mismo conteo de columnas que el canónico — drift en una emisión futura de INEGI rompe ruidoso, no silencioso.
+- **MV `ce2024_municipal`:** filtra a filas con `e03 != ''` y `e04 != ''`, deriva `cve_mun` (5-char `e03||e04`), castea métricas con `NULLIF(col, '')::numeric`. Índices en `cve_mun`, `sector`, `clase`, `id_estrato`.
+- **Conteos verificados live:**
+  - `ce2024_raw`: 1,916,601 filas
+  - `ce2024_municipal`: 1,796,546 filas (idéntico al recuento por archivo, sin pérdida ni duplicación)
+- **Smoke join 4-source** (Cuauhtémoc CDMX `09015`): 67,142 establecimientos DENUE × 3,425 filas CE 2024 × 20.9 % pobreza CONEVAL × 7,218 delitos Q1 2026 SESNSP (de los cuales 249 robos a negocio). Top sectores por UE en Cuauhtémoc: 46 (33 k UE), 72 (8.3 k), 81 (6.9 k), 31-33 (3.9 k), 43 (2.6 k).
+
+### SESNSP RNID
+
+- **Loader:** `scripts/load-sesnsp.ts` (~370 L, 14 mocked tests).
+- **Inputs:** 4 ZIPs en `raw/sesnsp/`:
+  - `RNID-Delitos_Estatal-2026-mar2026.zip`
+  - `RNID-Delitos_Municipal-2026-mar2026.zip`
+  - `RNID-Victimas_Estatal-2026-mar2026.zip` (CSV interno: `RNID-Víctimas_…`, con acento — el loader consulta el índice del ZIP, no asume `.zip → .csv` por nombre)
+  - `RNID-Victimas_Municipal-2026-mar2026.zip` (igual, acento interno)
+- **Pipeline por archivo:** `unzip -p` → `iconv WINDOWS-1252 → UTF-8` → reescribir header a snake_case (vía `HEADER_MAP` con keys ya normalizadas — incluye `año`, `cve._municipio`, `bien_jurídico_afectado`, `sexo`, `rango_de_edad`) → normalizar line endings CRLF→LF → `docker cp` → `\copy`.
+- **Variantes Víctimas** llevan dos columnas extra (`Sexo`, `Rango de edad`); el `RnidVariant` schema marca `hasMunicipio` + `hasDemographics` y el DDL/MV se generan condicionalmente.
+- **MV long-format** por variante (`sesnsp_<metric>_<level>`): unpivot de las 12 columnas mensuales vía `CROSS JOIN LATERAL (VALUES ...)`. Para variantes municipales se deriva `cve_mun = LPAD(cve_municipio, 5, '0')` — SESNSP serializa `entidad+municipio` sin zero-pad de la entidad (AGS municipio 001 ship'ea como `1001`, no `01001`).
+- **Conteos verificados live:**
+
+  | Variante                |     raw |    long |
+  | ----------------------- | ------: | ------: |
+  | RNID-Delitos_Estatal    |   3,648 |  10,944 |
+  | RNID-Delitos_Municipal  | 286,140 | 858,420 |
+  | RNID-Victimas_Estatal   |  65,664 | 196,992 |
+  | RNID-Victimas_Municipal | 133,943 | 401,829 |
+
+- **Cobertura temporal:** sólo 2026 (Ene–Mar). Para profundidad histórica, ingerir archivos de años previos cuando estén disponibles (cada archivo cubre un año entero, llenando los meses futuros con vacíos).
+
+### Operación
+
+```bash
+# CE 2024 (asume 32 zips ya en raw/)
+npx tsx --env-file=.env scripts/load-ce2024.ts --zip-dir=raw
+
+# SESNSP RNID (asume 4 zips ya en raw/sesnsp/)
+npx tsx --env-file=.env scripts/load-sesnsp.ts --rnid-dir=raw/sesnsp
+```
+
+Ambos loaders son idempotentes (DROP+CREATE en cada run). Cada run completo: ~32 s (CE 2024) + ~11 s (SESNSP).
