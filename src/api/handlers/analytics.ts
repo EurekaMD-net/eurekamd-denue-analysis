@@ -1,8 +1,9 @@
 /**
- * GET /analytics/* — joined DENUE × Censo 2020 × CONEVAL × CLUES queries
- * powering the Locust-mode dashboard (v0.3 P2).
+ * GET /analytics/* — joined DENUE × Censo 2020 × CONEVAL × CLUES × SESNSP
+ * queries powering the Locust-mode dashboard (v0.3 P2) plus the risk
+ * surface (v0.2.2 SESNSP, 2026-05-05).
  *
- * Three endpoints. All shell to docker exec psql for the joins because
+ * Six endpoints. All shell to docker exec psql for the joins because
  * PostgREST cannot express GROUP BY across views nor LEFT JOIN to a
  * different table. Same pattern as src/analysis/cluster-by-sector.ts.
  *
@@ -19,13 +20,29 @@
  *     establecimientos count, farmacias subtotal, CLUES count, poblacion,
  *     pobreza_pct, IRS índice + grado.
  *
+ *   GET /analytics/top-sectors?entidad=XX[&limit=N]
+ *     Top SCIAN sectors by establishment count for one entidad.
+ *
+ *   GET /analytics/risk-summary?entidad=XX[&ano=YYYY&baseline_ano=YYYY]
+ *     Per-municipio SESNSP profile: total_delitos + robo_negocio +
+ *     homicidio_doloso + extorsion + delitos_per_1k_pop + change vs
+ *     baseline. Mat-view-first (mv_delitos_municipal_yearly) with live
+ *     fallback to sesnsp_delitos_municipal aggregation.
+ *
+ *   GET /analytics/risk-trend?cve_mun=NNNNN
+ *     Monthly SESNSP time series (~135 points 2015-01..2026-03) for one
+ *     municipio. Reads sesnsp_delitos_municipal directly via cve_mun btree.
+ *
  * Caching: national queries are extremely static (max-age=3600 = 1 hour).
  * Per-entidad query is lightly more dynamic (max-age=300 = 5 min) since
- * a re-run of the DENUE pipeline could shift counts.
+ * a re-run of the DENUE pipeline could shift counts. risk-summary uses
+ * max-age=300 to bound staleness when the operator forgets to refresh
+ * mv_delitos_municipal_yearly after a SESNSP loader rerun (audit M2).
  *
  * SQL is built with bound parameters via psql -v + a CHECK regex on the
  * caller's `entidad` arg — same defense as the other handlers (ENTIDAD_RE
- * gate before the SQL ever sees the value).
+ * gate before the SQL ever sees the value). risk-* endpoints add
+ * RISK_ANO_RE + CVE_MUN_RE for their respective inputs.
  */
 
 import { execFileSync } from "node:child_process";

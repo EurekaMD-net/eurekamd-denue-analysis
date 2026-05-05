@@ -6,16 +6,17 @@ Extractor y analizador de datos del **Directorio Estadístico Nacional de Unidad
 
 ---
 
-## Versión actual: v0.3 P3 — Locust + Map mode (analyzer frontend)
+## Versión actual: v0.3 P3 — Locust + Map mode + Risk surface backend
 
-**Live**: <https://uncharted.eurekamd.cloud/> (Caddy + LE TLS + dist/ + gzip + immutable cache).
+**Live**: <https://uncharted.eurekamd.cloud/> (Caddy + LE TLS + dist/ + gzip + immutable cache, systemd-managed via `denue-analyzer.service`).
 
-Backend v0.1 + v0.2.1 + v0.2.2-CLUES están todos cargados en producción (5 fuentes: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES, todas joinables por `cve_mun` 5-char). El analyzer (`web/`) ahora tiene **dos modos** sobre el mismo dataset:
+Backend v0.1 + v0.2.1 + v0.2.2 cargados en producción (**6 fuentes joinables por `cve_mun` 5-char**: DENUE × Censo 2020 × CONEVAL Pobreza × CONEVAL IRS × CLUES × CE 2024, plus SESNSP RNID Delitos Municipal 2015–2026 como capa de riesgo operacional). El analyzer (`web/`) tiene **dos modos** sobre el mismo dataset:
 
-- **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints `/analytics/*` (national-treemap, sector-grade-matrix, municipios, top-sectors).
+- **Locust mode**: 5 charts ECharts (mosaico nacional treemap, sector × IRS heatmap, top sectores bar, densidad-vs-pobreza scatter, CLUES vs farmacias por 100k) + 4 endpoints comerciales (`/analytics/national-treemap`, `/sector-grade-matrix`, `/municipios`, `/top-sectors`).
 - **Map mode**: MapLibre + Carto Positron/Dark Matter basemap, vector source sobre `/tiles/:z/:x/:y.mvt` con heatmap (zoom <14) + circles (zoom ≥11) y deck.gl `ScatterplotLayer` overlay para cluster centroids cuando entidad+sector están seleccionados. Click en punto → detalle del establecimiento via `/establishment/:clee`.
+- **Risk surface (backend only, sin UI todavía)**: 2 endpoints SESNSP — `/analytics/risk-summary?entidad=NN[&ano=&baseline_ano=]` (perfil per-municipio con totales por subtipo + per-1k normalización + cambio % vs baseline) y `/analytics/risk-trend?cve_mun=NNNNN` (serie mensual ~135 puntos 2015–2026 Mar). Mat-view `mv_delitos_municipal_yearly` con fallback gracioso a agregación live si la MV no existe. UI integration es la siguiente conversación.
 
-CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (portales gated/slugs caducados, ver `docs/v0.2-status.md` § "What blocks v0.2.x from full closure"). Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
+Datatur/SINAIS/ENOE/ENIGH quedan para v0.2.3.
 
 ---
 
@@ -43,13 +44,13 @@ CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (
 | —    | CONEVAL IRS Municipal: índice + grado + rezago educativo/salud/calidad-vivienda × 7           | ✅ Completado                                                             |
 | —    | AGEB-level Censo (RESAGEBURB) y rezago social AGEB                                            | ⏳ Pendiente — portal CONEVAL/INEGI cerrado, requiere asistencia operador |
 
-### v0.2.2 (CE 2024 + CLUES + SESNSP) — 🟡 Parcial
+### v0.2.2 (CE 2024 + CLUES + SESNSP) — ✅ Completo
 
-| Sub | Descripción                                                                                                                                                                                                | Estado                                                                          |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| —   | **CLUES** (DGIS Catálogo Establecimientos de Salud, ene-2026): 63,708 raw → 41,381 EN OPERACION → 39,946 (96.5%) geocodificadas. `clues` materialized view con cve_mun + cve_loc + geom POINT(4326) + GIST | ✅ Completado                                                                   |
-| —   | **CE 2024** (Censo Económico INEGI): revenue/personal_ocupado/valor_agregado por SCIAN×municipio                                                                                                           | ⏳ Pendiente — portal SAIC/SPA gated, requiere ZIP URLs por estado del operador |
-| —   | **SESNSP** (Incidencia Delictiva mensual): robo_a_negocio, homicidio, extorsión por cve_mun                                                                                                                | ⏳ Pendiente — slugs gob.mx 404 (2026-05-04), requiere URL actual del operador  |
+| Sub | Descripción                                                                                                                                                                                                | Estado                                                                                |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| —   | **CLUES** (DGIS Catálogo Establecimientos de Salud, ene-2026): 63,708 raw → 41,381 EN OPERACION → 39,946 (96.5%) geocodificadas. `clues` materialized view con cve_mun + cve_loc + geom POINT(4326) + GIST | ✅ Completado                                                                         |
+| —   | **CE 2024** (Censo Económico INEGI): 32 state ZIPs → `ce2024_municipal` MV con 1.80M filas (sector × estrato × municipio), métricas UE/personal/valor agregado/remuneraciones/ingresos                     | ✅ Completado 2026-05-05                                                              |
+| —   | **SESNSP RNID** (Incidencia Delictiva 2015–2026 Mar): 31.6M filas long-form en `sesnsp_delitos_municipal` + `mv_delitos_municipal_yearly` (28k filas pre-roll) + 2 endpoints `/analytics/risk-*`           | ✅ Completado 2026-05-05 (sólo Delitos Municipal — Estatal y Víctimas se descartaron) |
 
 ---
 
@@ -57,15 +58,15 @@ CE 2024 y SESNSP siguen pendientes — ambos requieren asistencia del operador (
 
 La evolución del stack se organiza por **fuente de datos integrada**. Cada versión v0.2.x agrega una capa nueva al modelo analítico sin romper la API existente.
 
-| Versión     | Fuentes                         | Descripción                                                                                                  | Estado                                        | Docs                                                                |
-| ----------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------- | ------------------------------------------------------------------- |
-| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done                                       | este README                                                         |
-| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal)                           | [v0.2-status.md](docs/v0.2-status.md)                               |
-| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | 🟡 Partial (CLUES done, CE+SESNSP pendientes) | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
-| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado                     | 📋 Queued                                     | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
-| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P3** | Map mode (analyzer)             | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done                                       | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
-| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned                                    | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| Versión     | Fuentes                         | Descripción                                                                                                  | Estado              | Docs                                                                |
+| ----------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------- | ------------------------------------------------------------------- |
+| **v0.1**    | DENUE                           | Baseline — extracción, carga, análisis y API. Farmacias y todos los verticales SCIAN                         | ✅ Done             | este README                                                         |
+| **v0.2.1**  | Censo 2020 + CONEVAL            | ITER municipal + Pobreza/IRS municipal. Join por `cve_mun`. AGEB-level pendiente                             | ✅ Done (municipal) | [v0.2-status.md](docs/v0.2-status.md)                               |
+| **v0.2.2**  | CE 2024 + CLUES + SESNSP        | Revenue sectorial, infraestructura médica, riesgo de seguridad. Score combinado Fase 2                       | ✅ Done             | [fase-2-ce2024-clues-sesnsp.md](docs/fase-2-ce2024-clues-sesnsp.md) |
+| **v0.2.3**  | Datatur + SINAIS + ENOE + ENIGH | Mortalidad crónica, turismo, calibradores regionales (ENOE/ENIGH). Score final acumulado                     | 📋 Queued           | [fase-3-detalle.md](docs/fase-3-detalle.md)                         |
+| **v0.3 P2** | Locust mode (analyzer)          | 5 charts ECharts (treemap, heatmap, top sectores, scatter, salud) + 4 endpoints `/analytics/*`               | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P3** | Map mode (analyzer)             | MapLibre + Carto basemap + MVT vector source (heatmap + circles) + deck.gl cluster overlay + click-to-detail | ✅ Done             | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
+| **v0.3 P4** | Deploy                          | analyzer.denue.net via Caddy + Let's Encrypt                                                                 | 📋 Planned          | [analyzer-plan-v1.md](docs/analyzer-plan-v1.md)                     |
 
 **Total realista: ~10-12 días de trabajo activo** para stack funcional y refinable (v0.4).
 
@@ -108,28 +109,30 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 
 Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 fallas, 32/32 entidades).
 
-| Métrica                           | Valor                 | Notas                                                                                                                                                 |
-| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Filas en Supabase                 | **6,097,681**         | `SELECT COUNT(*) FROM establecimientos`                                                                                                               |
-| Cobertura PostGIS (`geom`)        | 6,097,681 (100%)      | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                                                                   |
-| CLEEs únicos                      | 6,097,681             | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                                                                             |
-| Entidades                         | 32 + 1 anomalía       | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                                                                    |
-| CDMX (`09`)                       | 460,866               | piloto inicial — coincide con conteo INEGI dentro del margen                                                                                          |
-| Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                             |
-| Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                             |
-| Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                      |
-| Endpoints API funcionales         | 12 (+ `/health`)      | 8 originales + 4 nuevos `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`                      |
-| Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                          |
-| Frontend analyzer (Map)           | MapLibre + deck.gl    | Carto Positron/Dark Matter basemap + MVT vector source (heatmap zoom<14, circles zoom≥11) + cluster centroids overlay + click-to-detail panel         |
-| Web bundle (production split)     | 487 + 467 KB gz       | `index-*.js` Locust + shared (487 KB gz) + `MapMode-*.js` lazy chunk (467 KB gz, only on `/map` navigation). Caddy serves with gzip + immutable cache |
-| Mat-views perf-backed             | 2 mat-views           | `mv_sector_grade_matrix` (13.7s→91ms) + `mv_national_treemap` (1.15s→88ms). DDL: `scripts/perf-matviews.sql`. Refresh after pipeline reload           |
-| Tests                             | 308 across 32 files   | 238 backend src + 38 backend scripts + 32 web. Vitest, mocked fetch + execFileSync, no live HTTP/Supabase                                             |
-| Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                             |
-| Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                         |
-| Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                            |
-| CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                            |
-| CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                    |
-| CLUES (DGIS, ene-2026)            | 41,381 EN OPERACION   | `clues` materialized view — 39,946 (96.5%) geocodificadas, GIST sobre geom POINT(4326), btree sobre cve_mun + cve_loc + institucion + nivel_atencion  |
+| Métrica                           | Valor                 | Notas                                                                                                                                                                                                                                     |
+| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Filas en Supabase                 | **6,097,681**         | `SELECT COUNT(*) FROM establecimientos`                                                                                                                                                                                                   |
+| Cobertura PostGIS (`geom`)        | 6,097,681 (100%)      | `ST_SetSRID(ST_MakePoint(lon, lat), 4326)` aplicado a cada registro                                                                                                                                                                       |
+| CLEEs únicos                      | 6,097,681             | sin duplicados después del fix `?on_conflict=clee` (ver Gotcha PostgREST)                                                                                                                                                                 |
+| Entidades                         | 32 + 1 anomalía       | `01`–`32` + 1 fila con `entidad='50'` (anomalía INEGI, 1 registro)                                                                                                                                                                        |
+| CDMX (`09`)                       | 460,866               | piloto inicial — coincide con conteo INEGI dentro del margen                                                                                                                                                                              |
+| Tlaxcala (`29`)                   | 98,729                | INEGI autoritativo: 98,711 (∆ +0.018%, dentro del margen)                                                                                                                                                                                 |
+| Colima (`06`)                     | 41,765                | INEGI autoritativo: 41,756 (∆ +0.022%, dentro del margen)                                                                                                                                                                                 |
+| Mat-views aplicadas               | 0                     | Definidas en `src/analysis/*.ts`; aún no ejecutadas contra el DB                                                                                                                                                                          |
+| Endpoints API funcionales         | 14 (+ `/health`)      | 8 originales + 6 `/analytics/*`: `national-treemap`, `sector-grade-matrix`, `municipios?entidad=`, `top-sectors?entidad=`, `risk-summary?entidad=`, `risk-trend?cve_mun=`                                                                 |
+| Frontend analyzer (Locust)        | 5 charts ECharts      | Mosaico nacional treemap + Sector×IRS heatmap + Top sectores bar + Densidad-vs-Pobreza scatter + CLUES vs farmacias por 100k                                                                                                              |
+| Frontend analyzer (Map)           | MapLibre + deck.gl    | Carto Positron/Dark Matter basemap + MVT vector source (heatmap zoom<14, circles zoom≥11) + cluster centroids overlay + click-to-detail panel                                                                                             |
+| Web bundle (production split)     | 487 + 467 KB gz       | `index-*.js` Locust + shared (487 KB gz) + `MapMode-*.js` lazy chunk (467 KB gz, only on `/map` navigation). Caddy serves with gzip + immutable cache                                                                                     |
+| Mat-views perf-backed             | 3 mat-views           | `mv_sector_grade_matrix` (13.7s→91ms) + `mv_national_treemap` (1.15s→88ms) + `mv_delitos_municipal_yearly` (~6s build, 28k rows / 100ms reads). DDL: `scripts/perf-matviews.sql`. Refresh: `scripts/refresh-matviews.sh` (~27s for all 3) |
+| Tests                             | 355 across 36 files   | Backend src + scripts + web. Vitest, mocked fetch + execFileSync + execFile, no live HTTP/Supabase                                                                                                                                        |
+| Polígonos PostGIS (Tier 2)        | 4 tablas              | `ent_polygons` (32) + `mun_polygons` (2,469) + `loc_polygons` (50,308) + `ageb_polygons` (81,451), todos SRID 4326 + GIST                                                                                                                 |
+| Cobertura `ageb` (CVEGEO 13-char) | 6,097,666 (99.99975%) | Spatial join con `ageb_polygons.cvegeo`; 15 puntos sin AGEB son lat/lon malos                                                                                                                                                             |
+| Censo 2020 ITER                   | 195,662 filas         | Tabla `censo_iter` (286 cols TEXT) + view `censo_municipios` (2,469 con 14 cols casteadas)                                                                                                                                                |
+| CONEVAL Pobreza Municipal         | 2,469 filas           | View `coneval_pobreza_municipal` — % pobreza/extrema, vulnerabilidad, 6 carencias sociales                                                                                                                                                |
+| CONEVAL IRS Municipal             | 2,469 filas           | View `coneval_irs_municipal` — analfabetismo, asistencia escolar, calidad vivienda × 7, IRS índice                                                                                                                                        |
+| CLUES (DGIS, ene-2026)            | 41,381 EN OPERACION   | `clues` materialized view — 39,946 (96.5%) geocodificadas, GIST sobre geom POINT(4326), btree sobre cve_mun + cve_loc + institucion + nivel_atencion                                                                                      |
+| CE 2024 (Censo Económico)         | 1,796,546 filas       | `ce2024_municipal` MV — sector × estrato × municipio, métricas UE/personal_ocupado/producción_bruta/valor_agregado/remuneraciones/ingresos. Bootstrap: `ce2024_raw` (1.92M filas, 105 cols TEXT, mezcla state-level + municipal)          |
+| SESNSP RNID Delitos Municipal     | 31.6M long-form       | `sesnsp_delitos_municipal` — 12 años × ~2,500 munis × ~38 delitos × 12 meses, 2015–2026 Mar (~22.2M eventos). Pre-roll: `mv_delitos_municipal_yearly` (28,663 filas, 100ms reads). Cve.Municipio LPAD'd a 5 chars para join con DENUE.    |
 
 ---
 
@@ -156,7 +159,11 @@ denue-data-analysis/
 │   ├── backfill-ageb.ts    # Spatial join: rellena `ageb` con CVEGEO 13-char (Tier 2)
 │   ├── load-censo.ts       # Cargar Censo 2020 ITER → censo_iter / censo_municipios (v0.2.1)
 │   ├── load-coneval.ts     # Cargar CONEVAL Pobreza + IRS Municipal (v0.2.1)
-│   └── load-clues.ts       # Cargar CLUES DGIS → clues_raw / clues mat-view + GIST (v0.2.2)
+│   ├── load-clues.ts       # Cargar CLUES DGIS → clues_raw / clues mat-view + GIST (v0.2.2)
+│   ├── load-ce2024.ts      # Cargar CE 2024 (32 state ZIPs) → ce2024_raw / ce2024_municipal MV (v0.2.2)
+│   ├── load-sesnsp.ts      # Cargar SESNSP RNID Delitos Municipal → sesnsp_delitos_municipal MV (v0.2.2)
+│   ├── perf-matviews.sql   # Bootstrap analytics MVs (sector_grade_matrix, national_treemap, delitos_municipal_yearly)
+│   └── refresh-matviews.sh # Refresh todos los MVs analíticos en una pasada (~27s)
 ├── web/                    # Analyzer frontend — Vite + React + Tailwind + ECharts + MapLibre + deck.gl
 │   └── src/
 │       ├── api/            # client.ts + types.ts (Zod) + queries.ts (TanStack hooks)
