@@ -1245,6 +1245,7 @@ export async function mortalityTrendHandler(
 
 interface RawStateCalibratorsRow {
   entidad: string;
+  // ENIGH
   enigh_ano: number | string | null;
   hogares_estimados: number | string | null;
   poblacion_estimada: number | string | null;
@@ -1258,34 +1259,75 @@ interface RawStateCalibratorsRow {
   pct_gasto_salud: number | string | null;
   pct_gasto_transporte: number | string | null;
   pct_gasto_educacion: number | string | null;
+  // ENOE
+  enoe_ano: number | string | null;
+  enoe_trimestres_cargados: number | string | null;
+  poblacion_15_mas: number | string | null;
+  pea: number | string | null;
+  ocupada: number | string | null;
+  desocupada: number | string | null;
+  informal: number | string | null;
+  tasa_participacion: number | string | null;
+  tasa_desocupacion: number | string | null;
+  tasa_informalidad: number | string | null;
+  ingreso_promedio_mensual_ocupado: number | string | null;
 }
 
 function stateCalibratorsSql(entidad: string): string {
-  // entidad pre-validated by ENTIDAD_RE. Picks the latest ano_levantamiento
-  // so multi-wave loads (2024 + 2026 + ...) automatically expose the most
-  // recent calibrator without a redeploy. json_agg + read [0] avoids the
-  // C1-class shape bug where runJsonQuery normalizes empty stdout to [].
+  // entidad pre-validated by ENTIDAD_RE. LEFT JOIN both calibrator tables
+  // so a partial load (only ENIGH or only ENOE) still returns a populated
+  // row — the missing-source columns just come back null. Each side picks
+  // its own latest ano_levantamiento independently. json_agg + read [0]
+  // avoids the C1-class shape bug where runJsonQuery normalizes empty
+  // stdout to []. COALESCE(...,0) on entidad-equality lets each side miss
+  // its row table entirely (caught by isRelationMissingError separately).
   return `
 SELECT json_agg(row_to_json(t)) FROM (
+  WITH enigh AS (
+    SELECT
+      ano_levantamiento AS enigh_ano,
+      hogares_estimados,
+      poblacion_estimada,
+      ingreso_corriente_promedio,
+      ingreso_corriente_mediana,
+      decil_1_ingreso,
+      decil_9_ingreso,
+      gasto_corriente_promedio,
+      pct_gasto_alimentos,
+      pct_gasto_vivienda,
+      pct_gasto_salud,
+      pct_gasto_transporte,
+      pct_gasto_educacion
+    FROM calibrators_enigh_state
+    WHERE entidad = '${entidad}'
+    ORDER BY ano_levantamiento DESC
+    LIMIT 1
+  ),
+  enoe AS (
+    SELECT
+      ano_levantamiento AS enoe_ano,
+      trimestres_cargados AS enoe_trimestres_cargados,
+      poblacion_15_mas,
+      pea,
+      ocupada,
+      desocupada,
+      informal,
+      tasa_participacion,
+      tasa_desocupacion,
+      tasa_informalidad,
+      ingreso_promedio_mensual AS ingreso_promedio_mensual_ocupado
+    FROM calibrators_enoe_state
+    WHERE entidad = '${entidad}'
+    ORDER BY ano_levantamiento DESC
+    LIMIT 1
+  )
   SELECT
-    '${entidad}'                                 AS entidad,
-    ano_levantamiento                            AS enigh_ano,
-    hogares_estimados,
-    poblacion_estimada,
-    ingreso_corriente_promedio,
-    ingreso_corriente_mediana,
-    decil_1_ingreso,
-    decil_9_ingreso,
-    gasto_corriente_promedio,
-    pct_gasto_alimentos,
-    pct_gasto_vivienda,
-    pct_gasto_salud,
-    pct_gasto_transporte,
-    pct_gasto_educacion
-  FROM calibrators_enigh_state
-  WHERE entidad = '${entidad}'
-  ORDER BY ano_levantamiento DESC
-  LIMIT 1
+    '${entidad}' AS entidad,
+    enigh.*,
+    enoe.*
+  FROM (SELECT 1) one
+  LEFT JOIN enigh ON true
+  LEFT JOIN enoe ON true
 ) t;
 `;
 }
@@ -1307,6 +1349,17 @@ function emptyCalibratorRow(entidad: string): StateCalibratorsRow {
     pct_gasto_salud: null,
     pct_gasto_transporte: null,
     pct_gasto_educacion: null,
+    enoe_ano: null,
+    enoe_trimestres_cargados: null,
+    poblacion_15_mas: null,
+    pea: null,
+    ocupada: null,
+    desocupada: null,
+    informal: null,
+    tasa_participacion: null,
+    tasa_desocupacion: null,
+    tasa_informalidad: null,
+    ingreso_promedio_mensual_ocupado: null,
   };
 }
 
@@ -1342,50 +1395,40 @@ export async function stateCalibratorsHandler(
     }
   }
 
+  const num = (v: number | string | null | undefined): number | null =>
+    v === null || v === undefined ? null : Number(v);
+
   const calibrators: StateCalibratorsRow = raw
     ? {
         entidad,
-        enigh_ano: raw.enigh_ano === null ? null : Number(raw.enigh_ano),
-        hogares_estimados:
-          raw.hogares_estimados === null ? null : Number(raw.hogares_estimados),
-        poblacion_estimada:
-          raw.poblacion_estimada === null
-            ? null
-            : Number(raw.poblacion_estimada),
-        ingreso_corriente_promedio:
-          raw.ingreso_corriente_promedio === null
-            ? null
-            : Number(raw.ingreso_corriente_promedio),
-        ingreso_corriente_mediana:
-          raw.ingreso_corriente_mediana === null
-            ? null
-            : Number(raw.ingreso_corriente_mediana),
-        decil_1_ingreso:
-          raw.decil_1_ingreso === null ? null : Number(raw.decil_1_ingreso),
-        decil_9_ingreso:
-          raw.decil_9_ingreso === null ? null : Number(raw.decil_9_ingreso),
-        gasto_corriente_promedio:
-          raw.gasto_corriente_promedio === null
-            ? null
-            : Number(raw.gasto_corriente_promedio),
-        pct_gasto_alimentos:
-          raw.pct_gasto_alimentos === null
-            ? null
-            : Number(raw.pct_gasto_alimentos),
-        pct_gasto_vivienda:
-          raw.pct_gasto_vivienda === null
-            ? null
-            : Number(raw.pct_gasto_vivienda),
-        pct_gasto_salud:
-          raw.pct_gasto_salud === null ? null : Number(raw.pct_gasto_salud),
-        pct_gasto_transporte:
-          raw.pct_gasto_transporte === null
-            ? null
-            : Number(raw.pct_gasto_transporte),
-        pct_gasto_educacion:
-          raw.pct_gasto_educacion === null
-            ? null
-            : Number(raw.pct_gasto_educacion),
+        // ENIGH
+        enigh_ano: num(raw.enigh_ano),
+        hogares_estimados: num(raw.hogares_estimados),
+        poblacion_estimada: num(raw.poblacion_estimada),
+        ingreso_corriente_promedio: num(raw.ingreso_corriente_promedio),
+        ingreso_corriente_mediana: num(raw.ingreso_corriente_mediana),
+        decil_1_ingreso: num(raw.decil_1_ingreso),
+        decil_9_ingreso: num(raw.decil_9_ingreso),
+        gasto_corriente_promedio: num(raw.gasto_corriente_promedio),
+        pct_gasto_alimentos: num(raw.pct_gasto_alimentos),
+        pct_gasto_vivienda: num(raw.pct_gasto_vivienda),
+        pct_gasto_salud: num(raw.pct_gasto_salud),
+        pct_gasto_transporte: num(raw.pct_gasto_transporte),
+        pct_gasto_educacion: num(raw.pct_gasto_educacion),
+        // ENOE
+        enoe_ano: num(raw.enoe_ano),
+        enoe_trimestres_cargados: num(raw.enoe_trimestres_cargados),
+        poblacion_15_mas: num(raw.poblacion_15_mas),
+        pea: num(raw.pea),
+        ocupada: num(raw.ocupada),
+        desocupada: num(raw.desocupada),
+        informal: num(raw.informal),
+        tasa_participacion: num(raw.tasa_participacion),
+        tasa_desocupacion: num(raw.tasa_desocupacion),
+        tasa_informalidad: num(raw.tasa_informalidad),
+        ingreso_promedio_mensual_ocupado: num(
+          raw.ingreso_promedio_mensual_ocupado,
+        ),
       }
     : emptyCalibratorRow(entidad);
 

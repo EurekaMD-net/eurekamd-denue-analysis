@@ -340,6 +340,7 @@ export interface MortalityTrendResult {
 
 export interface StateCalibratorsRow {
   entidad: string;
+  // --- ENIGH (annual household income/expense, biennial) ---
   /** ENIGH wave year (2024, 2026, ...). Null if no ENIGH row loaded yet. */
   enigh_ano: number | null;
   /** Hogares represented (factor sum, ~ENIGH-published total). */
@@ -362,6 +363,29 @@ export interface StateCalibratorsRow {
   pct_gasto_salud: number | null;
   pct_gasto_transporte: number | null;
   pct_gasto_educacion: number | null;
+  // --- ENOE (quarterly labor force, year-averaged across 4 trimestres) ---
+  /** ENOE wave year (2025, 2026, ...). Null if no ENOE rows loaded yet. */
+  enoe_ano: number | null;
+  /** Number of quarters present in the ENOE rollup (1..4). */
+  enoe_trimestres_cargados: number | null;
+  /** Population 15+ years (per-quarter average, factor-weighted). */
+  poblacion_15_mas: number | null;
+  /** Población Económicamente Activa (per-quarter avg). */
+  pea: number | null;
+  /** Población ocupada (per-quarter avg). */
+  ocupada: number | null;
+  /** Población desocupada (per-quarter avg). */
+  desocupada: number | null;
+  /** Población ocupada en sector informal (per-quarter avg). */
+  informal: number | null;
+  /** PEA / Población 15+ × 100. */
+  tasa_participacion: number | null;
+  /** Desocupada / PEA × 100 (open unemployment rate, INEGI methodology). */
+  tasa_desocupacion: number | null;
+  /** Informal / Ocupada × 100 (TIL1, INEGI methodology). */
+  tasa_informalidad: number | null;
+  /** Ingreso promedio mensual de ocupados (factor-weighted, MXN). */
+  ingreso_promedio_mensual_ocupado: number | null;
 }
 
 export interface StateCalibratorsResult {

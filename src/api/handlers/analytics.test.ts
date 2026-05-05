@@ -1458,11 +1458,12 @@ describe("GET /analytics/mortality-trend", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /analytics/state-calibrators", () => {
-  it("returns the latest ENIGH wave for the requested entidad", async () => {
+  it("returns merged ENIGH + ENOE for the requested entidad", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
         {
           entidad: "19",
+          // ENIGH (annual household)
           enigh_ano: 2024,
           hogares_estimados: "1859166",
           poblacion_estimada: "6129347",
@@ -1476,6 +1477,18 @@ describe("GET /analytics/state-calibrators", () => {
           pct_gasto_salud: "3.5",
           pct_gasto_transporte: "12.4",
           pct_gasto_educacion: "5.1",
+          // ENOE (quarterly labor force, year-averaged)
+          enoe_ano: 2025,
+          enoe_trimestres_cargados: 4,
+          poblacion_15_mas: "4912779",
+          pea: "3016206",
+          ocupada: "2930863",
+          desocupada: "87433",
+          informal: "1000804",
+          tasa_participacion: "61.40",
+          tasa_desocupacion: "2.90",
+          tasa_informalidad: "34.15",
+          ingreso_promedio_mensual_ocupado: "14174.12",
         },
       ]),
     );
@@ -1491,15 +1504,71 @@ describe("GET /analytics/state-calibrators", () => {
     expect(body.entidad).toBe("19");
     expect(body.calibrators).toMatchObject({
       entidad: "19",
+      // ENIGH side
       enigh_ano: 2024,
       hogares_estimados: 1859166,
       ingreso_corriente_promedio: 117033.88,
       decil_1_ingreso: 36579.55,
       pct_gasto_alimentos: 34.73,
+      // ENOE side
+      enoe_ano: 2025,
+      enoe_trimestres_cargados: 4,
+      poblacion_15_mas: 4912779,
+      tasa_informalidad: 34.15,
+      tasa_desocupacion: 2.9,
+      ingreso_promedio_mensual_ocupado: 14174.12,
     });
   });
 
-  it("returns the empty-shaped row when the calibrators table doesn't exist", async () => {
+  it("populates only the loaded side when one source is missing (ENOE-only)", async () => {
+    // ENIGH columns null (LEFT JOIN miss); ENOE columns populated.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          entidad: "07",
+          enigh_ano: null,
+          hogares_estimados: null,
+          poblacion_estimada: null,
+          ingreso_corriente_promedio: null,
+          ingreso_corriente_mediana: null,
+          decil_1_ingreso: null,
+          decil_9_ingreso: null,
+          gasto_corriente_promedio: null,
+          pct_gasto_alimentos: null,
+          pct_gasto_vivienda: null,
+          pct_gasto_salud: null,
+          pct_gasto_transporte: null,
+          pct_gasto_educacion: null,
+          enoe_ano: 2025,
+          enoe_trimestres_cargados: 4,
+          poblacion_15_mas: "4224762",
+          pea: "2322868",
+          ocupada: "2266164",
+          desocupada: "56704",
+          informal: "1741155",
+          tasa_participacion: "54.98",
+          tasa_desocupacion: "2.44",
+          tasa_informalidad: "76.83",
+          ingreso_promedio_mensual_ocupado: "6971.83",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/state-calibrators?entidad=07", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      entidad: string;
+      calibrators: Record<string, number | null>;
+    };
+    expect(body.calibrators.enigh_ano).toBeNull();
+    expect(body.calibrators.ingreso_corriente_promedio).toBeNull();
+    expect(body.calibrators.enoe_ano).toBe(2025);
+    expect(body.calibrators.tasa_informalidad).toBe(76.83);
+  });
+
+  it("returns the empty-shaped row when neither calibrator table exists", async () => {
     mockExec.mockImplementationOnce(() => {
       throw Object.assign(new Error("Command failed"), {
         stderr: Buffer.from(
@@ -1520,6 +1589,9 @@ describe("GET /analytics/state-calibrators", () => {
     expect(body.calibrators.entidad).toBe("07");
     expect(body.calibrators.enigh_ano).toBeNull();
     expect(body.calibrators.ingreso_corriente_promedio).toBeNull();
+    // ENOE side also nulled out by the empty-shape fallback.
+    expect(body.calibrators.enoe_ano).toBeNull();
+    expect(body.calibrators.tasa_informalidad).toBeNull();
   });
 
   it("returns the empty-shaped row when the entidad has no loaded data", async () => {
@@ -1538,7 +1610,7 @@ describe("GET /analytics/state-calibrators", () => {
     expect(body.calibrators.enigh_ano).toBeNull();
   });
 
-  it("inlines entidad verbatim into the SQL (and ORDER BY DESC)", async () => {
+  it("inlines entidad verbatim into both calibrator queries (LEFT JOIN shape)", async () => {
     mockExec.mockReturnValue("[]");
     const app = createServer(CONFIG);
     await app.request("/analytics/state-calibrators?entidad=14", {
@@ -1546,10 +1618,13 @@ describe("GET /analytics/state-calibrators", () => {
     });
     const argList = mockExec.mock.calls[0]?.[1] as string[];
     const sql = argList[argList.length - 1] ?? "";
-    expect(sql).toMatch(/entidad = '14'/);
-    expect(sql).toMatch(/ORDER BY ano_levantamiento DESC/);
-    expect(sql).toMatch(/LIMIT 1/);
+    // Both ENIGH and ENOE CTEs filter by the same entidad.
+    expect(sql.match(/entidad = '14'/g)?.length).toBe(2);
     expect(sql).toMatch(/calibrators_enigh_state/);
+    expect(sql).toMatch(/calibrators_enoe_state/);
+    // Each CTE picks its own latest wave independently.
+    expect(sql.match(/ORDER BY ano_levantamiento DESC/g)?.length).toBe(2);
+    expect(sql.match(/LIMIT 1/g)?.length).toBe(2);
   });
 
   it("rejects invalid entidad with 400 / validation.entidad", async () => {
