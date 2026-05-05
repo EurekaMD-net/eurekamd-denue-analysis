@@ -4,6 +4,7 @@
 # Run after any loader pass that changes the underlying tables:
 #   - DENUE pipeline reload         → mv_sector_grade_matrix, mv_national_treemap
 #   - SESNSP loader (load-sesnsp.ts) → mv_delitos_municipal_yearly
+#   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
 #
 # The handlers fall back to live aggregation when an MV is missing entirely
@@ -31,6 +32,9 @@ REFRESH MATERIALIZED VIEW mv_national_treemap;
 
 \echo Refreshing mv_delitos_municipal_yearly...
 REFRESH MATERIALIZED VIEW mv_delitos_municipal_yearly;
+
+\echo Refreshing mv_mortalidad_municipal_yearly...
+REFRESH MATERIALIZED VIEW mv_mortalidad_municipal_yearly;
 SQL
 end=$(date +%s)
 

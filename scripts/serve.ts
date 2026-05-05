@@ -18,8 +18,12 @@
 
 import { serve } from "@hono/node-server";
 import { createServer } from "../src/api/server.js";
-import { resolveCurrentRiskAno } from "../src/api/handlers/analytics.js";
 import {
+  resolveCurrentMortalityAno,
+  resolveCurrentRiskAno,
+} from "../src/api/handlers/analytics.js";
+import {
+  MORTALITY_DEFAULT_CURRENT_ANO,
   RISK_DEFAULT_CURRENT_ANO,
   type ApiServerConfig,
 } from "../src/api/types.js";
@@ -51,15 +55,30 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 // December SESNSP load lands. Resolver returns the static fallback if
 // the DB is unreachable at boot — service still starts, risk-summary
 // still serves.
-const resolved = resolveCurrentRiskAno(config);
-config.currentRiskAno = resolved.ano;
-if (resolved.source === "fallback") {
+const resolvedRisk = resolveCurrentRiskAno(config);
+config.currentRiskAno = resolvedRisk.ano;
+if (resolvedRisk.source === "fallback") {
   console.warn(
     `⚠️  risk-summary current_ano resolver fell back to static ${RISK_DEFAULT_CURRENT_ANO} (DB unreachable or no fully-reported year exists)`,
   );
 } else {
   console.log(
-    `   risk-summary default current_ano resolved from data: ${resolved.ano}`,
+    `   risk-summary default current_ano resolved from data: ${resolvedRisk.ano}`,
+  );
+}
+
+// Same pattern for mortality-summary. Picks the latest year with at
+// least 100k registered deaths so partial / lag-artifact years don't
+// become the default.
+const resolvedMortality = resolveCurrentMortalityAno(config);
+config.currentMortalityAno = resolvedMortality.ano;
+if (resolvedMortality.source === "fallback") {
+  console.warn(
+    `⚠️  mortality-summary current_ano resolver fell back to static ${MORTALITY_DEFAULT_CURRENT_ANO} (DB unreachable or no primary-year data loaded)`,
+  );
+} else {
+  console.log(
+    `   mortality-summary default current_ano resolved from data: ${resolvedMortality.ano}`,
   );
 }
 

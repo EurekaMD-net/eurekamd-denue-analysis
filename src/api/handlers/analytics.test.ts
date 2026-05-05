@@ -11,11 +11,14 @@ import { createServer } from "../server.js";
 import {
   formatPsqlError,
   isRelationMissingError,
+  resolveCurrentMortalityAno,
   resolveCurrentRiskAno,
   runJsonQueryMvFirst,
 } from "./analytics.js";
 import type {
   ApiServerConfig,
+  MortalitySummaryResult,
+  MortalityTrendResult,
   MunicipiosAnalyticsResult,
   NationalTreemapResult,
   RiskSummaryResult,
@@ -1055,6 +1058,336 @@ describe("GET /analytics/risk-trend", () => {
     mockExec.mockReturnValue("definitely not json");
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/risk-trend?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgres.parse_error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/mortality-summary?entidad=NN[&ano=YYYY] — v0.2.3-A
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/mortality-summary", () => {
+  it("returns per-municipio rows with cause breakdown + per-1k normalization", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09007",
+          municipio: "Iztapalapa",
+          poblacion: 1835486,
+          total_defunciones: 12121,
+          def_menores_1ano: 208,
+          def_circulatorio: 3350,
+          def_neoplasias: 1744,
+          def_endocrinas: 2053,
+          def_externas: 835,
+          tasa_mortalidad_per_1k: 6.6,
+          tasa_infantil_per_1k: 0.11,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MortalitySummaryResult;
+    expect(body.entidad).toBe("09");
+    expect(body.current_ano).toBe(2024);
+    expect(body.municipios).toHaveLength(1);
+    expect(body.municipios[0]).toMatchObject({
+      cve_mun: "09007",
+      total_defunciones: 12121,
+      def_circulatorio: 3350,
+      tasa_mortalidad_per_1k: 6.6,
+    });
+  });
+
+  it("inlines entidad + ano into the SQL and reads the mat-view", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/mortality-summary?entidad=14&ano=2023", {
+      headers: AUTH,
+    });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/LEFT\(m\.cve_mun, 2\) = '14'/);
+    expect(sql).toMatch(/m\.ano = 2023/);
+    expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
+  });
+
+  it("rejects invalid entidad with 400 / validation.entidad", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=99", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.entidad");
+  });
+
+  it("rejects invalid ano with 400 / validation.ano", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/mortality-summary?entidad=09&ano=foo",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.ano");
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=09");
+    expect(res.status).toBe(401);
+  });
+
+  it("uses config.currentMortalityAno as default when no ano arg provided", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer({ ...CONFIG, currentMortalityAno: 2025 });
+    const res = await app.request("/analytics/mortality-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MortalitySummaryResult;
+    expect(body.current_ano).toBe(2025);
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/m\.ano = 2025/);
+  });
+
+  it("preserves null poblacion / null tasas when source is missing", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "32018",
+          municipio: "X",
+          poblacion: null,
+          total_defunciones: 5,
+          def_menores_1ano: 0,
+          def_circulatorio: 1,
+          def_neoplasias: 0,
+          def_endocrinas: 1,
+          def_externas: 0,
+          tasa_mortalidad_per_1k: null,
+          tasa_infantil_per_1k: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=32", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MortalitySummaryResult;
+    expect(body.municipios[0]).toMatchObject({
+      poblacion: null,
+      tasa_mortalidad_per_1k: null,
+      tasa_infantil_per_1k: null,
+    });
+  });
+
+  it("falls back to live SQL when mv_mortalidad_municipal_yearly is absent", async () => {
+    mockExec
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("Command failed"), {
+          stderr: Buffer.from(
+            'ERROR:  relation "mv_mortalidad_municipal_yearly" does not exist',
+          ),
+        });
+      })
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cve_mun: "09007",
+            municipio: "Iztapalapa",
+            poblacion: 1835486,
+            total_defunciones: 12121,
+            def_menores_1ano: 208,
+            def_circulatorio: 3350,
+            def_neoplasias: 1744,
+            def_endocrinas: 2053,
+            def_externas: 835,
+            tasa_mortalidad_per_1k: 6.6,
+            tasa_infantil_per_1k: 0.11,
+          },
+        ]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MortalitySummaryResult;
+    expect(body.municipios).toHaveLength(1);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
+    const liveSql = liveArgs[liveArgs.length - 1] ?? "";
+    expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
+    expect(liveSql).not.toMatch(/mv_mortalidad_municipal_yearly/);
+  });
+
+  it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
+    mockExec.mockReturnValue("definitely not json");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgres.parse_error");
+  });
+
+  it("sets long Cache-Control + Vary on success", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-summary?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("cache-control")).toMatch(/max-age=3600/);
+    expect(res.headers.get("vary")).toMatch(/X-Api-Key/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCurrentMortalityAno — runtime resolver (v0.2.3-A)
+// ---------------------------------------------------------------------------
+
+describe("resolveCurrentMortalityAno", () => {
+  it("returns the latest year with >= 100k registered deaths", () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([2024]));
+    expect(resolveCurrentMortalityAno(CONFIG)).toEqual({
+      ano: 2024,
+      source: "data",
+    });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
+    expect(sql).toMatch(/HAVING COUNT\(\*\) >= 100000/);
+  });
+
+  it("falls back on malformed output — source=fallback", () => {
+    mockExec.mockReturnValueOnce("not json");
+    expect(resolveCurrentMortalityAno(CONFIG)).toEqual({
+      ano: 2024, // MORTALITY_DEFAULT_CURRENT_ANO
+      source: "fallback",
+    });
+  });
+
+  it("falls back when no primary year exists yet — source=fallback", () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([null]));
+    expect(resolveCurrentMortalityAno(CONFIG)).toEqual({
+      ano: 2024,
+      source: "fallback",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/mortality-trend?cve_mun=NNNNN — v0.2.3-A
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/mortality-trend", () => {
+  it("returns annual series + municipio metadata", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            ano: 2024,
+            total_defunciones: 12121,
+            def_menores_1ano: 208,
+            def_circulatorio: 3350,
+            def_neoplasias: 1744,
+            def_endocrinas: 2053,
+            def_externas: 835,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({ municipio: "Iztapalapa", poblacion: 1835486 }),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=09007", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MortalityTrendResult;
+    expect(body.cve_mun).toBe("09007");
+    expect(body.municipio).toBe("Iztapalapa");
+    expect(body.poblacion).toBe(1835486);
+    expect(body.series).toHaveLength(1);
+    expect(body.series[0]).toMatchObject({
+      ano: 2024,
+      total_defunciones: 12121,
+      def_circulatorio: 3350,
+    });
+  });
+
+  it("inlines cve_mun verbatim into the SQL", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("null");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/mortality-trend?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/cve_mun = '14039'/);
+    expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
+  });
+
+  it("rejects invalid cve_mun with 400 / validation.cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/mortality-trend?cve_mun=not-a-key",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cve_mun");
+  });
+
+  it("rejects out-of-range entidad in cve_mun (33...) with 400", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=33001", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects 4-digit cve_mun with 400", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=0900", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=09007");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns empty series when the municipio has no rows yet", async () => {
+    mockExec
+      .mockReturnValueOnce("[]")
+      .mockReturnValueOnce(JSON.stringify({ municipio: "X", poblacion: 100 }));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=32058", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MortalityTrendResult;
+    expect(body.series).toEqual([]);
+    expect(body.municipio).toBe("X");
+  });
+
+  it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
+    mockExec.mockReturnValue("definitely not json");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/mortality-trend?cve_mun=09007", {
       headers: AUTH,
     });
     expect(res.status).toBe(502);

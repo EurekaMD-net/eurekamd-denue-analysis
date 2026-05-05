@@ -51,11 +51,14 @@ import { HttpError } from "../middleware/error.js";
 import {
   CVE_MUN_RE,
   ENTIDAD_RE,
+  MORTALITY_DEFAULT_CURRENT_ANO,
   RISK_ANO_RE,
   RISK_DEFAULT_BASELINE_ANO,
   RISK_DEFAULT_CURRENT_ANO,
   type ApiServerConfig,
   type IrsGrado,
+  type MortalitySummaryResult,
+  type MortalityTrendResult,
   type MunicipiosAnalyticsResult,
   type NationalTreemapResult,
   type RiskSummaryResult,
@@ -893,6 +896,293 @@ export async function riskTrendHandler(
       homicidio_doloso: Number(p.homicidio_doloso),
       extorsion: Number(p.extorsion),
       total: Number(p.total),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Mortality (EDR/SINAIS) — v0.2.3-A. Same architectural shape as the risk
+// surface: a current-ano resolver at boot + mat-view-first reads with a
+// live aggregation fallback against `inegi_edr_defunciones_raw`.
+// ---------------------------------------------------------------------------
+
+const CURRENT_MORTALITY_ANO_LIVE_SQL = `
+SELECT json_build_array(MAX(ano)) FROM (
+  SELECT NULLIF(anio_ocur, '')::int AS ano,
+         COUNT(*)                   AS yr_total
+  FROM inegi_edr_defunciones_raw
+  WHERE anio_ocur ~ '^[0-9]{4}$'
+    AND ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
+                      '11','12','13','14','15','16','17','18','19','20',
+                      '21','22','23','24','25','26','27','28','29','30',
+                      '31','32')
+    AND mun_resid IS NOT NULL AND mun_resid != '999'
+  GROUP BY NULLIF(anio_ocur, '')::int
+  HAVING COUNT(*) >= 100000          -- "primary year" floor; lag artifacts <50k
+) t
+WHERE ano <= EXTRACT(YEAR FROM NOW())::int;
+`;
+
+/**
+ * Resolve the latest "primary" mortality year for /analytics/mortality-summary
+ * defaults. EDR datasets are released annually, but each release contains
+ * deaths registered in that year that occurred earlier (lag rows). The
+ * resolver picks the year with at least 100k recorded deaths — sufficient
+ * to distinguish the bulk-loaded year from the residual lag rows of prior
+ * years (which top out at <50k in current data).
+ *
+ * Same fallback contract as `resolveCurrentRiskAno`: never throws, returns
+ * a discriminated result so the boot log can distinguish data-derived from
+ * static-fallback values.
+ */
+export function resolveCurrentMortalityAno(config: ApiServerConfig): {
+  ano: number;
+  source: "data" | "fallback";
+} {
+  const fromLive = tryResolveAno(config, CURRENT_MORTALITY_ANO_LIVE_SQL);
+  if (fromLive !== null) return { ano: fromLive, source: "data" };
+  return { ano: MORTALITY_DEFAULT_CURRENT_ANO, source: "fallback" };
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/mortality-summary?entidad=NN[&ano=YYYY]
+// ---------------------------------------------------------------------------
+
+interface RawMortalitySummaryRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | string | null;
+  total_defunciones: number | string;
+  def_menores_1ano: number | string;
+  def_circulatorio: number | string;
+  def_neoplasias: number | string;
+  def_endocrinas: number | string;
+  def_externas: number | string;
+  tasa_mortalidad_per_1k: number | string | null;
+  tasa_infantil_per_1k: number | string | null;
+}
+
+function mortalitySummaryMvSql(entidad: string, ano: number): string {
+  // entidad pre-validated by ENTIDAD_RE; ano pre-validated by RISK_ANO_RE
+  // (reused for mortality — same year-range constraints).
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FROM (
+  SELECT
+    m.cve_mun,
+    cm.nom_mun                                         AS municipio,
+    cm.pobtot                                          AS poblacion,
+    m.total_defunciones,
+    m.def_menores_1ano,
+    m.def_circulatorio,
+    m.def_neoplasias,
+    m.def_endocrinas,
+    m.def_externas,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(m.total_defunciones::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS tasa_mortalidad_per_1k,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(m.def_menores_1ano::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS tasa_infantil_per_1k
+  FROM mv_mortalidad_municipal_yearly m
+  LEFT JOIN censo_municipios cm USING (cve_mun)
+  WHERE LEFT(m.cve_mun, 2) = '${entidad}' AND m.ano = ${ano}
+) t;
+`;
+}
+
+/**
+ * Live-aggregation fallback for mortality-summary. Aggregates directly
+ * against `inegi_edr_defunciones_raw` — same FILTER pattern as the
+ * mat-view, just unrolled. Used when the operator hasn't run
+ * `scripts/perf-matviews.sql` yet on a fresh DB. Audit-pattern parity
+ * with risk-summary's M1 fix (2026-05-05).
+ */
+function mortalitySummaryLiveSql(entidad: string, ano: number): string {
+  return `
+WITH muni AS (
+  SELECT
+    (ent_resid || mun_resid)                                   AS cve_mun,
+    COUNT(*)::bigint                                           AS total_defunciones,
+    COUNT(*) FILTER (WHERE LEFT(edad, 1) IN ('1','2','3'))::bigint AS def_menores_1ano,
+    -- capitulo is unpadded TEXT (see mat-view DDL note in perf-matviews.sql).
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 9)::bigint  AS def_circulatorio,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 2)::bigint  AS def_neoplasias,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 4)::bigint  AS def_endocrinas,
+    COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 20)::bigint AS def_externas
+  FROM inegi_edr_defunciones_raw
+  WHERE ent_resid = '${entidad}'
+    AND mun_resid IS NOT NULL AND mun_resid != '999'
+    AND anio_ocur ~ '^[0-9]{4}$' AND NULLIF(anio_ocur, '')::int = ${ano}
+  GROUP BY ent_resid || mun_resid
+)
+SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FROM (
+  SELECT
+    m.cve_mun,
+    cm.nom_mun                                         AS municipio,
+    cm.pobtot                                          AS poblacion,
+    m.total_defunciones,
+    m.def_menores_1ano,
+    m.def_circulatorio,
+    m.def_neoplasias,
+    m.def_endocrinas,
+    m.def_externas,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(m.total_defunciones::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS tasa_mortalidad_per_1k,
+    CASE WHEN COALESCE(cm.pobtot, 0) > 0
+      THEN ROUND(m.def_menores_1ano::numeric * 1000.0 / cm.pobtot, 2)
+      ELSE NULL
+    END                                                AS tasa_infantil_per_1k
+  FROM muni m
+  LEFT JOIN censo_municipios cm USING (cve_mun)
+) t;
+`;
+}
+
+export async function mortalitySummaryHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const entidad = c.req.query("entidad");
+  if (!entidad || !ENTIDAD_RE.test(entidad)) {
+    throw new HttpError(
+      `entidad inválida "${entidad ?? ""}"`,
+      400,
+      "validation.entidad",
+    );
+  }
+  const anoRaw = c.req.query("ano");
+  const defaultAno =
+    config.currentMortalityAno ?? MORTALITY_DEFAULT_CURRENT_ANO;
+  const ano = parseAnoArg(anoRaw, defaultAno, "ano");
+
+  const rows = runJsonQueryMvFirst<RawMortalitySummaryRow[]>(
+    config,
+    mortalitySummaryMvSql(entidad, ano),
+    mortalitySummaryLiveSql(entidad, ano),
+  );
+
+  const result: MortalitySummaryResult = {
+    entidad,
+    current_ano: ano,
+    municipios: rows.map((r) => ({
+      cve_mun: r.cve_mun,
+      municipio: r.municipio,
+      poblacion: r.poblacion === null ? null : Number(r.poblacion),
+      total_defunciones: Number(r.total_defunciones),
+      def_menores_1ano: Number(r.def_menores_1ano),
+      def_circulatorio: Number(r.def_circulatorio),
+      def_neoplasias: Number(r.def_neoplasias),
+      def_endocrinas: Number(r.def_endocrinas),
+      def_externas: Number(r.def_externas),
+      tasa_mortalidad_per_1k:
+        r.tasa_mortalidad_per_1k === null
+          ? null
+          : Number(r.tasa_mortalidad_per_1k),
+      tasa_infantil_per_1k:
+        r.tasa_infantil_per_1k === null ? null : Number(r.tasa_infantil_per_1k),
+    })),
+  };
+  // Mortality data is annual + ~12-month lag — much less dynamic than risk
+  // (monthly SESNSP). Match national-treemap's 1-hour cache.
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/mortality-trend?cve_mun=NNNNN
+// ---------------------------------------------------------------------------
+
+interface RawMortalityTrendPoint {
+  ano: number | string;
+  total_defunciones: number | string;
+  def_menores_1ano: number | string;
+  def_circulatorio: number | string;
+  def_neoplasias: number | string;
+  def_endocrinas: number | string;
+  def_externas: number | string;
+}
+
+interface RawMortalityTrendMeta {
+  municipio: string | null;
+  poblacion: number | string | null;
+}
+
+function mortalityTrendSql(cveMun: string): string {
+  // Reads directly from the mat-view (annual rollup is already at the right
+  // grain — no mat-view-vs-live split needed). cve_mun pre-validated by
+  // CVE_MUN_RE.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
+  SELECT
+    ano,
+    total_defunciones,
+    def_menores_1ano,
+    def_circulatorio,
+    def_neoplasias,
+    def_endocrinas,
+    def_externas
+  FROM mv_mortalidad_municipal_yearly
+  WHERE cve_mun = '${cveMun}'
+    AND ano BETWEEN 2010 AND 2099
+) t;
+`;
+}
+
+function mortalityTrendMetaSql(cveMun: string): string {
+  return `
+SELECT row_to_json(t) FROM (
+  SELECT nom_mun AS municipio, pobtot AS poblacion
+  FROM censo_municipios
+  WHERE cve_mun = '${cveMun}'
+) t;
+`;
+}
+
+export async function mortalityTrendHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos (entidad 01-32 + municipio).`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const series = runJsonQuery<RawMortalityTrendPoint[]>(
+    config,
+    mortalityTrendSql(cveMun),
+  );
+  const meta = runJsonQuery<RawMortalityTrendMeta | null>(
+    config,
+    mortalityTrendMetaSql(cveMun),
+  );
+
+  const result: MortalityTrendResult = {
+    cve_mun: cveMun,
+    municipio: meta?.municipio ?? null,
+    poblacion:
+      meta?.poblacion === null || meta?.poblacion === undefined
+        ? null
+        : Number(meta.poblacion),
+    series: series.map((p) => ({
+      ano: Number(p.ano),
+      total_defunciones: Number(p.total_defunciones),
+      def_menores_1ano: Number(p.def_menores_1ano),
+      def_circulatorio: Number(p.def_circulatorio),
+      def_neoplasias: Number(p.def_neoplasias),
+      def_endocrinas: Number(p.def_endocrinas),
+      def_externas: Number(p.def_externas),
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");

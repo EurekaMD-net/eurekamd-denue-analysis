@@ -127,3 +127,63 @@ GROUP BY cve_mun, ano;
 CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
 CREATE INDEX idx_mv_dmy_cve_mun_ano ON mv_delitos_municipal_yearly(cve_mun, ano);
+
+
+-- =============================================================================
+-- mv_mortalidad_municipal_yearly — pre-rolled annual mortality per cve_mun
+-- =============================================================================
+-- v0.2.3-A (2026-05-05). Aggregates the ~820k-row inegi_edr_defunciones_raw
+-- (per-record microdata, residence-based) down to ~2.5k rows per year-loaded.
+-- Surfaces the high-signal cause groupings used by /analytics/mortality-*:
+--   - total_defunciones       — count of deaths attributed to this cve_mun
+--   - def_menores_1ano        — infant mortality (edad codes 1xxx/2xxx/3xxx
+--                               are horas/días/meses; 4xxx is años)
+--   - def_circulatorio        — capitulo IX (CIE-10 chapter "I")
+--   - def_neoplasias          — capitulo II (CIE-10 chapter "C/D")
+--   - def_endocrinas          — capitulo IV (CIE-10 chapter "E", incl. diabetes)
+--   - def_externas            — capitulo XX (CIE-10 chapters V-Y, accidents +
+--                               suicides + homicides). Distinct from SESNSP
+--                               counts: SESNSP is reported crime, EDR is
+--                               registered death — overlap is partial.
+--
+-- Filtering: ent_resid IN ('01'..'32') AND mun_resid != '999'. Excludes
+-- foreign-resident deaths (codes 33-35) and unknown-residence rows (99/999).
+-- Source rows excluded ≈ 1.3% (10,609 of 819,672 in the 2024 load).
+--
+-- "ano" column is INT (cast from raw TEXT anio_ocur). Per-year scope is
+-- "year of occurrence" (anio_ocur), NOT registration (anio_regis). EDR
+-- registers deaths ~10-12mo after occurrence; using occurrence avoids
+-- the lag artifact where 2023 deaths show up in 2024 totals.
+--
+-- Read cost ~3ms after btree lookup. Build cost ~4s for a single year.
+-- Refresh after each load: REFRESH MATERIALIZED VIEW mv_mortalidad_municipal_yearly;
+-- (or use scripts/refresh-matviews.sh which sweeps all 4 analytics MVs)
+-- =============================================================================
+DROP MATERIALIZED VIEW IF EXISTS mv_mortalidad_municipal_yearly CASCADE;
+CREATE MATERIALIZED VIEW mv_mortalidad_municipal_yearly AS
+SELECT
+  (ent_resid || mun_resid)                                       AS cve_mun,
+  NULLIF(anio_ocur, '')::int                                     AS ano,
+  COUNT(*)::bigint                                               AS total_defunciones,
+  COUNT(*) FILTER (WHERE LEFT(edad, 1) IN ('1', '2', '3'))::bigint
+    AS def_menores_1ano,
+  -- capitulo ships as unpadded TEXT integers ("9" not "09"). Cast to int so
+  -- single-digit and double-digit codes both compare correctly. NULLIF
+  -- guards rare empty strings (none in 2024 data, defensive for future loads).
+  COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 9)::bigint   AS def_circulatorio,
+  COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 2)::bigint   AS def_neoplasias,
+  COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 4)::bigint   AS def_endocrinas,
+  COUNT(*) FILTER (WHERE NULLIF(capitulo, '')::int = 20)::bigint  AS def_externas
+FROM inegi_edr_defunciones_raw
+WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
+                    '11','12','13','14','15','16','17','18','19','20',
+                    '21','22','23','24','25','26','27','28','29','30',
+                    '31','32')
+  AND mun_resid IS NOT NULL AND mun_resid != '999'
+  AND NULLIF(anio_ocur, '') IS NOT NULL
+  AND anio_ocur ~ '^[0-9]{4}$'
+GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
+
+CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
+CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
+CREATE INDEX idx_mv_mmy_cve_mun_ano ON mv_mortalidad_municipal_yearly(cve_mun, ano);

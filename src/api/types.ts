@@ -21,6 +21,14 @@ export interface ApiServerConfig {
    * fall back to `RISK_DEFAULT_CURRENT_ANO`. Audit W5 long-term fix.
    */
   currentRiskAno?: number;
+  /**
+   * Resolved at server start by `resolveCurrentMortalityAno()` from
+   * `MAX(ano) FROM inegi_edr_defunciones_raw HAVING COUNT(*) >= 100k`.
+   * Picks the year with the bulk of registered deaths so partial / lag
+   * years don't become the default. When omitted (tests, DB failure at
+   * boot), handlers fall back to `MORTALITY_DEFAULT_CURRENT_ANO`. v0.2.3-A.
+   */
+  currentMortalityAno?: number;
 }
 
 // Shared validation regexes — same bounds as src/analysis/cluster-by-sector.ts
@@ -268,6 +276,60 @@ export interface RiskTrendResult {
   municipio: string | null;
   poblacion: number | null;
   series: RiskTrendPoint[];
+}
+
+// ---------------------------------------------------------------------------
+// Mortality (EDR/SINAIS) — see scripts/perf-matviews.sql for the underlying
+// mv_mortalidad_municipal_yearly aggregation. v0.2.3-A.
+// ---------------------------------------------------------------------------
+
+/**
+ * Hardcoded fallback for "current year" mortality comparisons. Used when
+ * `resolveCurrentMortalityAno()` cannot reach the DB at server start (and
+ * in tests where no DB is wired up). Production reads
+ * `config.currentMortalityAno` resolved from the data — picks the year
+ * with the bulk of registered deaths so partial / lag-artifact years
+ * don't become the default.
+ */
+export const MORTALITY_DEFAULT_CURRENT_ANO = 2024;
+
+export interface MortalitySummaryRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | null;
+  total_defunciones: number;
+  def_menores_1ano: number;
+  def_circulatorio: number;
+  def_neoplasias: number;
+  def_endocrinas: number;
+  def_externas: number;
+  /** Mortalidad cruda per 1k inhabitants — null when poblacion is 0/null. */
+  tasa_mortalidad_per_1k: number | null;
+  /** Mortalidad infantil per 1k births (proxied by < 1yr deaths / poblacion). null when poblacion is 0/null. */
+  tasa_infantil_per_1k: number | null;
+}
+
+export interface MortalitySummaryResult {
+  entidad: string;
+  current_ano: number;
+  municipios: MortalitySummaryRow[];
+}
+
+export interface MortalityTrendPoint {
+  ano: number;
+  total_defunciones: number;
+  def_menores_1ano: number;
+  def_circulatorio: number;
+  def_neoplasias: number;
+  def_endocrinas: number;
+  def_externas: number;
+}
+
+export interface MortalityTrendResult {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | null;
+  series: MortalityTrendPoint[];
 }
 
 // ---------------------------------------------------------------------------
