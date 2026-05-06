@@ -35,6 +35,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS mv_sector_summary_pk
 -- Nota: los MVs son de solo lectura en PostgreSQL; la columna queda como
 -- referencia para una tabla separada si se requiere comparación con INEGI.
 -- -----------------------------------------------------------------------------
+-- 2026-05-06: filter to valid INEGI entidad codes (01-32). DENUE occasionally
+-- ships rows with malformed CLEE prefix (e.g. '50') — the address itself is
+-- in a real state but INEGI assigned an invalid entidad. Excluding these
+-- from coverage so a single bad row doesn't surface as ❓ unverified next to
+-- the 32 verified entidades. The raw row stays in establecimientos.
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_coverage AS
 SELECT
   entidad,
@@ -45,6 +50,7 @@ SELECT
   COUNT(*) FILTER (WHERE telefono IS NOT NULL AND telefono <> '')::BIGINT AS with_telefono,
   COUNT(*) FILTER (WHERE correo_e IS NOT NULL AND correo_e <> '')::BIGINT AS with_correo_e
 FROM establecimientos
+WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
 GROUP BY entidad
 WITH NO DATA;
 

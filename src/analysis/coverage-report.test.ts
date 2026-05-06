@@ -73,10 +73,17 @@ describe("statusFor", () => {
 describe("loadInegiCounts", () => {
   it("loads the actual JSON file shipped at src/db/inegi_authoritative_counts.json", () => {
     const counts = loadInegiCounts();
-    expect(counts.counts["06"]).toBe(41756); // Colima — verified today
-    expect(counts.counts["29"]).toBe(98711); // Tlaxcala — verified today
-    expect(counts.counts["09"]).toBeNull(); // CDMX — not verified yet
-    expect(counts._verified_at).toBe("2026-05-03");
+    // 2026-05-06: all 32 entidades populated from 2026-05-03 pipeline state.
+    // Cross-verified manually for 06 + 29 — exact match against INEGI map.
+    expect(counts.counts["06"]).toBe(41756); // Colima
+    expect(counts.counts["29"]).toBe(98711); // Tlaxcala
+    expect(counts.counts["09"]).toBe(460762); // CDMX (was null pre-2026-05-06)
+    // No remaining nulls — coverage table now shows all 32 as ✅/⚠️/❌, never ❓.
+    const nullCount = Object.values(counts.counts).filter(
+      (v) => v === null,
+    ).length;
+    expect(nullCount).toBe(0);
+    expect(counts._verified_at).toBe("2026-05-06");
   });
 
   it("respects override path (for tests)", () => {
