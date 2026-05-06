@@ -5,3 +5,13 @@ raw/
 .env
 *.log
 *.tsbuildinfo
+
+# Python bytecode caches (cofepris loader scripts use Python helpers)
+__pycache__/
+*.pyc
+
+# Operator scratch / one-off probe scripts. Anything ending _tmp.ts or
+# starting with scratch_ is deliberate disposable; production code lives
+# in src/ and scripts/load-*.
+*_tmp.ts
+scratch_*.ts
