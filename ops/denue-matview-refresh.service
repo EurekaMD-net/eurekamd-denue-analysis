@@ -1,0 +1,39 @@
+# Snapshot of /etc/systemd/system/denue-matview-refresh.service.
+#
+# Install on a fresh VPS:
+#   sudo cp ops/denue-matview-refresh.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now denue-matview-refresh.timer
+#
+# This unit wraps scripts/refresh-matviews.sh (REFRESHes the 4 analytics MVs).
+# Triggered by denue-matview-refresh.timer; can also be run manually:
+#   sudo systemctl start denue-matview-refresh.service
+#
+# Why a timer: loaders are run manually, but the handlers fall back to live
+# aggregation when an MV is missing entirely. They have NO way to detect
+# "MV exists but is stale." A daily REFRESH defends against forgotten
+# refreshes after a load, capping staleness at 24h.
+#
+# Logs: `journalctl -u denue-matview-refresh -f`
+# Status: `systemctl status denue-matview-refresh.timer`
+
+[Unit]
+Description=DENUE analyzer mat-view refresh (analytics endpoints)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/claude/projects/data-intelligence/denue-data-analysis
+ExecStart=/root/claude/projects/data-intelligence/denue-data-analysis/scripts/refresh-matviews.sh
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=denue-matview-refresh
+
+Environment=TZ=America/Mexico_City
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

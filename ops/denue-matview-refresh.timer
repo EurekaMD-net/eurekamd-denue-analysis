@@ -1,0 +1,31 @@
+# Snapshot of /etc/systemd/system/denue-matview-refresh.timer.
+#
+# Install: see ops/denue-matview-refresh.service.
+#
+# Cadence: daily at 04:00 UTC (~22:00 CDMX winter / 21:00 summer). Picked
+# for lowest traffic window — matches crm-backup.timer's 03:00 MX window.
+# Persistent=true catches up after VPS reboots so a missed run still fires
+# next boot.
+#
+# Loader release cadences this defends against:
+#   - SESNSP IDEFC: monthly (~20th)
+#   - EDR (mortality): annual
+#   - COFEPRIS: quarterly
+#   - DENUE pipeline: ad-hoc (national takes ~5h)
+#   - CONEVAL/CLUES: ad-hoc
+#
+# The actual refresh is fast (~22s total per the script) so daily is cheap
+# defense against silent staleness. If MV refresh latency starts mattering,
+# move to weekly Sunday or align with each loader's cadence.
+
+[Unit]
+Description=Daily refresh of DENUE analyzer materialized views
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=denue-matview-refresh.service
+
+[Install]
+WantedBy=timers.target
