@@ -20,9 +20,11 @@ import type {
   AgebFarmaciaOpportunityResult,
   AgebsByMunicipioResult,
   ApiServerConfig,
+  ColoniasByAgebResult,
   ColoniasByMunicipioResult,
   LicensedPharmaciesByAgebResult,
   LicensedPharmaciesByMunicipioResult,
+  ManzanasByAgebResult,
   MortalitySummaryResult,
   MortalityTrendResult,
   MunicipiosAnalyticsResult,
@@ -2327,6 +2329,40 @@ describe("AGEB endpoints — SQL-injection contract", () => {
     expect(res.status).toBe(400);
     expect(mockExec).not.toHaveBeenCalled();
   });
+
+  // v0.2.9 endpoints carry the same contract — qa-audit W1 closure.
+  it("manzanas-by-ageb rejects adversarial cvegeo without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=" +
+        encodeURIComponent("0900700012475';DROP TABLE censo_manzana;--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("manzanas-by-ageb rejects adversarial order_by without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475&order_by=" +
+        encodeURIComponent("pobtot;DROP--"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("colonias-by-ageb rejects adversarial cvegeo without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-ageb?cvegeo=" +
+        encodeURIComponent("0900700012475';--XXXX"),
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3427,5 +3463,216 @@ describe("GET /analytics/licensed-pharmacies-by-ageb (v0.2.8)", () => {
     const sql = args?.[args.length - 1] ?? "";
     expect(sql).toContain("FROM cofepris_farmacias_by_ageb");
     expect(sql).toContain("cvegeo_ageb = '0901500011024'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.9 — Sub-AGEB drilldown: manzanas + colonias inside an AGEB
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/manzanas-by-ageb (v0.2.9)", () => {
+  it("rejects missing cvegeo", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/manzanas-by-ageb", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cvegeo (12 chars, missing suffix)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=090070001247",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects bad order_by", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475&order_by=score",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects limit > 200", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475&limit=201",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns manzanas ordered by pobtot by default", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cvegeo_mza: "0900700012475005",
+          mza: "005",
+          pobtot: "24",
+          pobfem: "5",
+          pobmas: "19",
+          tvivpar: "8",
+          vph_inter: "6",
+          vph_autom: "3",
+        },
+        {
+          cvegeo_mza: "0900700012475006",
+          mza: "006",
+          pobtot: "14",
+          pobfem: "0",
+          pobmas: "14",
+          tvivpar: null,
+          vph_inter: null,
+          vph_autom: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ManzanasByAgebResult;
+    expect(body.cvegeo).toBe("0900700012475");
+    expect(body.order_by).toBe("pobtot");
+    expect(body.total_returned).toBe(2);
+    expect(body.manzanas[0]).toEqual({
+      cvegeo_mza: "0900700012475005",
+      mza: "005",
+      pobtot: 24,
+      pobfem: 5,
+      pobmas: 19,
+      tvivpar: 8,
+      vph_inter: 6,
+      vph_autom: 3,
+    });
+    expect(body.manzanas[1].tvivpar).toBeNull();
+    expect(body.manzanas[1].vph_inter).toBeNull();
+  });
+
+  it("returns empty array (not 404) when AGEB has no manzanas", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=2057001234567",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ManzanasByAgebResult;
+    expect(body.total_returned).toBe(0);
+    expect(body.manzanas).toEqual([]);
+  });
+
+  it("emits SQL filter on cvegeo_ageb + DESC NULLS LAST + tiebreak by mza", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475&order_by=tvivpar",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM censo_manzana");
+    expect(sql).toContain("cvegeo_ageb = '0900700012475'");
+    expect(sql).toContain("ORDER BY tvivpar DESC NULLS LAST, mza ASC");
+  });
+
+  it("emits Cache-Control + Vary headers", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475",
+      { headers: AUTH },
+    );
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+});
+
+describe("GET /analytics/colonias-by-ageb (v0.2.9)", () => {
+  it("rejects missing cvegeo", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/colonias-by-ageb", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cvegeo", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-ageb?cvegeo=tooshort",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects limit > 100", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-ageb?cvegeo=0900700012475&limit=101",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns colonias ordered by establishment count", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        { colonia: "ROMA NORTE", num_establecimientos: "445" },
+        { colonia: "ROMA SUR", num_establecimientos: "127" },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-ageb?cvegeo=0900700012475",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ColoniasByAgebResult;
+    expect(body.cvegeo).toBe("0900700012475");
+    expect(body.total_returned).toBe(2);
+    expect(body.colonias[0]).toEqual({
+      colonia: "ROMA NORTE",
+      num_establecimientos: 445,
+    });
+  });
+
+  it("returns empty array (not 404) when AGEB has no establecimientos", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/colonias-by-ageb?cvegeo=2057001234567",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ColoniasByAgebResult;
+    expect(body.total_returned).toBe(0);
+    expect(body.colonias).toEqual([]);
+  });
+
+  it("emits UPPER+TRIM normalization, excludes null/empty colonias, filters on ageb=cvegeo", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/colonias-by-ageb?cvegeo=0900700012475", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("UPPER(TRIM(colonia))");
+    expect(sql).toContain("ageb = '0900700012475'");
+    expect(sql).toContain("colonia IS NOT NULL");
+    expect(sql).toContain("TRIM(colonia) != ''");
+    // The v0.2.8 lesson: establecimientos.ageb IS the full 13-char cvegeo.
+    // Don't try to concatenate area_geo + ageb.
+    expect(sql).not.toMatch(/area_geo\s*\|\|\s*ageb/);
   });
 });

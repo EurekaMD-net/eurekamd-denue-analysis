@@ -248,7 +248,10 @@ SELECT
   mza,
   NULLIF(pobtot, '*')::int    AS pobtot,
   NULLIF(pobfem, '*')::int    AS pobfem,
-  NULLIF(pobmas, '*')::int    AS pobmas
+  NULLIF(pobmas, '*')::int    AS pobmas,
+  NULLIF(tvivpar, '*')::int   AS tvivpar,
+  NULLIF(vph_inter, '*')::int AS vph_inter,
+  NULLIF(vph_autom, '*')::int AS vph_autom
 FROM censo_ageb_raw
 WHERE mza != '000' AND mza != '*' AND mza ~ '^[0-9]+$';
 

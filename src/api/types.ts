@@ -874,6 +874,65 @@ export interface LicensedPharmaciesByAgebResult {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-AGEB drilldown (v0.2.9 — 2026-05-05)
+//
+// Closes the "AGEB returns 13-digit key, but I need a specific block / corner"
+// gap that Jarvis flagged in his AGEB experiment doc §4.5. After the operator
+// picks an AGEB via /opportunity-by-ageb, these endpoints surface the manzanas
+// (city blocks) inside that AGEB ranked by population density, plus the
+// colonias intersecting the AGEB.
+// ---------------------------------------------------------------------------
+
+/** order_by for /analytics/manzanas-by-ageb. */
+export const MANZANAS_ORDER_BY = ["pobtot", "tvivpar", "vph_inter"] as const;
+export type ManzanasOrderBy = (typeof MANZANAS_ORDER_BY)[number];
+
+/** Default + cap for /analytics/manzanas-by-ageb. */
+export const MANZANAS_DEFAULT_LIMIT = 30;
+export const MANZANAS_MAX_LIMIT = 200;
+
+/** Default + cap for /analytics/colonias-by-ageb. */
+export const COLONIAS_BY_AGEB_DEFAULT_LIMIT = 20;
+export const COLONIAS_BY_AGEB_MAX_LIMIT = 100;
+
+export interface ManzanaRow {
+  /** Full 17-char block key: cvegeo (13 chars) + mza (3 chars). */
+  cvegeo_mza: string;
+  /** Just the 3-char manzana suffix for compact display. */
+  mza: string;
+  /** Population. NULL when INEGI confidentiality-suppressed (<3 dwellings). */
+  pobtot: number | null;
+  pobfem: number | null;
+  pobmas: number | null;
+  /** Total private dwellings. NULL when confidentiality-suppressed. */
+  tvivpar: number | null;
+  /** Dwellings with internet — proxy for higher-income block. */
+  vph_inter: number | null;
+  /** Dwellings with a vehicle — secondary income proxy. */
+  vph_autom: number | null;
+}
+
+export interface ManzanasByAgebResult {
+  cvegeo: string;
+  order_by: ManzanasOrderBy;
+  total_returned: number;
+  manzanas: ManzanaRow[];
+}
+
+export interface ColoniaInAgebRow {
+  /** Free-text colonia, normalized UPPER+TRIM (matches v0.2.5 colonia handling). */
+  colonia: string;
+  /** Establishments in this AGEB whose colonia matches (exact normalized form). */
+  num_establecimientos: number;
+}
+
+export interface ColoniasByAgebResult {
+  cvegeo: string;
+  total_returned: number;
+  colonias: ColoniaInAgebRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

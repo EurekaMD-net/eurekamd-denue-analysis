@@ -86,6 +86,14 @@ import {
   type IrsGrado,
   type LicensedPharmaciesByAgebResult,
   type LicensedPharmaciesByMunicipioResult,
+  type ColoniasByAgebResult,
+  type ManzanasByAgebResult,
+  type ManzanasOrderBy,
+  COLONIAS_BY_AGEB_DEFAULT_LIMIT,
+  COLONIAS_BY_AGEB_MAX_LIMIT,
+  MANZANAS_DEFAULT_LIMIT,
+  MANZANAS_MAX_LIMIT,
+  MANZANAS_ORDER_BY,
   type MortalitySummaryResult,
   type MortalityTrendResult,
   type MunicipiosAnalyticsResult,
@@ -2999,6 +3007,174 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
         total_licenciadas: 0,
         con_controlados: 0,
       };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-AGEB drilldown (v0.2.9) — closes Jarvis's §4.5 "AGEB → operational" gap
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /analytics/manzanas-by-ageb?cvegeo=NNNNNNNNNNNNN
+ *   &order_by=pobtot|tvivpar|vph_inter   (default: pobtot)
+ *   &limit=30                            (max 200)
+ *
+ * After /opportunity-by-ageb surfaces a target AGEB, this drills into the
+ * city blocks (manzanas) inside it. INEGI's manzana grain is 1.6M nationally;
+ * a typical urban AGEB contains 10-50 manzanas with population 0-200 each.
+ *
+ * Manzanas with `mza='000'` (the AGEB-aggregate row) and `mza='*'` (suppressed)
+ * are excluded by the censo_manzana view. Per-block pobtot/tvivpar/vph_*
+ * NULLs come through as INEGI confidentiality suppression (LSNIEG art. 37 —
+ * blocks with <3 dwellings get nulled to prevent reidentification).
+ *
+ * For "pick the densest block to lease space," sort by pobtot. For "pick
+ * higher-income blocks," sort by vph_inter (households with internet
+ * = strongest non-income proxy in INEGI manzana data).
+ */
+export async function manzanasByAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cvegeo = c.req.query("cvegeo");
+  if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
+    throw new HttpError(
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      400,
+      "validation.cvegeo",
+    );
+  }
+
+  const orderByRaw = c.req.query("order_by") ?? "pobtot";
+  if (!MANZANAS_ORDER_BY.includes(orderByRaw as ManzanasOrderBy)) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Valores válidos: ${MANZANAS_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as ManzanasOrderBy;
+  const limit = parseLimit(
+    c.req.query("limit"),
+    MANZANAS_DEFAULT_LIMIT,
+    MANZANAS_MAX_LIMIT,
+  );
+
+  const sql = `
+SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
+  SELECT
+    cvegeo_ageb || mza AS cvegeo_mza,
+    mza,
+    pobtot, pobfem, pobmas,
+    tvivpar, vph_inter, vph_autom
+  FROM censo_manzana
+  WHERE cvegeo_ageb = '${cvegeo}'
+  ORDER BY ${orderBy} DESC NULLS LAST, mza ASC
+  LIMIT ${limit}
+) r;
+`;
+  const rows = runJsonQuery<
+    Array<{
+      cvegeo_mza: string;
+      mza: string;
+      pobtot: number | null;
+      pobfem: number | null;
+      pobmas: number | null;
+      tvivpar: number | null;
+      vph_inter: number | null;
+      vph_autom: number | null;
+    }>
+  >(config, sql);
+
+  const manzanas = rows.map((r) => ({
+    cvegeo_mza: r.cvegeo_mza,
+    mza: r.mza,
+    pobtot: r.pobtot === null ? null : Number(r.pobtot),
+    pobfem: r.pobfem === null ? null : Number(r.pobfem),
+    pobmas: r.pobmas === null ? null : Number(r.pobmas),
+    tvivpar: r.tvivpar === null ? null : Number(r.tvivpar),
+    vph_inter: r.vph_inter === null ? null : Number(r.vph_inter),
+    vph_autom: r.vph_autom === null ? null : Number(r.vph_autom),
+  }));
+
+  const result: ManzanasByAgebResult = {
+    cvegeo,
+    order_by: orderBy,
+    total_returned: manzanas.length,
+    manzanas,
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+/**
+ * GET /analytics/colonias-by-ageb?cvegeo=NNNNNNNNNNNNN&limit=20  (max 100)
+ *
+ * Surfaces the (free-text, INEGI-DENUE) colonias that intersect a given AGEB.
+ * INEGI's official cartography doesn't tessellate at colonia level — colonias
+ * are popular-name labels operators recognize, not geometric polygons. The
+ * pragmatic source is `establecimientos.colonia` (the registered address-line
+ * "colonia" field), grouped per AGEB.
+ *
+ * A typical urban AGEB contains 1-4 distinct colonia names (boundary cases
+ * where one block faces two colonias). Operators recognize these labels and
+ * can communicate "we'll open in [colonia X within AGEB Y]" to commercial
+ * brokers — which the bare 13-digit AGEB key doesn't enable.
+ *
+ * The `colonia` text is normalized UPPER+TRIM (matches v0.2.5 colonia handling)
+ * to fold spelling drift like "ROMA NORTE" / "Roma Norte" / "ROMA NORTE  ".
+ * Empty/null colonia strings are excluded.
+ */
+export async function coloniasByAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cvegeo = c.req.query("cvegeo");
+  if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
+    throw new HttpError(
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      400,
+      "validation.cvegeo",
+    );
+  }
+
+  const limit = parseLimit(
+    c.req.query("limit"),
+    COLONIAS_BY_AGEB_DEFAULT_LIMIT,
+    COLONIAS_BY_AGEB_MAX_LIMIT,
+  );
+
+  const sql = `
+SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
+  SELECT
+    UPPER(TRIM(colonia)) AS colonia,
+    COUNT(*) AS num_establecimientos
+  FROM establecimientos
+  WHERE ageb = '${cvegeo}'
+    AND colonia IS NOT NULL
+    AND TRIM(colonia) != ''
+  GROUP BY UPPER(TRIM(colonia))
+  ORDER BY COUNT(*) DESC, UPPER(TRIM(colonia)) ASC
+  LIMIT ${limit}
+) r;
+`;
+  const rows = runJsonQuery<
+    Array<{ colonia: string; num_establecimientos: number | string }>
+  >(config, sql);
+
+  const colonias = rows.map((r) => ({
+    colonia: r.colonia,
+    num_establecimientos: Number(r.num_establecimientos ?? 0),
+  }));
+
+  const result: ColoniasByAgebResult = {
+    cvegeo,
+    total_returned: colonias.length,
+    colonias,
+  };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
   return c.json(result);
