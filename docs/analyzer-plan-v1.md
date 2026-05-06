@@ -6,6 +6,14 @@
 > **Builder**: Claude in operator's Claude Code session
 > **Survives**: compaction — plan is read from disk on resume
 
+> ## Amendment 2026-05-06 — public URL pivoted to `uncharted.eurekamd.cloud`
+>
+> §3 of this sealed plan named `analyzer.denue.net` as the public subdomain. Between sealing (2026-05-04) and v0.3 P3 deployment (2026-05-04 evening), the project's brand pivoted from data-subject-anchored (DENUE) to product-anchored (EurekaMD umbrella, with DENUE-Salud as one of multiple verticals). The analyzer shipped at <https://uncharted.eurekamd.cloud/> instead — Caddy + Let's Encrypt + systemd-supervised, fully production-grade. P4 ("Polish + deploy") therefore collapsed into P3 and is marked Done.
+>
+> **Original §3 decision is preserved below for traceability — do NOT execute it.** No DNS A record exists for `analyzer.denue.net`; the EurekaMD-brand URL is canonical and is the only URL referenced in the live README and in agent routing guards.
+>
+> Subsequent doc updates: `README.md` (v0.3 P4 row marked Done with the EurekaMD URL), `docs/v0.2-status.md` (P4 line superseded), `feedback_jarvis_kb_directive_loading.md` and `denue-patterns.md` (Jarvis routing already targeted `https://uncharted.eurekamd.cloud` correctly during v0.3 P3, so no agent-side changes were required).
+
 ## Goal (one line)
 
 Ship a queryable, browser-based analyzer over the 6.1M-record DENUE dataset already in Supabase, with two modes (Map + Locust), live at `https://analyzer.denue.net`, in 25–35 hours of focused work over 3–5 sessions.
