@@ -106,9 +106,12 @@ describe("GET /entidades", () => {
     expect(colima?.loaded).toBe(41750);
     expect(colima?.inegi_total).toBe(41756);
     expect(colima?.status).toBe("green");
-    // Aguascalientes has no inegi_total → unverified
+    // 2026-05-06: all 32 entidades populated from pipeline-state.json,
+    // so Aguascalientes now has an inegi_total. Status = red because the
+    // mocked `loaded` is 0 (Colima is the only row in the mocked rows array).
     const ags = body.entidades.find((e) => e.clave === "01");
-    expect(ags?.status).toBe("unverified");
+    expect(ags?.inegi_total).toBe(71270);
+    expect(ags?.status).toBe("red"); // 0/71270 → red (was "unverified" pre-population)
   });
 
   it("rejects unauthenticated requests", async () => {

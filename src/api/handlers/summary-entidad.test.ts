@@ -82,7 +82,10 @@ describe("GET /summary/entidad/:clave", () => {
     expect(body.estrato_distribution).toHaveLength(4);
   });
 
-  it("returns status='unverified' for an entidad with no INEGI count (e.g. 09)", async () => {
+  it("computes coverage_pct + status against the populated INEGI count (e.g. 09 CDMX)", async () => {
+    // 2026-05-06: all 32 entidades populated from pipeline-state.json — there
+    // is no longer an "entidad with no INEGI count" case. CDMX (09) authoritative
+    // = 460,762; mock loaded = 50,000 → ~10.85% → red status.
     vi.stubGlobal("fetch", makePostgrestMock(50000, 3, 2));
     const app = createServer(CONFIG);
     const res = await app.request("/summary/entidad/09", { headers: AUTH });
@@ -91,8 +94,8 @@ describe("GET /summary/entidad/:clave", () => {
       status: string;
       coverage_pct: number | null;
     };
-    expect(body.status).toBe("unverified");
-    expect(body.coverage_pct).toBeNull();
+    expect(body.status).toBe("red");
+    expect(body.coverage_pct).not.toBeNull();
   });
 
   it("returns 400 on invalid entidad", async () => {

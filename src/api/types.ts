@@ -1008,6 +1008,36 @@ export interface ColoniasByAgebResult {
 }
 
 // ---------------------------------------------------------------------------
+// Airports (SCT/AFAC pivot — 2006-2026 March operations per airport)
+// Resolves "what cities benefit from traveler influx" — combines DENUE
+// undersupply scoring with airport activity, growth-rate vs pre-pandemic
+// (2019), and tourism-vs-business proxy (Cancún+Cabos+PVR pure tourism;
+// CDMX+MTY+GDL business-heavy).
+// ---------------------------------------------------------------------------
+
+export interface AirportInMunicipio {
+  airport_name: string;
+  /** March 2026 flights at this airport. */
+  mar_flights_2026: number;
+  /** Average of March 2024+2025+2026. Smooths year-on-year noise. */
+  mar_flights_recent_avg: number;
+  /** March 2019 baseline (last full pre-pandemic year). NULL for AIFA-era new airports. */
+  mar_flights_2019: number | null;
+  /** Percent change from 2019 → 2026 March. Positive = growth, negative = recovery gap. */
+  pct_change_vs_2019: number | null;
+}
+
+export interface AirportsByMunicipioResult {
+  cve_mun: string;
+  cve_ent: string;
+  num_airports_active_2026: number;
+  /** Sum across all airports in this muni — simple aggregate flight load. */
+  mar_flights_recent_avg: number;
+  /** Per-airport breakdown ordered by recent flight volume DESC. */
+  airports: AirportInMunicipio[];
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

@@ -49,6 +49,7 @@ import {
   agebDetailHandler,
   agebFarmaciaOpportunityHandler,
   agebsByMunicipioHandler,
+  airportsByMunicipioHandler,
   coloniasByAgebHandler,
   coloniasByMunicipioHandler,
   licensedPharmaciesByAgebHandler,
@@ -169,6 +170,9 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/colonias-by-ageb", (c) =>
     coloniasByAgebHandler(c, config),
+  );
+  app.get("/analytics/airports-by-municipio", (c) =>
+    airportsByMunicipioHandler(c, config),
   );
 
   return app;

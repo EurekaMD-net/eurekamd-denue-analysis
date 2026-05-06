@@ -90,6 +90,8 @@ import {
   type LicensedPharmaciesByAgebResult,
   type LicensedPharmaciesByMunicipioResult,
   type ColoniasByAgebResult,
+  type AirportInMunicipio,
+  type AirportsByMunicipioResult,
   type ManzanasByAgebResult,
   type ManzanasOrderBy,
   COLONIAS_BY_AGEB_DEFAULT_LIMIT,
@@ -3302,6 +3304,104 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
     cvegeo,
     total_returned: colonias.length,
     colonias,
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Airports (SCT/AFAC March-of-year operations 2006-2026)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /analytics/airports-by-municipio?cve_mun=NNNNN
+ *
+ * Surface SCT/AFAC airport-operations data per municipio. Returns the
+ * airport(s) in the muni with March 2026 flights, recent 3-yr average
+ * (2024/2025/2026), 2019 pre-pandemic baseline, and growth-rate. Munis
+ * without an airport return an empty `airports` array (zero-row response,
+ * not 404 — consistent with the rest of the analytics surface).
+ *
+ * Mapping: airport names from the SCT pivot are matched to cve_mun via
+ * the manually-curated `aeropuertos_cvemun_lookup` table (city served, not
+ * physical-runway muni when they differ — a retailer cares about the
+ * destination market, not the airfield). 64 airports mapped.
+ */
+export async function airportsByMunicipioHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded.`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  // One query returns the per-airport breakdown plus the muni-level summary
+  // shape via two CTEs. The view aeropuertos_movements_yearly is already
+  // deduped (same airport across operators is summed), so per-airport
+  // rollup is straightforward.
+  const sql = `
+WITH per_airport AS (
+  SELECT
+    airport_name,
+    MAX(mar_flights) FILTER (WHERE ano = 2026)             AS f2026,
+    ROUND(AVG(mar_flights) FILTER (WHERE ano IN (2024,2025,2026))) AS recent_avg,
+    MAX(mar_flights) FILTER (WHERE ano = 2019)             AS f2019
+  FROM aeropuertos_movements_yearly
+  WHERE cve_mun = '${cveMun}'
+  GROUP BY airport_name
+)
+SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC NULLS LAST), '[]'::json) FROM (
+  SELECT
+    airport_name,
+    COALESCE(f2026, 0)::INTEGER AS mar_flights_2026,
+    COALESCE(recent_avg, 0)::INTEGER AS mar_flights_recent_avg,
+    f2019::INTEGER AS mar_flights_2019,
+    CASE
+      WHEN f2019 IS NOT NULL AND f2019 > 0 AND f2026 IS NOT NULL
+      THEN ROUND((f2026 - f2019)::numeric * 100.0 / f2019, 1)
+      ELSE NULL
+    END AS pct_change_vs_2019
+  FROM per_airport
+) r;
+`;
+
+  const airports = runJsonQuery<
+    Array<{
+      airport_name: string;
+      mar_flights_2026: number;
+      mar_flights_recent_avg: number;
+      mar_flights_2019: number | null;
+      pct_change_vs_2019: number | null;
+    }>
+  >(config, sql);
+
+  const formatted: AirportInMunicipio[] = airports.map((a) => ({
+    airport_name: a.airport_name,
+    mar_flights_2026: Number(a.mar_flights_2026 ?? 0),
+    mar_flights_recent_avg: Number(a.mar_flights_recent_avg ?? 0),
+    mar_flights_2019:
+      a.mar_flights_2019 == null ? null : Number(a.mar_flights_2019),
+    pct_change_vs_2019:
+      a.pct_change_vs_2019 == null ? null : Number(a.pct_change_vs_2019),
+  }));
+
+  // cve_ent: take from cve_mun (first 2 chars) — every cve_mun is shape-validated.
+  const result: AirportsByMunicipioResult = {
+    cve_mun: cveMun,
+    cve_ent: cveMun.slice(0, 2),
+    num_airports_active_2026: formatted.filter((a) => a.mar_flights_2026 > 0)
+      .length,
+    mar_flights_recent_avg: formatted.reduce(
+      (s, a) => s + a.mar_flights_recent_avg,
+      0,
+    ),
+    airports: formatted,
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

@@ -51,6 +51,7 @@ import type {
   AgebDetailResult,
   AgebFarmaciaOpportunityResult,
   AgebsByMunicipioResult,
+  AirportsByMunicipioResult,
   ApiServerConfig,
   ColoniasByAgebResult,
   ColoniasByMunicipioResult,
@@ -3757,5 +3758,147 @@ describe("GET /analytics/colonias-by-ageb (v0.2.9)", () => {
     // The v0.2.8 lesson: establecimientos.ageb IS the full 13-char cvegeo.
     // Don't try to concatenate area_geo + ageb.
     expect(sql).not.toMatch(/area_geo\s*\|\|\s*ageb/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/airports-by-municipio (SCT/AFAC airport pivot, 2006-2026 March)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/airports-by-municipio", () => {
+  it("rejects missing cve_mun without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/airports-by-municipio", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cve_mun without invoking psql", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=ABC",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("returns empty airports array for muni without an airport", async () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=09007",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AirportsByMunicipioResult;
+    expect(body.cve_mun).toBe("09007");
+    expect(body.cve_ent).toBe("09");
+    expect(body.airports).toEqual([]);
+    expect(body.num_airports_active_2026).toBe(0);
+    expect(body.mar_flights_recent_avg).toBe(0);
+  });
+
+  it("returns full per-airport breakdown with growth rate vs 2019", async () => {
+    mockExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          airport_name: "CIUDAD DE MÉXICO/MEXICO CITY",
+          mar_flights_2026: 25606,
+          mar_flights_recent_avg: 26139,
+          mar_flights_2019: 37671,
+          pct_change_vs_2019: -32.0,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=09017",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AirportsByMunicipioResult;
+    expect(body.cve_mun).toBe("09017");
+    expect(body.airports).toHaveLength(1);
+    expect(body.airports[0]).toMatchObject({
+      airport_name: "CIUDAD DE MÉXICO/MEXICO CITY",
+      mar_flights_2026: 25606,
+      mar_flights_recent_avg: 26139,
+      mar_flights_2019: 37671,
+      pct_change_vs_2019: -32.0,
+    });
+    expect(body.num_airports_active_2026).toBe(1);
+    expect(body.mar_flights_recent_avg).toBe(26139);
+  });
+
+  it("handles new-airport case (no 2019 baseline) without dividing by zero", async () => {
+    mockExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          airport_name: "SANTA LUCÍA",
+          mar_flights_2026: 5925,
+          mar_flights_recent_avg: 5493,
+          mar_flights_2019: null,
+          pct_change_vs_2019: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=15120",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AirportsByMunicipioResult;
+    expect(body.airports[0]?.mar_flights_2019).toBeNull();
+    expect(body.airports[0]?.pct_change_vs_2019).toBeNull();
+  });
+
+  it("aggregates multi-airport munis (e.g. Monterrey + Del Norte)", async () => {
+    mockExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          airport_name: "MONTERREY",
+          mar_flights_2026: 10928,
+          mar_flights_recent_avg: 9320,
+          mar_flights_2019: 9058,
+          pct_change_vs_2019: 20.6,
+        },
+        {
+          airport_name: "DEL NORTE",
+          mar_flights_2026: 3157,
+          mar_flights_recent_avg: 3157,
+          mar_flights_2019: null,
+          pct_change_vs_2019: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=19039",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AirportsByMunicipioResult;
+    expect(body.airports).toHaveLength(2);
+    expect(body.num_airports_active_2026).toBe(2);
+    expect(body.mar_flights_recent_avg).toBe(12477);
+  });
+
+  it("composes SQL with ORDER BY recent_avg DESC + cve_mun literal interpolation", async () => {
+    mockExec.mockReturnValueOnce(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/airports-by-municipio?cve_mun=23005", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM aeropuertos_movements_yearly");
+    expect(sql).toContain("WHERE cve_mun = '23005'");
+    expect(sql).toMatch(/ORDER BY r\.mar_flights_recent_avg DESC NULLS LAST/);
+    // No SQL-injection escape — the cve_mun is gated by CVE_MUN_RE before SQL composition
+    expect(sql).not.toMatch(/'23005';.*--/);
   });
 });
