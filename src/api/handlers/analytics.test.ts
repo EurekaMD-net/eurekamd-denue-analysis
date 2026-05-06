@@ -1,10 +1,42 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
+// `mockExec` doubles as the queue for both `execFileSync` (sync handlers) and
+// `execFile` (async handlers via promisify). Tests seed responses via
+// `mockExec.mockReturnValueOnce(stdout)` and the bridge below calls mockExec()
+// from inside the async-callback path so the same FIFO queue drains both.
+// Order in agebDetailHandler's Promise.all MUST match the queue order.
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
+const { mockExecAsync } = vi.hoisted(() => ({
+  mockExecAsync: vi.fn(
+    (
+      file: string,
+      args: string[],
+      opts: unknown,
+      cb: (
+        err: Error | null,
+        result: { stdout: string; stderr: string },
+      ) => void,
+    ) => {
+      // Forward args to mockExec so tests reading `mockExec.mock.calls[N][1]`
+      // can inspect the SQL passed via either sync or async path.
+      try {
+        const stdout = (
+          mockExec as unknown as (f: string, a: string[], o: unknown) => unknown
+        )(file, args, opts);
+        cb(null, {
+          stdout: typeof stdout === "string" ? stdout : "",
+          stderr: "",
+        });
+      } catch (err) {
+        cb(err as Error, { stdout: "", stderr: "" });
+      }
+    },
+  ),
+}));
 vi.mock("node:child_process", () => ({
   execFileSync: mockExec,
   execSync: vi.fn(),
-  execFile: vi.fn(),
+  execFile: mockExecAsync,
 }));
 
 import { createServer } from "../server.js";

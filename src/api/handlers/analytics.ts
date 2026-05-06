@@ -45,7 +45,10 @@
  * RISK_ANO_RE + CVE_MUN_RE for their respective inputs.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import type { Context } from "hono";
 import { HttpError } from "../middleware/error.js";
 import {
@@ -185,6 +188,43 @@ export function formatPsqlError(err: unknown): string {
     : baseMsg;
 }
 
+// Defense-in-depth statement_timeout (audit v0.2.4-A W3): the spawned psql
+// session caps every query at 25s server-side via libpq startup param. Set
+// 5s below the 30s execFile wall-clock so the DB-side abort fires FIRST and
+// surfaces a structured psql error (preserved by formatPsqlError) instead
+// of execFile's SIGTERM. Without this gap both timers race the same wall
+// and stmt_timeout buys nothing.
+// `PGOPTIONS` is the silent path; an in-band `SET statement_timeout` prefix
+// makes psql emit "SET\n" before tuple output and corrupts JSON.parse.
+const PG_OPTIONS_TIMEOUT = "-c statement_timeout=25000";
+
+// Shared exec options: parity required between sync + async (audit M1, R1).
+// 64MB maxBuffer accommodates dense ageb-detail / manzanas-by-ageb payloads;
+// Node's 1MB default would ENOBUFS on the largest urban AGEBs.
+const EXEC_OPTS = {
+  encoding: "utf-8" as const,
+  timeout: 30_000,
+  maxBuffer: 64 * 1024 * 1024,
+};
+
+function dockerExecArgs(container: string, sql: string): string[] {
+  return [
+    "exec",
+    "-e",
+    `PGOPTIONS=${PG_OPTIONS_TIMEOUT}`,
+    container,
+    "psql",
+    "-U",
+    "postgres",
+    "-d",
+    "postgres",
+    "-t",
+    "-A",
+    "-c",
+    sql,
+  ];
+}
+
 function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
   if (!SAFE_CONTAINER_RE.test(config.dbContainer)) {
     throw new HttpError(
@@ -197,21 +237,64 @@ function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
   try {
     stdout = execFileSync(
       "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-t",
-        "-A",
-        "-c",
-        sql,
-      ],
-      { encoding: "utf-8", timeout: 30_000 },
+      dockerExecArgs(config.dbContainer, sql),
+      EXEC_OPTS,
     ).trim();
+  } catch (err) {
+    throw new HttpError(
+      `analytics query failed: ${formatPsqlError(err)}`,
+      502,
+      "postgres.error",
+    );
+  }
+  if (!stdout || stdout === "null") return [] as unknown as T;
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new HttpError(
+      `analytics: malformed JSON from psql: ${msg}`,
+      502,
+      "postgres.parse_error",
+    );
+  }
+}
+
+/**
+ * Async sibling of `runJsonQuery` (v0.2.4-A audit W4). Uses promisify(execFile)
+ * so multiple queries in the same handler can fan out via Promise.all instead
+ * of blocking the Node event loop sequentially. Same SQL, same timeouts, same
+ * error-shape contract. The sync version stays for handlers that only run one
+ * query — promoting them costs latency from the await microtask scheduling.
+ *
+ * Optional `signal` lets callers abort this query early — e.g., when a
+ * Promise.all sibling rejects, an AbortController shared across the fan-out
+ * can cancel the remaining 6 in-flight psql clients instead of leaving them
+ * to run out their 30s timeout (audit W4 follow-up).
+ */
+async function runJsonQueryAsync<T>(
+  config: ApiServerConfig,
+  sql: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!SAFE_CONTAINER_RE.test(config.dbContainer)) {
+    throw new HttpError(
+      `analytics: dbContainer inválido "${config.dbContainer}"`,
+      500,
+      "config.bad_container",
+    );
+  }
+  let stdout: string;
+  try {
+    const result = await execFileAsync(
+      "docker",
+      dockerExecArgs(config.dbContainer, sql),
+      { ...EXEC_OPTS, ...(signal ? { signal } : {}) },
+    );
+    // `encoding: "utf-8"` guarantees string stdout in production. The bridge
+    // mock already coerces non-strings to "" so the cast below is dead code,
+    // kept only as a belt-and-suspenders read for foreign callers/tests.
+    stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
   } catch (err) {
     throw new HttpError(
       `analytics query failed: ${formatPsqlError(err)}`,
@@ -1910,6 +1993,8 @@ export async function agebDetailHandler(
     );
   }
 
+  // Identity must run first — it gates the 404 response. Keeping it sync
+  // also means a non-existent AGEB never spawns the 7 detail queries.
   const idRows = runJsonQuery<RawAgebDetailIdentity[]>(
     config,
     agebIdentitySql(cvegeo),
@@ -1923,44 +2008,87 @@ export async function agebDetailHandler(
     );
   }
 
-  const locMeta = runJsonQuery<RawAgebDetailLocMeta[]>(
-    config,
-    agebLocMetaSql(cvegeo),
-  );
-  const summaryRows = runJsonQuery<RawAgebDetailEstabSummary[]>(
-    config,
-    agebEstabSummarySql(cvegeo),
-  );
-  const sectors = runJsonQuery<RawAgebDetailTopSector[]>(
-    config,
-    agebTopSectorsSql(cvegeo, 10),
-  );
-  const cluesSample = runJsonQuery<RawAgebDetailClues[]>(
-    config,
-    agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP),
-  );
-  const cluesCountRows = runJsonQuery<number[] | null>(
-    config,
-    agebCluesCountSql(cvegeo),
-  );
+  // v0.2.4-A audit W4 (2026-05-06): fan out 7 detail queries via Promise.all.
+  // Order MUST match the test mock queue — each `mockExec.mockReturnValueOnce`
+  // entry corresponds to one position in this array. Don't reorder without
+  // re-aligning the test seeders. Per-position numbering is repeated inline
+  // so a reorder triggers a comment conflict, not a silent test drift.
+  // v0.2.4-B: censo_ageb may miss rural AGEBs not in RESAGEBURB urbana.
+  // v0.2.6: CONEVAL Grado de Rezago Social ~95% urban AGEB coverage.
+  // W4 follow-up: shared AbortController so a Promise.all rejection cancels
+  // the in-flight siblings instead of letting them run to their 30s timeout.
+  const ac = new AbortController();
+  let parallelResults: [
+    RawAgebDetailLocMeta[],
+    RawAgebDetailEstabSummary[],
+    RawAgebDetailTopSector[],
+    RawAgebDetailClues[],
+    number[] | null,
+    RawAgebCensusRow[],
+    RawAgebRezagoRow[],
+  ];
+  try {
+    parallelResults = await Promise.all([
+      // 1. locMeta
+      runJsonQueryAsync<RawAgebDetailLocMeta[]>(
+        config,
+        agebLocMetaSql(cvegeo),
+        ac.signal,
+      ),
+      // 2. summary
+      runJsonQueryAsync<RawAgebDetailEstabSummary[]>(
+        config,
+        agebEstabSummarySql(cvegeo),
+        ac.signal,
+      ),
+      // 3. sectors
+      runJsonQueryAsync<RawAgebDetailTopSector[]>(
+        config,
+        agebTopSectorsSql(cvegeo, 10),
+        ac.signal,
+      ),
+      // 4. cluesSample
+      runJsonQueryAsync<RawAgebDetailClues[]>(
+        config,
+        agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP),
+        ac.signal,
+      ),
+      // 5. cluesCount
+      runJsonQueryAsync<number[] | null>(
+        config,
+        agebCluesCountSql(cvegeo),
+        ac.signal,
+      ),
+      // 6. census
+      runJsonQueryAsync<RawAgebCensusRow[]>(
+        config,
+        agebCensusSql(cvegeo),
+        ac.signal,
+      ),
+      // 7. rezago
+      runJsonQueryAsync<RawAgebRezagoRow[]>(
+        config,
+        agebRezagoSql(cvegeo),
+        ac.signal,
+      ),
+    ]);
+  } catch (err) {
+    ac.abort();
+    throw err;
+  }
+  const [
+    locMeta,
+    summaryRows,
+    sectors,
+    cluesSample,
+    cluesCountRows,
+    censusRows,
+    rezagoRows,
+  ] = parallelResults;
   const cluesCount = Array.isArray(cluesCountRows)
     ? Number(cluesCountRows[0] ?? 0)
     : 0;
-  // v0.2.4-B: AGEB-level census from censo_ageb. May be missing for rural
-  // AGEBs not in RESAGEBURB urbana — falls back to null/loc_population.
-  const censusRows = runJsonQuery<RawAgebCensusRow[]>(
-    config,
-    agebCensusSql(cvegeo),
-  );
   const censusRow = censusRows[0];
-  // v0.2.6: CONEVAL Grado de Rezago Social at AGEB granularity. ~95% coverage
-  // of urban AGEBs; null for rural / post-2020 subdivisions. Resolves the
-  // muni-IRS-applied-to-AGEB statistical-noise trap (Iztapalapa AGEBs span
-  // Muy bajo to Muy alto rezago — muni-level IRS hides this entirely).
-  const rezagoRows = runJsonQuery<RawAgebRezagoRow[]>(
-    config,
-    agebRezagoSql(cvegeo),
-  );
   const rezagoRow = rezagoRows[0];
 
   // qa-audit S3 (2026-05-05): summary SQL is shaped to ALWAYS return one
