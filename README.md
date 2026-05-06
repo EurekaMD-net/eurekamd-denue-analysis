@@ -399,6 +399,16 @@ Con tmux + checkpoint, el pipeline nacional es completamente desatendido.
 
 ---
 
+## Integración con agentes (Jarvis)
+
+Cuando el operador hace preguntas en lenguaje natural sobre el DENUE Analyzer, Jarvis (mission-control) carga dos directivas KB que viven en `/root/claude/jarvis-kb/directives/`:
+
+- **`denue-analyzer-granularities.md`** — schema reference: qué tablas y endpoints existen, cuándo usar cada nivel territorial (entidad → muni → AGEB → manzana → colonia → establecimiento), tablas calientes con cheatsheet de columnas, anti-patrones de schema (e.g., `mun_polygons` es geometría sólo, no demografía).
+
+- **`denue-patterns.md`** — pattern catalog: 12 patrones operacionales que mapean **intención del operador → ruta de ejecución → output template**, con quick-lookup table de triggers verbatim, decision tree, y log de patrones nuevos para crecimiento orgánico. Cubre: site selection end-to-end, demographic ranking, brand/razón-social lookup, vertical footprint, competitive saturation, cross-layer intersection, public-data drilldown (delitos/mortalidad/pobreza), establishment detail, coverage/health-check, travel/tourism influx, license/regulatory pharma, census microdata.
+
+Estas directivas son la fuente canónica de cómo se debe consultar el analyzer desde un agente. Si añades un endpoint nuevo o detectas un patrón de pregunta recurrente, actualiza la directiva correspondiente.
+
 ## Organización
 
 Proyecto de inteligencia de datos. Uso interno.
