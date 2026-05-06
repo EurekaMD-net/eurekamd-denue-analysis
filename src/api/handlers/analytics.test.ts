@@ -3656,7 +3656,15 @@ describe("GET /analytics/manzanas-by-ageb (v0.2.9)", () => {
     const sql = args?.[args.length - 1] ?? "";
     expect(sql).toContain("FROM censo_manzana");
     expect(sql).toContain("cvegeo_ageb = '0900700012475'");
-    expect(sql).toContain("ORDER BY tvivpar DESC NULLS LAST, mza ASC");
+    // v0.2.9 audit W4 (2026-05-06): pin ORDER BY position relative to LIMIT
+    // rather than substring-match in isolation. A buggy SQL that emits
+    // `ORDER BY tvivpar DESC NULLS LAST, mza ASC, junk_col` would still
+    // pass `.toContain` — the regex requires nothing between the ORDER BY
+    // and the LIMIT keyword (whitespace allowed). Same defense pattern is
+    // worth applying to any future ORDER BY assertion in this file.
+    expect(sql).toMatch(/ORDER BY tvivpar DESC NULLS LAST, mza ASC\s+LIMIT\b/);
+    // No second ORDER BY clause — guards against accidental double-sort.
+    expect(sql.match(/ORDER BY/g)?.length).toBe(1);
   });
 
   it("emits Cache-Control + Vary headers", async () => {

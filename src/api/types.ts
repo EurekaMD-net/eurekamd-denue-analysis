@@ -62,6 +62,14 @@ export interface SearchResult {
   rows: Array<Record<string, unknown>>;
   page: number;
   limit: number;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
 }
 
@@ -453,6 +461,14 @@ export interface AgebsByMunicipioRow {
 export interface AgebsByMunicipioResult {
   cve_mun: string;
   order_by: AgebsOrderBy;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   agebs: AgebsByMunicipioRow[];
 }
@@ -676,6 +692,14 @@ export interface AgebFarmaciaOpportunityRow {
 
 export interface AgebFarmaciaOpportunityResult {
   cve_mun: string;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   agebs: AgebFarmaciaOpportunityRow[];
 }
@@ -802,6 +826,14 @@ export interface OpportunityByAgebResult {
    * v0.2.6 addition.
    */
   rezago_grado_filter: RezagoGrado[];
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   agebs: OpportunityByAgebRow[];
 }
@@ -826,6 +858,14 @@ export interface OpportunityByColoniaResult {
   scian_level: ScianLevel;
   target_scian: string[];
   order_by: OpportunityColoniaOrderBy;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   colonias: OpportunityByColoniaRow[];
 }
@@ -838,6 +878,14 @@ export interface ColoniasByMunicipioRow {
 export interface ColoniasByMunicipioResult {
   cve_mun: string;
   order_by: ColoniasOrderBy;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   colonias: ColoniasByMunicipioRow[];
 }
@@ -926,6 +974,14 @@ export interface ManzanaRow {
 export interface ManzanasByAgebResult {
   cvegeo: string;
   order_by: ManzanasOrderBy;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   manzanas: ManzanaRow[];
 }
@@ -939,6 +995,14 @@ export interface ColoniaInAgebRow {
 
 export interface ColoniasByAgebResult {
   cvegeo: string;
+  /**
+   * Number of rows returned in this response (after the SQL `LIMIT`).
+   * NOT the total count of matches in the database — that would require a
+   * second query. If `total_returned` equals the request's `limit`, more
+   * rows likely exist; the caller should re-fetch with a higher limit or
+   * paginate. v0.2.9 audit W3 (2026-05-06): JSDoc clarifies the contract
+   * to prevent reader-misinterpretation as "total matches".
+   */
   total_returned: number;
   colonias: ColoniaInAgebRow[];
 }
