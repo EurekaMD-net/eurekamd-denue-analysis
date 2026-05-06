@@ -1896,9 +1896,9 @@ describe("GET /analytics/ageb-detail", () => {
   });
 
   it("rejects LOWERCASE letter suffix (INEGI's convention is uppercase only)", async () => {
-    // qa-audit W5: regex is /^[0-9]{12}[0-9A-Z]$/ — case-sensitive on the
-    // letter at position 13. A request with '086a' must be rejected before
-    // any psql call so we don't waste a query on a guaranteed-empty row.
+    // CVEGEO_RE is case-sensitive on the suffix letter. A request with '086a'
+    // must be rejected before any psql call so we don't waste a query on a
+    // guaranteed-empty row.
     const app = createServer(CONFIG);
     const res = await app.request(
       "/analytics/ageb-detail?cvegeo=211140001086a",
@@ -1906,6 +1906,49 @@ describe("GET /analytics/ageb-detail", () => {
     );
     expect(res.status).toBe(400);
     expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("ACCEPTS 9-char rural cvegeo (no locality component)", async () => {
+    // 2026-05-06: 17,469 ageb_polygons rows are rural (cve_loc='0000') and
+    // INEGI encodes them as 9-char (ENT+MUN+AGEB). 120,945 DENUE rows live
+    // there. CVEGEO_RE was previously /^[0-9]{12}[0-9A-Z]$/ which rejected
+    // rural at endpoint entry. Now /^([0-9]{12}[0-9A-Z]|[0-9]{8}[0-9A-Z])$/.
+    // Regression test for the rural-acceptance contract.
+    mockExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          cvegeo: "300280017",
+          cve_ent: "30",
+          cve_mun: "028",
+          cve_loc: "0000",
+          cve_ageb: "0017",
+          ambito: "Rural",
+          area_km2: "5.0",
+          centroid_lat: "19.50",
+          centroid_lon: "-96.00",
+          bbox_minlon: null,
+          bbox_minlat: null,
+          bbox_maxlon: null,
+          bbox_maxlat: null,
+        },
+      ]),
+    );
+    mockExec
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/ageb-detail?cvegeo=300280017", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
   });
 
   it("ACCEPTS cvegeo with letter-suffix AGEB (INEGI assigns A-Z to ~9% of AGEBs)", async () => {

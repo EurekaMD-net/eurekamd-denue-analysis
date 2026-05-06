@@ -128,11 +128,13 @@ describe("POST_LOAD_SQL", () => {
     expect(POST_LOAD_SQL).toMatch(/AS droguerias/);
   });
 
-  it("ageb view validates 13-char cvegeo with letter suffix tolerance", () => {
+  it("ageb view accepts both rural (9-char) and urban (13-char) cvegeo", () => {
     expect(POST_LOAD_SQL).toContain(
       "CREATE OR REPLACE VIEW cofepris_farmacias_by_ageb",
     );
-    expect(POST_LOAD_SQL).toContain("cvegeo_ageb ~ '^[0-9A-Z]{13}$'");
+    expect(POST_LOAD_SQL).toContain(
+      "cvegeo_ageb ~ '^([0-9A-Z]{9}|[0-9A-Z]{13})$'",
+    );
   });
 
   it("ageb view bundles controlados into single con_controlados flag", () => {

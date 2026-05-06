@@ -134,14 +134,15 @@ CREATE TABLE cofepris_farmacias (
   cve_mun                   TEXT,
   cvegeo_ageb               TEXT,
   geocode_method            TEXT,
-  -- v0.2.8 audit W4 (2026-05-06): defense-in-depth at storage boundary.
-  -- The geocoder ships a pre-load integrity check that joins back to
-  -- ageb_polygons and exits non-zero on shape violations. This CHECK is
-  -- the second gate — even if the geocoder is bypassed (manual COPY,
-  -- different upstream), the table refuses non-13-char cvegeo. NULL is
-  -- always allowed (rows that failed geocoding entirely).
+  -- 2026-05-06: defense-in-depth at storage boundary.
+  -- INEGI's Marco Geoestadístico distinguishes rural (9 chars: ENT+MUN+AGEB,
+  -- no locality) from urban (13 chars: ENT+MUN+LOC+AGEB). Both are valid;
+  -- ~21% of municipios have at least some rural AGEBs. NULL is allowed for
+  -- rows that failed geocoding entirely. The geocoder ships a pre-load
+  -- integrity check that joins back to ageb_polygons; this CHECK is the
+  -- second gate even if the geocoder is bypassed.
   CONSTRAINT cofepris_cvegeo_ageb_shape
-    CHECK (cvegeo_ageb IS NULL OR cvegeo_ageb ~ '^[0-9A-Z]{13}$')
+    CHECK (cvegeo_ageb IS NULL OR cvegeo_ageb ~ '^([0-9A-Z]{9}|[0-9A-Z]{13})$')
 );
 `.trim();
 
@@ -189,6 +190,9 @@ WHERE estatus_licencia = 'Vigente'
   AND cve_mun ~ '^[0-9]{5}$'
 GROUP BY cve_mun;
 
+-- 2026-05-06: accept rural (9-char) AND urban (13-char) cvegeos. INEGI's
+-- Marco Geoestadístico encodes rural AGEB without a locality component
+-- (ENT+MUN+AGEB), which is a legitimate shape — not a defect.
 CREATE OR REPLACE VIEW cofepris_farmacias_by_ageb AS
 SELECT
   cvegeo_ageb,
@@ -198,7 +202,7 @@ SELECT
 FROM cofepris_farmacias
 WHERE estatus_licencia = 'Vigente'
   AND cvegeo_ageb IS NOT NULL
-  AND cvegeo_ageb ~ '^[0-9A-Z]{13}$'
+  AND cvegeo_ageb ~ '^([0-9A-Z]{9}|[0-9A-Z]{13})$'
 GROUP BY cvegeo_ageb;
 
 COMMIT;

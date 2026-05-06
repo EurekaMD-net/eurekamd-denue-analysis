@@ -1987,7 +1987,7 @@ export async function agebDetailHandler(
   const cvegeo = c.req.query("cvegeo");
   if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
     throw new HttpError(
-      `cvegeo inválido "${cvegeo ?? ""}". Debe ser exactamente 13 dígitos.`,
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars (urbano: ENT+MUN+LOC+AGEB) o 9 chars (rural: ENT+MUN+AGEB), último char puede ser 0-9 o A-Z.`,
       400,
       "validation.cvegeo",
     );
@@ -3103,7 +3103,7 @@ export async function licensedPharmaciesByAgebHandler(
   const cvegeo = c.req.query("cvegeo");
   if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
     throw new HttpError(
-      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars (urbano) o 9 chars (rural), último char puede ser dígito o letra mayúscula.`,
       400,
       "validation.cvegeo",
     );
@@ -3169,7 +3169,7 @@ export async function manzanasByAgebHandler(
   const cvegeo = c.req.query("cvegeo");
   if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
     throw new HttpError(
-      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars (urbano) o 9 chars (rural), último char puede ser dígito o letra mayúscula.`,
       400,
       "validation.cvegeo",
     );
@@ -3263,7 +3263,7 @@ export async function coloniasByAgebHandler(
   const cvegeo = c.req.query("cvegeo");
   if (!cvegeo || !CVEGEO_RE.test(cvegeo)) {
     throw new HttpError(
-      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars: 12 dígitos + dígito/letra.`,
+      `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars (urbano) o 9 chars (rural), último char puede ser dígito o letra mayúscula.`,
       400,
       "validation.cvegeo",
     );

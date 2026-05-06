@@ -41,12 +41,11 @@ COPY (
   WHERE clase_actividad_id IN ('464111','464112')
     AND ageb IS NOT NULL AND ageb != ''
     AND area_geo IS NOT NULL
-    -- v0.2.8 audit W4 (2026-05-06): shape-filter at source. The backfill
-    -- has 1-2 establecimientos with truncated ageb (e.g. 9-char). Modal
-    -- selection over a CP whose only DENUE pharmacy has a bad ageb would
-    -- emit a malformed cvegeo. Filter at index build, not after.
-    AND LENGTH(ageb) = 13
-    AND ageb ~ '^[0-9A-Z]{13}$'
+    -- 2026-05-06: accept BOTH 9-char (rural, INEGI Marco encodes rural AGEB
+    -- without locality: ENT+MUN+AGEB) AND 13-char (urban: ENT+MUN+LOC+AGEB).
+    -- An earlier shape filter ruled out 9-char as malformed — wrong; ~17k
+    -- rural pharma rows are legitimate.
+    AND ageb ~ '^([0-9A-Z]{9}|[0-9A-Z]{13})$'
 ) TO STDOUT WITH CSV HEADER;
 """
 
@@ -232,11 +231,11 @@ def integrity_check_geocoded() -> None:
     if not cvegeos:
         print("[integrity] WARN: zero geocoded cvegeos — skipping join check.")
         return
-    # Validate shape locally first (cheap): all 13 chars.
-    bad_shape = [v for v in cvegeos if len(v) != 13]
+    # Validate shape locally first (cheap): rural=9 chars, urban=13 chars.
+    bad_shape = [v for v in cvegeos if len(v) not in (9, 13)]
     if bad_shape:
         print(
-            f"[integrity] FAIL: {len(bad_shape)}/{len(cvegeos)} cvegeos are not 13 chars",
+            f"[integrity] FAIL: {len(bad_shape)}/{len(cvegeos)} cvegeos have invalid shape (expected 9 or 13 chars)",
             file=sys.stderr,
         )
         print(f"  sample: {bad_shape[:5]}", file=sys.stderr)

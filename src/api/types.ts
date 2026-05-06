@@ -399,14 +399,25 @@ export interface StateCalibratorsResult {
 // ---------------------------------------------------------------------------
 
 /**
- * 13-character AGEB key: ENT(2)+MUN(3)+LOC(4)+AGEB(4). Same shape as the
- * `cvegeo` column in `ageb_polygons` and the `ageb` column in
- * `establecimientos`. INEGI assigns letter suffixes to ~9% of AGEBs
- * (e.g. `211140001086A`) when an existing AGEB is subdivided — the first
- * 12 chars are always digits, the last is digit or uppercase A-Z.
- * v0.2.4-B fix: previous `^[0-9]{13}$` rejected 7,461 valid AGEBs.
+ * AGEB CVEGEO key. INEGI's Marco Geoestadístico has TWO valid shapes:
+ *
+ *   Urban (13 chars): ENT(2)+MUN(3)+LOC(4)+AGEB(4). Used for AGEBs inside
+ *     a named locality. The first 12 chars are digits; last char is digit
+ *     or uppercase A-Z (subdivision suffix, ~9% of urban AGEBs).
+ *
+ *   Rural (9 chars): ENT(2)+MUN(3)+AGEB(4). No locality component —
+ *     INEGI encodes rural AGEBs without a parent locality. ageb_polygons
+ *     has 17,469 such rows (cve_loc='0000'). DENUE has ~120,945 establishments
+ *     in these (1.98% of 6.1M). Last char can also be A-Z.
+ *
+ * Note: per-endpoint the rural shape may not be useful (e.g. manzanas-by-ageb
+ * has zero data for rural since RESAGEBURB is urban-only) but the regex itself
+ * accepts both — endpoints return empty results rather than 400 for rural.
+ *
+ * v0.2.4-B history: previous `^[0-9]{13}$` rejected 7,461 valid letter-suffix
+ * AGEBs. 2026-05-06: previous `^[0-9]{12}[0-9A-Z]$` rejected the rural shape.
  */
-export const CVEGEO_RE = /^[0-9]{12}[0-9A-Z]$/;
+export const CVEGEO_RE = /^([0-9]{12}[0-9A-Z]|[0-9]{8}[0-9A-Z])$/;
 
 /** order_by for /analytics/agebs-by-municipio. Constrains the SQL ORDER BY. */
 export const AGEBS_ORDER_BY = [
