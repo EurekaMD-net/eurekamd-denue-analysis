@@ -41,6 +41,12 @@ COPY (
   WHERE clase_actividad_id IN ('464111','464112')
     AND ageb IS NOT NULL AND ageb != ''
     AND area_geo IS NOT NULL
+    -- v0.2.8 audit W4 (2026-05-06): shape-filter at source. The backfill
+    -- has 1-2 establecimientos with truncated ageb (e.g. 9-char). Modal
+    -- selection over a CP whose only DENUE pharmacy has a bad ageb would
+    -- emit a malformed cvegeo. Filter at index build, not after.
+    AND LENGTH(ageb) = 13
+    AND ageb ~ '^[0-9A-Z]{13}$'
 ) TO STDOUT WITH CSV HEADER;
 """
 
@@ -51,6 +57,36 @@ def upper_ascii(s: str) -> str:
     n = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     n = re.sub(r"[^A-Z0-9 ]", " ", n.upper())
     return re.sub(r"\s+", " ", n).strip()
+
+
+def colonia_matches(cof_norm: str, denue_norm: str) -> bool:
+    """
+    Token-aware colonia match (v0.2.8 audit W2, 2026-05-06).
+
+    Replaces naive `cof in denue or denue in cof` substring match. The old
+    form would collapse e.g. COFEPRIS "EL VALLE" against DENUE "DEL VALLE"
+    (because "EL VALLE" in "DEL VALLE" is True). With CP+entidad bounding
+    the FP rate is low, but token-overlap is the principled fix.
+
+    Match if every token of the shorter colonia appears as a whole word
+    in the longer one. "DEL VALLE" matches "DEL VALLE NORTE"; "EL VALLE"
+    does NOT match "DEL VALLE" because "DEL" is missing on the COFEPRIS
+    side. Single-token colonias (e.g. "AURORA") still need a whole-word
+    hit on the other side.
+    """
+    if not cof_norm or not denue_norm:
+        return False
+    cof_tokens = cof_norm.split()
+    denue_tokens = denue_norm.split()
+    if not cof_tokens or not denue_tokens:
+        return False
+    short, long_ = (
+        (cof_tokens, denue_tokens)
+        if len(cof_tokens) <= len(denue_tokens)
+        else (denue_tokens, cof_tokens)
+    )
+    long_set = set(long_)
+    return all(tok in long_set for tok in short)
 
 
 def modal(items: list[str]) -> str | None:
@@ -130,8 +166,7 @@ def main() -> None:
                     matched = None
                     if col_norm:
                         for d in candidates:
-                            dnorm = d["_col_norm"]
-                            if dnorm and (col_norm in dnorm or dnorm in col_norm):
+                            if colonia_matches(col_norm, d["_col_norm"]):
                                 matched = d
                                 break
                     if matched:
@@ -168,6 +203,108 @@ def main() -> None:
     print(f"  unmatched:  {n_unmatched} ({pct(n_unmatched):.1f}%)")
     print(f"  combined:   {pct(n_cp_colonia + n_cp_modal):.1f}%")
     print(f"  -> {OUTPUT}")
+
+    # v0.2.8 audit W4 (2026-05-06): post-geocode integrity check.
+    # Mock-only loader tests can't catch the cvegeo-shape bug class — this is
+    # the same defense as the v0.2.8-shipped feedback memory advised: smoke-
+    # test by joining BACK to ageb_polygons. Aborts non-zero if integrity
+    # fails, so the next loader step doesn't pick up bad data.
+    integrity_check_geocoded()
+
+
+def integrity_check_geocoded() -> None:
+    """
+    Verify the geocoded output by joining back to ageb_polygons. The original
+    cvegeo-shape bug (concatenating cve_mun + 4-char ageb to produce 18-char
+    garbage) would surface as 0% join rate against ageb_polygons.cvegeo. We
+    require ≥85% of geocoded cvegeos to actually exist in ageb_polygons —
+    below that threshold something has shifted (DENUE column rename, schema
+    change, geocoder bug) and we'd rather fail loud than load corrupt data.
+    """
+    print("\n[integrity] joining geocoded.cvegeo_ageb back to ageb_polygons...")
+    cvegeos = []
+    with open(OUTPUT) as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            v = (r.get("cvegeo_ageb") or "").strip()
+            if v:
+                cvegeos.append(v)
+    if not cvegeos:
+        print("[integrity] WARN: zero geocoded cvegeos — skipping join check.")
+        return
+    # Validate shape locally first (cheap): all 13 chars.
+    bad_shape = [v for v in cvegeos if len(v) != 13]
+    if bad_shape:
+        print(
+            f"[integrity] FAIL: {len(bad_shape)}/{len(cvegeos)} cvegeos are not 13 chars",
+            file=sys.stderr,
+        )
+        print(f"  sample: {bad_shape[:5]}", file=sys.stderr)
+        sys.exit(2)
+    # Stream cvegeos via stdin to avoid argv length limits / shell quoting.
+    cvegeo_list = "\n".join(cvegeos)
+    join_sql = """
+COPY (
+  WITH input(cvegeo) AS (
+    SELECT regexp_split_to_table(:'list', E'\\n')
+  )
+  SELECT
+    COUNT(*) AS total,
+    COUNT(p.cvegeo) AS matched
+  FROM input i
+  LEFT JOIN ageb_polygons p ON p.cvegeo = i.cvegeo
+) TO STDOUT WITH CSV;
+    """
+    res = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            DB_CONTAINER,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-v",
+            f"list={cvegeo_list}",
+            "-c",
+            join_sql,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        print(
+            f"[integrity] FAIL: psql exit {res.returncode}",
+            file=sys.stderr,
+        )
+        print(f"  stderr: {res.stderr[:500]}", file=sys.stderr)
+        sys.exit(2)
+    line = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
+    parts = line.split(",") if line else []
+    if len(parts) != 2:
+        print(
+            f"[integrity] FAIL: unexpected psql output {line!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    total = int(parts[0])
+    matched = int(parts[1])
+    rate = 100.0 * matched / total if total else 0.0
+    print(
+        f"[integrity] {matched}/{total} cvegeos exist in ageb_polygons "
+        f"({rate:.1f}%)"
+    )
+    if rate < 85.0:
+        print(
+            f"[integrity] FAIL: match rate {rate:.1f}% < 85% threshold. "
+            "Geocoder output is shape-correct but doesn't join back to "
+            "ageb_polygons — likely DENUE.ageb column drift or stale "
+            "ageb_polygons. Refusing to write a known-broken dataset.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 if __name__ == "__main__":

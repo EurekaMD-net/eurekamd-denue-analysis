@@ -133,7 +133,15 @@ CREATE TABLE cofepris_farmacias (
   has_hemoderivados         BOOLEAN NOT NULL DEFAULT false,
   cve_mun                   TEXT,
   cvegeo_ageb               TEXT,
-  geocode_method            TEXT
+  geocode_method            TEXT,
+  -- v0.2.8 audit W4 (2026-05-06): defense-in-depth at storage boundary.
+  -- The geocoder ships a pre-load integrity check that joins back to
+  -- ageb_polygons and exits non-zero on shape violations. This CHECK is
+  -- the second gate — even if the geocoder is bypassed (manual COPY,
+  -- different upstream), the table refuses non-13-char cvegeo. NULL is
+  -- always allowed (rows that failed geocoding entirely).
+  CONSTRAINT cofepris_cvegeo_ageb_shape
+    CHECK (cvegeo_ageb IS NULL OR cvegeo_ageb ~ '^[0-9A-Z]{13}$')
 );
 `.trim();
 

@@ -77,6 +77,13 @@ def detect_classes(lineas: str) -> dict:
     """
     Classify LÍNEAS AUTORIZADAS into 6 control classes.
     All boolean flags. A row may match multiple classes.
+
+    v0.2.8 audit W1 (2026-05-06): word-boundary regex instead of naive
+    substring `in`. The catalog dataset is bounded (FP risk low) but
+    `"VACUNA" in "REVACUNAR"` would silently match if COFEPRIS ever shipped
+    a derived form. `\\b` matches across hyphen / slash / comma / space —
+    the actual separators COFEPRIS uses between authorized lines.
+    Each pattern matches the lemma plus its singular/plural variants.
     """
     if not lineas:
         return {
@@ -89,12 +96,14 @@ def detect_classes(lineas: str) -> dict:
         }
     txt = upper_ascii(lineas)
     return {
-        "has_estupefacientes": "ESTUPEFACIENTE" in txt,
-        "has_psicotropicos": "PSICOTROPIC" in txt,
-        "has_vacunas": "VACUNA" in txt,
-        "has_toxoides": "TOXOIDE" in txt,
-        "has_sueros_antitoxinas": "SUERO" in txt or "ANTITOXINA" in txt,
-        "has_hemoderivados": "HEMODERIVAD" in txt,
+        "has_estupefacientes": bool(re.search(r"\bESTUPEFACIENTES?\b", txt)),
+        "has_psicotropicos": bool(re.search(r"\bPSICOTROPIC[OA]S?\b", txt)),
+        "has_vacunas": bool(re.search(r"\bVACUNAS?\b", txt)),
+        "has_toxoides": bool(re.search(r"\bTOXOIDES?\b", txt)),
+        "has_sueros_antitoxinas": bool(
+            re.search(r"\b(SUEROS?|ANTITOXINAS?)\b", txt)
+        ),
+        "has_hemoderivados": bool(re.search(r"\bHEMODERIVADOS?\b", txt)),
     }
 
 
