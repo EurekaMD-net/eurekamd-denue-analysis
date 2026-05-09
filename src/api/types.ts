@@ -1038,6 +1038,135 @@ export interface AirportsByMunicipioResult {
 }
 
 // ---------------------------------------------------------------------------
+// Censo 2020 wider variable surface (v0.2.10) — sub-municipal locality grain
+// + extended muni demographic surface. See scripts/migrate-censo-views.sql.
+// ---------------------------------------------------------------------------
+
+/**
+ * 9-char DGIS-style locality key: ENT(2) + MUN(3) + LOC(4). Always
+ * zero-padded. INEGI ITER 2020 emits ~193k localities.
+ */
+export const CVE_LOC_RE = /^[0-9]{9}$/;
+
+/** Order by options for /analytics/localities-by-municipio. */
+export const LOCALITIES_ORDER_BY = [
+  "pobtot",
+  "tvivpar",
+  "vph_inter",
+  "nom_loc",
+  "tamloc",
+] as const;
+export type LocalitiesOrderBy = (typeof LOCALITIES_ORDER_BY)[number];
+
+/**
+ * One row per locality in /analytics/localities-by-municipio. Fields
+ * mirror the most-asked subset of `censo_localidades`. Suppressed values
+ * (INEGI 'N/D' for low-population localities) surface as NULL.
+ */
+export interface LocalityRow {
+  cve_loc: string;
+  nom_loc: string;
+  /**
+   * INEGI tamaño de localidad code 1-14:
+   *   1 = 1-249, 2 = 250-499, 3 = 500-999, 4 = 1k-2k, 5 = 2k-2.5k,
+   *   6 = 2.5k-5k, 7 = 5k-10k, 8 = 10k-15k, 9 = 15k-30k, 10 = 30k-50k,
+   *   11 = 50k-100k, 12 = 100k-500k, 13 = 500k-1M, 14 = 1M+.
+   */
+  tamloc: number | null;
+  altitud_m: number | null;
+  pobtot: number | null;
+  tvivpar: number | null;
+  vph_inter: number | null;
+}
+
+export interface LocalitiesByMunicipioResult {
+  cve_mun: string;
+  /** The order_by applied — echoed so clients don't need to remember the request. */
+  order_by: LocalitiesOrderBy;
+  /**
+   * Total localities matching cve_mun in the DB, NOT capped by limit.
+   * Sibling AgebsByMunicipioResult uses `total_returned` (capped) — this
+   * field intentionally has different semantics: it tells the caller
+   * whether the response was truncated. Computed via a second count(*)
+   * pass against the view; cheap on the cve_mun btree.
+   */
+  total_localities: number;
+  localities: LocalityRow[];
+}
+
+/**
+ * Full demographic surface returned by /analytics/locality-detail.
+ * Every numeric field is nullable: INEGI suppresses low-count localities
+ * (~42% of the 193k ITER rows have suppressed religion/asset fields).
+ */
+export interface LocalityDetailResult {
+  cve_loc: string;
+  cve_mun: string;
+  entidad: string;
+  nom_loc: string;
+  nom_mun: string;
+  nom_ent: string;
+  tamloc: number | null;
+  altitud_m: number | null;
+  population: {
+    pobtot: number | null;
+    pobfem: number | null;
+    pobmas: number | null;
+    p_60ymas: number | null;
+    p_15ymas: number | null;
+    p_18ymas: number | null;
+    pea: number | null;
+    pocupada: number | null;
+    graproes: number | null;
+    tvivhab: number | null;
+    tvivpar: number | null;
+  };
+  religion: {
+    pcatolica: number | null;
+    pro_crieva: number | null;
+    potras_rel: number | null;
+    psin_relig: number | null;
+  };
+  indigenous_afro: {
+    p3ym_hli: number | null;
+    p3hlinhe: number | null;
+    p3hli_he: number | null;
+    phog_ind: number | null;
+    pob_afro: number | null;
+  };
+  migration: {
+    pnacent: number | null;
+    pnacoe: number | null;
+    pres2015: number | null;
+    presoe15: number | null;
+  };
+  education: {
+    p15ym_an: number | null;
+    p15ym_se: number | null;
+    p18ym_pb: number | null;
+  };
+  health_coverage: {
+    psinder: number | null;
+    pder_ss: number | null;
+    pder_imss: number | null;
+    pder_iste: number | null;
+    pder_segp: number | null;
+    pder_imssb: number | null;
+    pafil_ipriv: number | null;
+  };
+  assets: {
+    vph_inter: number | null;
+    vph_autom: number | null;
+    vph_refri: number | null;
+    vph_lavad: number | null;
+    vph_pc: number | null;
+    vph_cel: number | null;
+    vph_tv: number | null;
+    vph_snbien: number | null;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------
 

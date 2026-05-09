@@ -57,6 +57,8 @@ import type {
   ColoniasByMunicipioResult,
   LicensedPharmaciesByAgebResult,
   LicensedPharmaciesByMunicipioResult,
+  LocalitiesByMunicipioResult,
+  LocalityDetailResult,
   ManzanasByAgebResult,
   MortalitySummaryResult,
   MortalityTrendResult,
@@ -3901,4 +3903,525 @@ describe("GET /analytics/airports-by-municipio", () => {
     // No SQL-injection escape — the cve_mun is gated by CVE_MUN_RE before SQL composition
     expect(sql).not.toMatch(/'23005';.*--/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/localities-by-municipio  (v0.2.10)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/localities-by-municipio (v0.2.10)", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/localities-by-municipio", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cve_mun (4 chars)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=0900",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects bad order_by", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007&order_by=religion",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects limit > 200", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007&limit=201",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns localities with NULL preservation for INEGI-suppressed fields", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({
+        total_localities: 2,
+        localities: [
+          {
+            cve_loc: "090070001",
+            nom_loc: "Iztapalapa",
+            tamloc: "14",
+            altitud_m: "2239",
+            pobtot: "1835486",
+            tvivpar: "510244",
+            vph_inter: "349103",
+          },
+          {
+            cve_loc: "090070055",
+            nom_loc: "El Tepito Chico",
+            tamloc: "1",
+            altitud_m: null,
+            pobtot: "12",
+            tvivpar: null,
+            vph_inter: null,
+          },
+        ],
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocalitiesByMunicipioResult;
+    expect(body.cve_mun).toBe("09007");
+    expect(body.total_localities).toBe(2);
+    expect(body.localities).toHaveLength(2);
+    expect(body.localities[0]).toEqual({
+      cve_loc: "090070001",
+      nom_loc: "Iztapalapa",
+      tamloc: 14,
+      altitud_m: 2239,
+      pobtot: 1835486,
+      tvivpar: 510244,
+      vph_inter: 349103,
+    });
+    // INEGI 'N/D' suppression must surface as NULL, not 0 — the latter
+    // would silently inflate aggregations downstream.
+    expect(body.localities[1].tvivpar).toBeNull();
+    expect(body.localities[1].vph_inter).toBeNull();
+    expect(body.localities[1].altitud_m).toBeNull();
+  });
+
+  it("returns empty localities array (not 404) when muni is empty", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=04001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocalitiesByMunicipioResult;
+    expect(body.total_localities).toBe(0);
+    expect(body.localities).toEqual([]);
+  });
+
+  it("emits FROM censo_localidades + DESC NULLS LAST on numeric order_by", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007&order_by=tvivpar",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM censo_localidades");
+    expect(sql).toContain("WHERE cve_mun = '09007'");
+    // Position-pinned (audit pattern from v0.2.9 W4): ORDER BY directly
+    // adjacent to LIMIT so a buggy `ORDER BY tvivpar DESC NULLS LAST, junk`
+    // can't pass via substring.
+    expect(sql).toMatch(
+      /ORDER BY tvivpar DESC NULLS LAST, cve_loc ASC\s+LIMIT\b/,
+    );
+    // v0.2.10 audit W1: outer json_agg also has explicit ORDER BY so row
+    // order isn't implementation-dependent on the aggregate. Inner +
+    // outer ORDER BY are intentionally redundant — inner picks rows via
+    // LIMIT, outer fixes emission order.
+    expect(sql).toMatch(
+      /json_agg\(row_to_json\(r\) ORDER BY r\.tvivpar DESC NULLS LAST, r\.cve_loc ASC\)/,
+    );
+  });
+
+  it("echoes order_by in response shape (S1 audit)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007&order_by=vph_inter",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as LocalitiesByMunicipioResult;
+    expect(body.order_by).toBe("vph_inter");
+  });
+
+  it("defaults order_by to pobtot when omitted", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007",
+      { headers: AUTH },
+    );
+    const body = (await res.json()) as LocalitiesByMunicipioResult;
+    expect(body.order_by).toBe("pobtot");
+  });
+
+  it("flips to ASC direction for nom_loc order_by (alphabetic browse)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007&order_by=nom_loc",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toMatch(/ORDER BY nom_loc ASC NULLS LAST/);
+    expect(sql).not.toMatch(/ORDER BY nom_loc DESC/);
+  });
+
+  it("emits Cache-Control + Vary headers", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ total_localities: 0, localities: [] }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/localities-by-municipio?cve_mun=09007",
+      { headers: AUTH },
+    );
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/locality-detail  (v0.2.10)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/locality-detail (v0.2.10)", () => {
+  it("rejects missing cve_loc", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locality-detail", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects 8-char cve_loc (typo)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=09007001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects letter-suffixed cve_loc (AGEB shape, wrong key)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=21114000A",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 when locality not found", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=999999999",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns full demographic surface with category nesting", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_loc: "090070001",
+          cve_mun: "09007",
+          entidad: "09",
+          nom_loc: "Iztapalapa",
+          nom_mun: "Iztapalapa",
+          nom_ent: "Ciudad de México",
+          tamloc: "14",
+          altitud_m: "2239",
+          pobtot: "1835486",
+          pobfem: "950000",
+          pobmas: "885486",
+          p_60ymas: "210000",
+          p_15ymas: "1500000",
+          p_18ymas: "1300000",
+          pea: "850000",
+          pocupada: "820000",
+          graproes: "10.5",
+          tvivhab: "510000",
+          tvivpar: "510244",
+          pcatolica: "1384540",
+          pro_crieva: "154092",
+          potras_rel: "10000",
+          psin_relig: "200000",
+          p3ym_hli: "28716",
+          p3hlinhe: "200",
+          p3hli_he: "28000",
+          phog_ind: "70000",
+          pob_afro: "50000",
+          pnacent: "1000000",
+          pnacoe: "800000",
+          pres2015: "1700000",
+          presoe15: "100000",
+          p15ym_an: "30000",
+          p15ym_se: "20000",
+          p18ym_pb: "400000",
+          psinder: "300000",
+          pder_ss: "1500000",
+          pder_imss: "900000",
+          pder_iste: "100000",
+          pder_segp: "500000",
+          pder_imssb: "0",
+          pafil_ipriv: "20000",
+          vph_inter: "349103",
+          vph_autom: "200000",
+          vph_refri: "490000",
+          vph_lavad: "440000",
+          vph_pc: "150000",
+          vph_cel: "490000",
+          vph_tv: "500000",
+          vph_snbien: "5000",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=090070001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocalityDetailResult;
+    expect(body.cve_loc).toBe("090070001");
+    expect(body.cve_mun).toBe("09007");
+    expect(body.entidad).toBe("09");
+    expect(body.nom_loc).toBe("Iztapalapa");
+    expect(body.tamloc).toBe(14);
+    expect(body.altitud_m).toBe(2239);
+    expect(body.population.pobtot).toBe(1835486);
+    expect(body.population.graproes).toBeCloseTo(10.5);
+    expect(body.religion.pcatolica).toBe(1384540);
+    expect(body.religion.pro_crieva).toBe(154092);
+    expect(body.indigenous_afro.p3ym_hli).toBe(28716);
+    expect(body.indigenous_afro.pob_afro).toBe(50000);
+    expect(body.migration.pnacoe).toBe(800000);
+    expect(body.education.p18ym_pb).toBe(400000);
+    expect(body.health_coverage.psinder).toBe(300000);
+    expect(body.assets.vph_inter).toBe(349103);
+    expect(body.assets.vph_snbien).toBe(5000);
+  });
+
+  it("preserves NULLs across all categories for INEGI-suppressed locality", async () => {
+    // Synthetic small-locality response: pobtot is always emitted but
+    // every derived field is suppressed (LSNIEG art. 37 — n<50 households).
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_loc: "090079999",
+          cve_mun: "09007",
+          entidad: "09",
+          nom_loc: "Rancho El Pequeño",
+          nom_mun: "Iztapalapa",
+          nom_ent: "Ciudad de México",
+          tamloc: "1",
+          altitud_m: "2400",
+          pobtot: "12",
+          pobfem: "6",
+          pobmas: "6",
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p18ym_pb: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_pc: null,
+          vph_cel: null,
+          vph_tv: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=090079999",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocalityDetailResult;
+    expect(body.population.pobtot).toBe(12);
+    // Every suppressed derived field must be NULL (not 0). Operator
+    // would silently double-count if 'N/D' surfaced as 0.
+    expect(body.religion.pcatolica).toBeNull();
+    expect(body.indigenous_afro.p3ym_hli).toBeNull();
+    expect(body.migration.pnacoe).toBeNull();
+    expect(body.education.p18ym_pb).toBeNull();
+    expect(body.health_coverage.psinder).toBeNull();
+    expect(body.assets.vph_inter).toBeNull();
+  });
+
+  it("emits FROM censo_localidades + literal cve_loc in WHERE", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    // 200 OK is impossible here (rows=[] → 404), but we only care about
+    // the SQL composition; the handler still runs the query before the
+    // 404 throw, so mockExec captures the call.
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=220140001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(404);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM censo_localidades");
+    expect(sql).toContain("WHERE cve_loc = '220140001'");
+  });
+
+  it("emits Cache-Control + Vary headers on success", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_loc: "090070001",
+          cve_mun: "09007",
+          entidad: "09",
+          nom_loc: "Iztapalapa",
+          nom_mun: "Iztapalapa",
+          nom_ent: "Ciudad de México",
+          tamloc: "14",
+          altitud_m: "2239",
+          pobtot: "1835486",
+          pobfem: null,
+          pobmas: null,
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p18ym_pb: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_pc: null,
+          vph_cel: null,
+          vph_tv: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/locality-detail?cve_loc=090070001",
+      { headers: AUTH },
+    );
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SQL-injection contract — locality endpoints (v0.2.10)
+// ---------------------------------------------------------------------------
+
+describe("Locality endpoints — SQL-injection contract (v0.2.10)", () => {
+  const INJECTION_VECTORS = [
+    "09007'; DROP TABLE censo_iter--",
+    "09007 OR 1=1",
+    "09007;SELECT 1",
+    "0'; DROP TABLE x--",
+    "../../../../etc/passwd",
+    "%27%20OR%201%3D1",
+    // R1 (audit, 2026-05-09): letter chars must reject at the regex gate.
+    // CVE_MUN_RE / CVE_LOC_RE are digits-only so 'A' shouldn't reach SQL,
+    // but pinning the contract guards against a future regex relaxation.
+    "0900a",
+    "ABCDEFGHI",
+  ];
+
+  for (const v of INJECTION_VECTORS) {
+    it(`localities-by-municipio rejects "${v}" before SQL composition`, async () => {
+      const app = createServer(CONFIG);
+      const res = await app.request(
+        `/analytics/localities-by-municipio?cve_mun=${encodeURIComponent(v)}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(400);
+      // CVE_MUN_RE gates the literal interpolation — psql is never invoked.
+      expect(mockExec).not.toHaveBeenCalled();
+    });
+
+    it(`locality-detail rejects "${v}" before SQL composition`, async () => {
+      const app = createServer(CONFIG);
+      const res = await app.request(
+        `/analytics/locality-detail?cve_loc=${encodeURIComponent(v)}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(400);
+      expect(mockExec).not.toHaveBeenCalled();
+    });
+  }
 });

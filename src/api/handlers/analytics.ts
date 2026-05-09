@@ -61,6 +61,7 @@ import {
   COLONIAS_DEFAULT_LIMIT,
   COLONIAS_MAX_LIMIT,
   COLONIAS_ORDER_BY,
+  CVE_LOC_RE,
   CVE_MUN_RE,
   CVEGEO_RE,
   ENTIDAD_RE,
@@ -90,6 +91,10 @@ import {
   type LicensedPharmaciesByAgebResult,
   type LicensedPharmaciesByMunicipioResult,
   type ColoniasByAgebResult,
+  type LocalitiesByMunicipioResult,
+  type LocalitiesOrderBy,
+  type LocalityDetailResult,
+  LOCALITIES_ORDER_BY,
   type AirportInMunicipio,
   type AirportsByMunicipioResult,
   type ManzanasByAgebResult,
@@ -3402,6 +3407,263 @@ SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC N
       0,
     ),
     airports: formatted,
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Locality grain (v0.2.10) — Censo 2020 ITER sub-municipal surface.
+// Backed by the `censo_localidades` view (~193k rows, see
+// scripts/migrate-censo-views.sql).
+// ---------------------------------------------------------------------------
+
+const LOCALITIES_DEFAULT_LIMIT = 50;
+const LOCALITIES_MAX_LIMIT = 200;
+
+/**
+ * GET /analytics/localities-by-municipio?cve_mun=NNNNN
+ *   &order_by=pobtot|tvivpar|vph_inter|nom_loc|tamloc   (default: pobtot)
+ *   &limit=N                                            (max 200)
+ *
+ * Lists localities inside a municipio with their population/dwelling/internet
+ * surface plus tamloc size class. A typical urban muni has 1-5 localities
+ * (city + outlying); rural munis can have 50-300+ small ranchos.
+ *
+ * INEGI suppresses small-pop locality fields (LSNIEG art. 37). Where a
+ * locality has fewer than ~50 households, derived fields surface as NULL.
+ * The endpoint always returns 200 with possibly empty rows[]; consumers
+ * can render "sin datos" client-side.
+ *
+ * Order-by tradeoffs:
+ *   pobtot  — densest first (default; right for "where do most people live")
+ *   tvivpar — most occupied dwellings (right for "where to lease")
+ *   vph_inter — broadband-connected proxy for income (right for SES analysis)
+ *   tamloc  — INEGI size-code descending (1-14)
+ *   nom_loc — alphabetic for browsing
+ */
+export async function localitiesByMunicipioHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded (ENT01-32 + MUN001-999).`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const orderByRaw = c.req.query("order_by") ?? "pobtot";
+  if (!LOCALITIES_ORDER_BY.includes(orderByRaw as LocalitiesOrderBy)) {
+    throw new HttpError(
+      `order_by inválido "${orderByRaw}". Valores válidos: ${LOCALITIES_ORDER_BY.join(", ")}.`,
+      400,
+      "validation.order_by",
+    );
+  }
+  const orderBy = orderByRaw as LocalitiesOrderBy;
+  const limit = parseLimit(
+    c.req.query("limit"),
+    LOCALITIES_DEFAULT_LIMIT,
+    LOCALITIES_MAX_LIMIT,
+  );
+
+  // ORDER BY direction: ASC for nom_loc (alphabetic browse), DESC for the
+  // numeric metrics. NULLS LAST keeps suppressed-data localities below
+  // those with concrete values regardless of direction.
+  const orderDirection = orderBy === "nom_loc" ? "ASC" : "DESC";
+
+  // W1 (audit, 2026-05-09): explicit ORDER BY on the json_agg aggregate.
+  // The inner ORDER BY + LIMIT picks the right rows; the outer aggregate
+  // ORDER BY guarantees they emerge in order. Without the outer form,
+  // json_agg row order is implementation-dependent — works empirically on
+  // PG12+ but the SQL standard doesn't guarantee aggregate input order.
+  // Sibling pattern (16 sites in this file) hoists ORDER BY into json_agg.
+  const sql = `
+SELECT json_build_object(
+  'total_localities', (SELECT count(*)::int FROM censo_localidades WHERE cve_mun = '${cveMun}'),
+  'localities', COALESCE((
+    SELECT json_agg(row_to_json(r) ORDER BY r.${orderBy} ${orderDirection} NULLS LAST, r.cve_loc ASC) FROM (
+      SELECT cve_loc, nom_loc, tamloc, altitud_m,
+             pobtot, tvivpar, vph_inter
+      FROM censo_localidades
+      WHERE cve_mun = '${cveMun}'
+      ORDER BY ${orderBy} ${orderDirection} NULLS LAST, cve_loc ASC
+      LIMIT ${limit}
+    ) r
+  ), '[]'::json)
+);
+`;
+  const payload = runJsonQuery<{
+    total_localities: number;
+    localities: Array<{
+      cve_loc: string;
+      nom_loc: string;
+      tamloc: number | null;
+      altitud_m: number | null;
+      pobtot: number | null;
+      tvivpar: number | null;
+      vph_inter: number | null;
+    }>;
+  }>(config, sql);
+
+  // psql -t -A returns json_build_object as a single object (not wrapped in
+  // an array). runJsonQuery's empty-stdout fallback returns []; gate that.
+  const totalLocalities =
+    payload && !Array.isArray(payload) && "total_localities" in payload
+      ? Number(payload.total_localities ?? 0)
+      : 0;
+  const rawLocs =
+    payload && !Array.isArray(payload) && "localities" in payload
+      ? payload.localities
+      : [];
+
+  const result: LocalitiesByMunicipioResult = {
+    cve_mun: cveMun,
+    order_by: orderBy,
+    total_localities: totalLocalities,
+    localities: rawLocs.map((r) => ({
+      cve_loc: r.cve_loc,
+      nom_loc: r.nom_loc,
+      tamloc: r.tamloc === null ? null : Number(r.tamloc),
+      altitud_m: r.altitud_m === null ? null : Number(r.altitud_m),
+      pobtot: r.pobtot === null ? null : Number(r.pobtot),
+      tvivpar: r.tvivpar === null ? null : Number(r.tvivpar),
+      vph_inter: r.vph_inter === null ? null : Number(r.vph_inter),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+/**
+ * GET /analytics/locality-detail?cve_loc=NNNNNNNNN
+ *
+ * Single-locality demographic surface — religion, indigenous/afro,
+ * migration, education, health coverage, household assets. Mirrors the
+ * structure of /analytics/ageb-detail's `rezago_social` block but at
+ * locality grain instead of AGEB.
+ *
+ * Returns 404 when the cve_loc isn't found in censo_iter (typo or
+ * synthetic id). Returns 200 with NULL-heavy fields when the locality
+ * exists but INEGI suppressed most attributes (LSNIEG art. 37, ~42% of
+ * the 193k localities have at least religion+language suppressed).
+ */
+export async function localityDetailHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveLoc = c.req.query("cve_loc");
+  if (!cveLoc || !CVE_LOC_RE.test(cveLoc)) {
+    throw new HttpError(
+      `cve_loc inválido "${cveLoc ?? ""}". Debe ser 9 dígitos zero-padded (ENT2 + MUN3 + LOC4).`,
+      400,
+      "validation.cve_loc",
+    );
+  }
+
+  const sql = `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    cve_loc, cve_mun, entidad,
+    nom_loc, nom_mun, nom_ent,
+    tamloc, altitud_m,
+    pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas,
+    pea, pocupada, graproes, tvivhab, tvivpar,
+    pcatolica, pro_crieva, potras_rel, psin_relig,
+    p3ym_hli, p3hlinhe, p3hli_he, phog_ind, pob_afro,
+    pnacent, pnacoe, pres2015, presoe15,
+    p15ym_an, p15ym_se, p18ym_pb,
+    psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
+    vph_inter, vph_autom, vph_refri, vph_lavad, vph_pc, vph_cel, vph_tv, vph_snbien
+  FROM censo_localidades
+  WHERE cve_loc = '${cveLoc}'
+) t;
+`;
+  const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
+    config,
+    sql,
+  );
+  if (!rows || rows.length === 0) {
+    throw new HttpError(
+      `localidad no encontrada para cve_loc="${cveLoc}".`,
+      404,
+      "locality.not_found",
+    );
+  }
+  const r = rows[0];
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+
+  const result: LocalityDetailResult = {
+    cve_loc: String(r.cve_loc),
+    cve_mun: String(r.cve_mun),
+    entidad: String(r.entidad),
+    nom_loc: String(r.nom_loc),
+    nom_mun: String(r.nom_mun),
+    nom_ent: String(r.nom_ent),
+    tamloc: num(r.tamloc),
+    altitud_m: num(r.altitud_m),
+    population: {
+      pobtot: num(r.pobtot),
+      pobfem: num(r.pobfem),
+      pobmas: num(r.pobmas),
+      p_60ymas: num(r.p_60ymas),
+      p_15ymas: num(r.p_15ymas),
+      p_18ymas: num(r.p_18ymas),
+      pea: num(r.pea),
+      pocupada: num(r.pocupada),
+      graproes: num(r.graproes),
+      tvivhab: num(r.tvivhab),
+      tvivpar: num(r.tvivpar),
+    },
+    religion: {
+      pcatolica: num(r.pcatolica),
+      pro_crieva: num(r.pro_crieva),
+      potras_rel: num(r.potras_rel),
+      psin_relig: num(r.psin_relig),
+    },
+    indigenous_afro: {
+      p3ym_hli: num(r.p3ym_hli),
+      p3hlinhe: num(r.p3hlinhe),
+      p3hli_he: num(r.p3hli_he),
+      phog_ind: num(r.phog_ind),
+      pob_afro: num(r.pob_afro),
+    },
+    migration: {
+      pnacent: num(r.pnacent),
+      pnacoe: num(r.pnacoe),
+      pres2015: num(r.pres2015),
+      presoe15: num(r.presoe15),
+    },
+    education: {
+      p15ym_an: num(r.p15ym_an),
+      p15ym_se: num(r.p15ym_se),
+      p18ym_pb: num(r.p18ym_pb),
+    },
+    health_coverage: {
+      psinder: num(r.psinder),
+      pder_ss: num(r.pder_ss),
+      pder_imss: num(r.pder_imss),
+      pder_iste: num(r.pder_iste),
+      pder_segp: num(r.pder_segp),
+      pder_imssb: num(r.pder_imssb),
+      pafil_ipriv: num(r.pafil_ipriv),
+    },
+    assets: {
+      vph_inter: num(r.vph_inter),
+      vph_autom: num(r.vph_autom),
+      vph_refri: num(r.vph_refri),
+      vph_lavad: num(r.vph_lavad),
+      vph_pc: num(r.vph_pc),
+      vph_cel: num(r.vph_cel),
+      vph_tv: num(r.vph_tv),
+      vph_snbien: num(r.vph_snbien),
+    },
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

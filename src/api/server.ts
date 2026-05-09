@@ -54,6 +54,8 @@ import {
   coloniasByMunicipioHandler,
   licensedPharmaciesByAgebHandler,
   licensedPharmaciesByMunicipioHandler,
+  localitiesByMunicipioHandler,
+  localityDetailHandler,
   manzanasByAgebHandler,
   mortalitySummaryHandler,
   mortalityTrendHandler,
@@ -173,6 +175,12 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/airports-by-municipio", (c) =>
     airportsByMunicipioHandler(c, config),
+  );
+  app.get("/analytics/localities-by-municipio", (c) =>
+    localitiesByMunicipioHandler(c, config),
+  );
+  app.get("/analytics/locality-detail", (c) =>
+    localityDetailHandler(c, config),
   );
 
   return app;
