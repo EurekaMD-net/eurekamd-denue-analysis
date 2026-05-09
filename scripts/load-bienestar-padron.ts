@@ -135,33 +135,45 @@ CREATE TABLE bienestar_padron_estatal_trimestral_raw (
  *   2. cve_ent normalized via LPAD to '01'..'32' (matches censo_entidades).
  *   3. `intervenciones` ::numeric handles the decimal-formatted-int CSV quirk.
  *   4. The latest-quarter view uses ROW_NUMBER() with deterministic ordering.
+ *
+ * Audit log (rounds 1-3, closed 2026-05-09):
+ *   - Numeric NULLIF chain guards the project-canon sentinels: '' / 'N/D' /
+ *     'n.d'. CONEVAL '*' deliberately omitted (Bienestar isn't CONEVAL).
+ *     Live probe 2026-05-09: zero rows match `^-?[0-9.]+$` negation across
+ *     all 5 metric cols; re-probe on quarterly refresh.
+ *   - Latest-slice ROW_NUMBER has no terminal tiebreaker — periodo_cve and
+ *     cveent_raw are co-derived with the partition key + fecha so neither
+ *     can break a tie. Producer guarantees one-row-per-(entidad, quarter);
+ *     post-load duplicate guard (step 4 of loadBienestarPadron) hard-fails
+ *     the load if that invariant is violated.
+ *   - No btree on raw table — 748 rows seq-scans optimally; an index would
+ *     be slower than the scan it replaces.
  */
 export const POST_LOAD_SQL_FOR_TEST = `
--- Full panel view: 32 entidades × 23 quarters = ~716 rows after CVEENT<>99 filter.
+-- Full panel view: 32 entidades × 23 quarters = 736 rows after CVEENT<>99 filter.
 -- Defensive: also filter cveent ~ '^[0-9]+$' to drop any future header/blank-row drift.
 DROP VIEW IF EXISTS bienestar_estatal_trimestral CASCADE;
 CREATE VIEW bienestar_estatal_trimestral AS
 SELECT
-  LPAD(cveent, 2, '0')                         AS cve_ent,
-  cveent                                       AS cveent_raw,
-  entidad_etq                                  AS nom_ent_bienestar,
-  beneficiarios::int                           AS beneficiarios,
-  intervenciones::numeric                      AS intervenciones,
-  dependencias::int                            AS dependencias,
-  padrones::int                                AS padrones,
-  programas::int                               AS programas,
-  periodo_cve                                  AS periodo_cve,
-  anio::int                                    AS anio,
-  trimestre                                    AS trimestre,
-  fecha::date                                  AS fecha
+  LPAD(cveent, 2, '0')                                          AS cve_ent,
+  cveent                                                        AS cveent_raw,
+  entidad_etq                                                   AS nom_ent_bienestar,
+  NULLIF(NULLIF(NULLIF(beneficiarios, ''), 'N/D'), 'n.d')::int  AS beneficiarios,
+  NULLIF(NULLIF(NULLIF(intervenciones, ''), 'N/D'), 'n.d')::numeric  AS intervenciones,
+  NULLIF(NULLIF(NULLIF(dependencias, ''), 'N/D'), 'n.d')::int   AS dependencias,
+  NULLIF(NULLIF(NULLIF(padrones, ''), 'N/D'), 'n.d')::int       AS padrones,
+  NULLIF(NULLIF(NULLIF(programas, ''), 'N/D'), 'n.d')::int      AS programas,
+  periodo_cve                                                   AS periodo_cve,
+  NULLIF(anio, '')::int                                         AS anio,
+  trimestre                                                     AS trimestre,
+  NULLIF(fecha, '')::date                                       AS fecha
 FROM bienestar_padron_estatal_trimestral_raw
 WHERE cveent ~ '^[0-9]+$'
   AND cveent::int <> 99;
 
 -- Latest-quarter slice: one row per entidad, the most recent fecha.
 -- Powers /analytics/entidad-detail's bienestar_latest nested category.
--- ROW_NUMBER() with PARTITION BY cve_ent ORDER BY fecha DESC, periodo_cve DESC
--- guarantees one row per entidad even if two rows share fecha (stable tiebreak).
+-- See header audit log for the no-tiebreaker rationale.
 DROP VIEW IF EXISTS bienestar_estatal_latest CASCADE;
 CREATE VIEW bienestar_estatal_latest AS
 SELECT cve_ent, nom_ent_bienestar,
@@ -171,7 +183,7 @@ FROM (
   SELECT *,
          ROW_NUMBER() OVER (
            PARTITION BY cve_ent
-           ORDER BY fecha DESC NULLS LAST, periodo_cve DESC
+           ORDER BY fecha DESC NULLS LAST
          ) AS rn
   FROM bienestar_estatal_trimestral
 ) t
@@ -242,7 +254,10 @@ export async function loadBienestarPadron(
         "-c",
         `\\copy bienestar_padron_estatal_trimestral_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
       ],
-      { encoding: "utf-8", timeout: 60_000 },
+      // W2 audit (ronda 1): aligned to load-coneval.ts \\copy timeout (5 min).
+      // Current bienestar CSV is 114 KB and loads in <1s, but a future quarterly
+      // refresh could ship multi-year backfill or operator-supplied snapshot.
+      { encoding: "utf-8", timeout: 5 * 60_000 },
     );
   } finally {
     try {
@@ -274,7 +289,12 @@ export async function loadBienestarPadron(
     { encoding: "utf-8", timeout: 60_000 },
   );
 
-  // 4. Verify counts
+  // 4. Verify counts + post-load duplicate guard.
+  //    The bienestar_estatal_latest view ROW_NUMBER tiebreaker was removed in
+  //    ronda 2 audit fix because no field can break a (cve_ent, fecha) tie.
+  //    Instead: hard-fail the load if any (cve_ent, fecha) appears twice.
+  //    Producer invariant says this is impossible; if it fires, the source
+  //    CSV is corrupted and the operator needs to investigate.
   const cnt = (sql: string): number => {
     const out = execFileSync(
       "docker",
@@ -301,6 +321,19 @@ export async function loadBienestarPadron(
   };
   const panel_rows = cnt("SELECT COUNT(*) FROM bienestar_estatal_trimestral;");
   const latest_rows = cnt("SELECT COUNT(*) FROM bienestar_estatal_latest;");
+  const duplicate_groups = cnt(
+    `SELECT COUNT(*) FROM (
+       SELECT cve_ent, fecha
+       FROM bienestar_estatal_trimestral
+       GROUP BY cve_ent, fecha
+       HAVING COUNT(*) > 1
+     ) dup;`,
+  );
+  if (duplicate_groups > 0) {
+    throw new Error(
+      `loadBienestarPadron: producer invariant violated — ${duplicate_groups} (cve_ent, fecha) groups have >1 row. Source CSV is corrupted; do NOT trust panel_rows=${panel_rows}.`,
+    );
+  }
   return {
     panel_rows,
     latest_rows,

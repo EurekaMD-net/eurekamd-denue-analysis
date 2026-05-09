@@ -1098,6 +1098,11 @@ export interface LocalitiesByMunicipioResult {
  * Full demographic surface returned by /analytics/locality-detail.
  * Every numeric field is nullable: INEGI suppresses low-count localities
  * (~42% of the 193k ITER rows have suppressed religion/asset fields).
+ *
+ * No `bienestar_latest` field: Padrón Único de Bienestar (v0.2.11) publishes
+ * at entidad grain only; broadcasting state-level beneficiarios down to a
+ * locality would violate the project's grain-fidelity stance (cf. v0.2.10
+ * tres-grain symmetry — each grain surfaces only data native to that grain).
  */
 export interface LocalityDetailResult {
   cve_loc: string;
@@ -1178,6 +1183,10 @@ export interface LocalityDetailResult {
  * Suppression handling: muni-grain almost never hits 'N/D' (only 152
  * locality rows do — nothing rolls up at muni). All fields nullable
  * defensively in case a future census wave adds suppression.
+ *
+ * No `bienestar_latest` field: Padrón Único de Bienestar (v0.2.11) publishes
+ * at entidad grain only; broadcasting state-level beneficiarios down to a
+ * municipio would violate the project's grain-fidelity stance.
  */
 export interface MunicipioDetailResult {
   /** 5-char zero-padded entidad+muni key (e.g. "09015"). */
