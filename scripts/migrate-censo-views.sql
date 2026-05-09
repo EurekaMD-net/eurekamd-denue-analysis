@@ -113,7 +113,14 @@ SELECT
   NULLIF(NULLIF(vph_stvp,   ''), 'N/D')::int    AS vph_stvp,     -- TV de paga
   NULLIF(NULLIF(vph_spmvpi, ''), 'N/D')::int    AS vph_spmvpi,   -- streaming
   NULLIF(NULLIF(vph_cvj,    ''), 'N/D')::int    AS vph_cvj,      -- consola
-  NULLIF(NULLIF(vph_snbien, ''), 'N/D')::int    AS vph_snbien    -- sin bienes
+  NULLIF(NULLIF(vph_snbien, ''), 'N/D')::int    AS vph_snbien,   -- sin bienes
+
+  -- nom_ent appended at the end (CREATE OR REPLACE VIEW can only add cols
+  -- at the END of the SELECT list — not insert in the middle). Surfaces
+  -- the human-readable entidad name for /analytics/municipio-detail
+  -- responses, mirroring censo_localidades which already exposes nom_ent.
+  -- Audit W1 (2026-05-09).
+  nom_ent
 FROM censo_iter
 WHERE loc = '0000' AND mun <> '000';
 

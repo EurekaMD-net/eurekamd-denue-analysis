@@ -62,6 +62,7 @@ import type {
   ManzanasByAgebResult,
   MortalitySummaryResult,
   MortalityTrendResult,
+  MunicipioDetailResult,
   MunicipiosAnalyticsResult,
   NationalTreemapResult,
   OpportunityByAgebResult,
@@ -4418,6 +4419,370 @@ describe("Locality endpoints — SQL-injection contract (v0.2.10)", () => {
       const app = createServer(CONFIG);
       const res = await app.request(
         `/analytics/locality-detail?cve_loc=${encodeURIComponent(v)}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(400);
+      expect(mockExec).not.toHaveBeenCalled();
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/municipio-detail  (v0.2.10 muni-side, surfaces extended view cols)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/municipio-detail (v0.2.10)", () => {
+  it("rejects missing cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed cve_mun (4 chars)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=0900", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects letter chars in cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09a07", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 with structured code when municipio not found (R1 audit)", async () => {
+    // 32999 — entidad 32 valid, muni 999 doesn't exist. Keeps the
+    // CVE_MUN_RE digit-shape gate satisfied so we exercise the
+    // empty-result-set 404 path instead of the validation 400 path.
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=32999", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    // Pin the error.code so consumers / observability tooling that filter
+    // on it don't break silently if the throw ever swaps strings. Mirrors
+    // the codebase's <resource>.not_found convention.
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("municipio.not_found");
+  });
+
+  it("returns full muni demographic surface with all 9 categories nested", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          entidad: "09",
+          mun: "015",
+          nom_mun: "Cuauhtémoc",
+          nom_ent: "Ciudad de México",
+          pobtot: "545884",
+          pobfem: "292000",
+          pobmas: "253884",
+          p_60ymas: "100000",
+          p_15ymas: "450000",
+          p_18ymas: "420000",
+          pea: "300000",
+          pocupada: "290000",
+          graproes: "12.8",
+          tvivhab: "165000",
+          tvivpar: "180000",
+          pcatolica: "378996",
+          pro_crieva: "40236",
+          potras_rel: "8000",
+          psin_relig: "100000",
+          p3ym_hli: "9062",
+          p3hlinhe: "100",
+          p3hli_he: "8962",
+          phog_ind: "20000",
+          pob_afro: "12000",
+          pnacent: "300000",
+          pnacoe: "110598",
+          pres2015: "510000",
+          presoe15: "30000",
+          p15ym_an: "5000",
+          p15ym_se: "3000",
+          p15pri_in: "20000",
+          p15pri_co: "60000",
+          p15sec_in: "15000",
+          p15sec_co: "100000",
+          p18ym_pb: "200000",
+          p12ym_solt: "150000",
+          p12ym_casa: "180000",
+          p12ym_sepa: "60000",
+          pcon_disc: "30000",
+          pcon_limi: "50000",
+          psind_lim: "460000",
+          psinder: "153800",
+          pder_ss: "390000",
+          pder_imss: "240000",
+          pder_iste: "30000",
+          pder_segp: "100000",
+          pder_imssb: "1000",
+          pafil_ipriv: "20000",
+          vph_inter: "157682",
+          vph_autom: "80000",
+          vph_refri: "170000",
+          vph_lavad: "150000",
+          vph_hmicro: "120000",
+          vph_moto: "20000",
+          vph_bici: "30000",
+          vph_radio: "100000",
+          vph_tv: "175000",
+          vph_pc: "70000",
+          vph_telef: "50000",
+          vph_cel: "175000",
+          vph_stvp: "60000",
+          vph_spmvpi: "50000",
+          vph_cvj: "30000",
+          vph_snbien: "200",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.cve_mun).toBe("09015");
+    expect(body.entidad).toBe("09");
+    expect(body.mun).toBe("015"); // W2 audit
+    expect(body.nom_mun).toBe("Cuauhtémoc");
+    expect(body.nom_ent).toBe("Ciudad de México"); // W1 audit
+    // R2 audit: entidad must equal cve_mun first 2 chars. Defends against
+    // a future view bug where entidad and cve_mun could drift apart.
+    expect(body.entidad).toBe(body.cve_mun.slice(0, 2));
+    // Pin one field per category to catch mis-nesting / typos.
+    expect(body.population.pobtot).toBe(545884);
+    expect(body.population.graproes).toBeCloseTo(12.8);
+    expect(body.religion.pcatolica).toBe(378996);
+    expect(body.indigenous_afro.p3ym_hli).toBe(9062);
+    expect(body.migration.pnacoe).toBe(110598);
+    // Education detail — the v0.2.10 cols not exposed at locality grain.
+    expect(body.education.p15pri_in).toBe(20000);
+    expect(body.education.p15sec_co).toBe(100000);
+    // Civil status + disability — muni-only categories.
+    expect(body.civil_status.p12ym_casa).toBe(180000);
+    expect(body.disability.psind_lim).toBe(460000);
+    expect(body.health_coverage.psinder).toBe(153800);
+    // Asset detail beyond locality (microondas, moto, bici, etc.).
+    expect(body.assets.vph_inter).toBe(157682);
+    expect(body.assets.vph_hmicro).toBe(120000);
+    expect(body.assets.vph_moto).toBe(20000);
+    expect(body.assets.vph_cvj).toBe(30000);
+  });
+
+  it("preserves NULLs across all categories (defensive — muni rarely hits N/D)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "31999",
+          entidad: "31",
+          mun: "999",
+          nom_mun: "Test Muni",
+          nom_ent: "Test Entidad",
+          pobtot: "100",
+          pobfem: null,
+          pobmas: null,
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p15pri_in: null,
+          p15pri_co: null,
+          p15sec_in: null,
+          p15sec_co: null,
+          p18ym_pb: null,
+          p12ym_solt: null,
+          p12ym_casa: null,
+          p12ym_sepa: null,
+          pcon_disc: null,
+          pcon_limi: null,
+          psind_lim: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_hmicro: null,
+          vph_moto: null,
+          vph_bici: null,
+          vph_radio: null,
+          vph_tv: null,
+          vph_pc: null,
+          vph_telef: null,
+          vph_cel: null,
+          vph_stvp: null,
+          vph_spmvpi: null,
+          vph_cvj: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=31999", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.population.pobtot).toBe(100);
+    expect(body.religion.pcatolica).toBeNull();
+    expect(body.education.p15pri_in).toBeNull();
+    expect(body.civil_status.p12ym_solt).toBeNull();
+    expect(body.disability.pcon_disc).toBeNull();
+    expect(body.assets.vph_hmicro).toBeNull();
+  });
+
+  it("emits FROM censo_municipios + literal cve_mun in WHERE", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=20067", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM censo_municipios");
+    expect(sql).toContain("WHERE cve_mun = '20067'");
+    // Pin that the muni-only education detail cols are SELECTed (drift
+    // guard: a future SELECT-list cleanup must not silently drop them).
+    expect(sql).toContain("p15pri_in");
+    expect(sql).toContain("p15sec_co");
+    expect(sql).toContain("vph_hmicro");
+  });
+
+  it("emits Cache-Control + Vary headers on success", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          entidad: "09",
+          mun: "015",
+          nom_mun: "Cuauhtémoc",
+          nom_ent: "Ciudad de México",
+          pobtot: "545884",
+          pobfem: null,
+          pobmas: null,
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p15pri_in: null,
+          p15pri_co: null,
+          p15sec_in: null,
+          p15sec_co: null,
+          p18ym_pb: null,
+          p12ym_solt: null,
+          p12ym_casa: null,
+          p12ym_sepa: null,
+          pcon_disc: null,
+          pcon_limi: null,
+          psind_lim: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_hmicro: null,
+          vph_moto: null,
+          vph_bici: null,
+          vph_radio: null,
+          vph_tv: null,
+          vph_pc: null,
+          vph_telef: null,
+          vph_cel: null,
+          vph_stvp: null,
+          vph_spmvpi: null,
+          vph_cvj: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+
+  // SQL-injection contract — keeps full parity with the locality vectors
+  // (S2 audit). Two vectors added: short-prefix injection and the digits+
+  // letter-suffix R1 letter pattern, both already pinned for locality.
+  const INJECTION_VECTORS = [
+    "09007'; DROP TABLE censo_iter--",
+    "09007 OR 1=1",
+    "09007;SELECT 1",
+    "0'; DROP TABLE x--",
+    "../../../../etc/passwd",
+    "%27%20OR%201%3D1",
+    "0900a",
+    "ABCDE",
+  ];
+  for (const v of INJECTION_VECTORS) {
+    it(`rejects "${v}" before SQL composition`, async () => {
+      const app = createServer(CONFIG);
+      const res = await app.request(
+        `/analytics/municipio-detail?cve_mun=${encodeURIComponent(v)}`,
         { headers: AUTH },
       );
       expect(res.status).toBe(400);

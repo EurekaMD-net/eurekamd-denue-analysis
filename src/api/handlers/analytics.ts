@@ -94,6 +94,7 @@ import {
   type LocalitiesByMunicipioResult,
   type LocalitiesOrderBy,
   type LocalityDetailResult,
+  type MunicipioDetailResult,
   LOCALITIES_ORDER_BY,
   type AirportInMunicipio,
   type AirportsByMunicipioResult,
@@ -3662,6 +3663,164 @@ SELECT json_agg(row_to_json(t)) FROM (
       vph_pc: num(r.vph_pc),
       vph_cel: num(r.vph_cel),
       vph_tv: num(r.vph_tv),
+      vph_snbien: num(r.vph_snbien),
+    },
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "X-Api-Key");
+  return c.json(result);
+}
+
+/**
+ * GET /analytics/municipio-detail?cve_mun=NNNNN
+ *
+ * Single-municipio demographic surface — same nested-category shape as
+ * /analytics/locality-detail but at muni grain. Backed by the v0.2.10
+ * `censo_municipios` view (~50 cast cols from the 287-col ITER raw).
+ *
+ * Returns 404 when the cve_mun isn't found in censo_iter (typo or
+ * pre-2020 muni that didn't exist in 2020 census). Returns 200 with the
+ * full nested structure otherwise — muni-grain almost never hits INEGI's
+ * 'N/D' suppression sentinel (only locality rows do), so most fields
+ * come back populated.
+ *
+ * Adds vs locality-detail: education detail breaks primaria/secundaria
+ * incompleta vs completa (`p15pri_in`/`p15pri_co`/`p15sec_in`/`p15sec_co`),
+ * civil status (`p12ym_*`), disability summary (`pcon_disc`/`pcon_limi`/
+ * `psind_lim`), and full asset list including microondas/moto/bici/radio/
+ * teléfono fijo/TV de paga/streaming/consola. Drops lat/lon/altitud/tamloc
+ * (locality-only attributes).
+ */
+export async function municipioDetailHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded (ENT01-32 + MUN001-999).`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const sql = `
+SELECT json_agg(row_to_json(t)) FROM (
+  SELECT
+    cve_mun, entidad, mun, nom_mun, nom_ent,
+    pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas,
+    pea, pocupada, graproes, tvivhab, tvivpar,
+    pcatolica, pro_crieva, potras_rel, psin_relig,
+    p3ym_hli, p3hlinhe, p3hli_he, phog_ind, pob_afro,
+    pnacent, pnacoe, pres2015, presoe15,
+    p15ym_an, p15ym_se, p15pri_in, p15pri_co, p15sec_in, p15sec_co, p18ym_pb,
+    p12ym_solt, p12ym_casa, p12ym_sepa,
+    pcon_disc, pcon_limi, psind_lim,
+    psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
+    vph_inter, vph_autom, vph_refri, vph_lavad, vph_hmicro,
+    vph_moto, vph_bici, vph_radio, vph_tv, vph_pc, vph_telef, vph_cel,
+    vph_stvp, vph_spmvpi, vph_cvj, vph_snbien
+  FROM censo_municipios
+  WHERE cve_mun = '${cveMun}'
+) t;
+`;
+  const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
+    config,
+    sql,
+  );
+  if (!rows || rows.length === 0) {
+    throw new HttpError(
+      `municipio no encontrado para cve_mun="${cveMun}".`,
+      404,
+      "municipio.not_found",
+    );
+  }
+  const r = rows[0];
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+
+  const result: MunicipioDetailResult = {
+    cve_mun: String(r.cve_mun),
+    entidad: String(r.entidad),
+    mun: String(r.mun),
+    nom_mun: String(r.nom_mun),
+    nom_ent: String(r.nom_ent),
+    population: {
+      pobtot: num(r.pobtot),
+      pobfem: num(r.pobfem),
+      pobmas: num(r.pobmas),
+      p_60ymas: num(r.p_60ymas),
+      p_15ymas: num(r.p_15ymas),
+      p_18ymas: num(r.p_18ymas),
+      pea: num(r.pea),
+      pocupada: num(r.pocupada),
+      graproes: num(r.graproes),
+      tvivhab: num(r.tvivhab),
+      tvivpar: num(r.tvivpar),
+    },
+    religion: {
+      pcatolica: num(r.pcatolica),
+      pro_crieva: num(r.pro_crieva),
+      potras_rel: num(r.potras_rel),
+      psin_relig: num(r.psin_relig),
+    },
+    indigenous_afro: {
+      p3ym_hli: num(r.p3ym_hli),
+      p3hlinhe: num(r.p3hlinhe),
+      p3hli_he: num(r.p3hli_he),
+      phog_ind: num(r.phog_ind),
+      pob_afro: num(r.pob_afro),
+    },
+    migration: {
+      pnacent: num(r.pnacent),
+      pnacoe: num(r.pnacoe),
+      pres2015: num(r.pres2015),
+      presoe15: num(r.presoe15),
+    },
+    education: {
+      p15ym_an: num(r.p15ym_an),
+      p15ym_se: num(r.p15ym_se),
+      p15pri_in: num(r.p15pri_in),
+      p15pri_co: num(r.p15pri_co),
+      p15sec_in: num(r.p15sec_in),
+      p15sec_co: num(r.p15sec_co),
+      p18ym_pb: num(r.p18ym_pb),
+    },
+    civil_status: {
+      p12ym_solt: num(r.p12ym_solt),
+      p12ym_casa: num(r.p12ym_casa),
+      p12ym_sepa: num(r.p12ym_sepa),
+    },
+    disability: {
+      pcon_disc: num(r.pcon_disc),
+      pcon_limi: num(r.pcon_limi),
+      psind_lim: num(r.psind_lim),
+    },
+    health_coverage: {
+      psinder: num(r.psinder),
+      pder_ss: num(r.pder_ss),
+      pder_imss: num(r.pder_imss),
+      pder_iste: num(r.pder_iste),
+      pder_segp: num(r.pder_segp),
+      pder_imssb: num(r.pder_imssb),
+      pafil_ipriv: num(r.pafil_ipriv),
+    },
+    assets: {
+      vph_inter: num(r.vph_inter),
+      vph_autom: num(r.vph_autom),
+      vph_refri: num(r.vph_refri),
+      vph_lavad: num(r.vph_lavad),
+      vph_hmicro: num(r.vph_hmicro),
+      vph_moto: num(r.vph_moto),
+      vph_bici: num(r.vph_bici),
+      vph_radio: num(r.vph_radio),
+      vph_tv: num(r.vph_tv),
+      vph_pc: num(r.vph_pc),
+      vph_telef: num(r.vph_telef),
+      vph_cel: num(r.vph_cel),
+      vph_stvp: num(r.vph_stvp),
+      vph_spmvpi: num(r.vph_spmvpi),
+      vph_cvj: num(r.vph_cvj),
       vph_snbien: num(r.vph_snbien),
     },
   };

@@ -59,6 +59,7 @@ import {
   manzanasByAgebHandler,
   mortalitySummaryHandler,
   mortalityTrendHandler,
+  municipioDetailHandler,
   municipiosAnalyticsHandler,
   nationalTreemapHandler,
   opportunityByAgebHandler,
@@ -181,6 +182,9 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/locality-detail", (c) =>
     localityDetailHandler(c, config),
+  );
+  app.get("/analytics/municipio-detail", (c) =>
+    municipioDetailHandler(c, config),
   );
 
   return app;
