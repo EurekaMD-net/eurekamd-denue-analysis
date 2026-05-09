@@ -3863,21 +3863,34 @@ export async function entidadDetailHandler(
   const sql = `
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT
-    cve_ent, entidad, nom_ent,
-    pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas,
-    pea, pocupada, graproes, tvivhab, tvivpar,
-    pcatolica, pro_crieva, potras_rel, psin_relig,
-    p3ym_hli, p3hlinhe, p3hli_he, phog_ind, pob_afro,
-    pnacent, pnacoe, pres2015, presoe15,
-    p15ym_an, p15ym_se, p15pri_in, p15pri_co, p15sec_in, p15sec_co, p18ym_pb,
-    p12ym_solt, p12ym_casa, p12ym_sepa,
-    pcon_disc, pcon_limi, psind_lim,
-    psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
-    vph_inter, vph_autom, vph_refri, vph_lavad, vph_hmicro,
-    vph_moto, vph_bici, vph_radio, vph_tv, vph_pc, vph_telef, vph_cel,
-    vph_stvp, vph_spmvpi, vph_cvj, vph_snbien
-  FROM censo_entidades
-  WHERE cve_ent = '${cveEnt}'
+    ce.cve_ent, ce.entidad, ce.nom_ent,
+    ce.pobtot, ce.pobfem, ce.pobmas, ce.p_60ymas, ce.p_15ymas, ce.p_18ymas,
+    ce.pea, ce.pocupada, ce.graproes, ce.tvivhab, ce.tvivpar,
+    ce.pcatolica, ce.pro_crieva, ce.potras_rel, ce.psin_relig,
+    ce.p3ym_hli, ce.p3hlinhe, ce.p3hli_he, ce.phog_ind, ce.pob_afro,
+    ce.pnacent, ce.pnacoe, ce.pres2015, ce.presoe15,
+    ce.p15ym_an, ce.p15ym_se, ce.p15pri_in, ce.p15pri_co,
+    ce.p15sec_in, ce.p15sec_co, ce.p18ym_pb,
+    ce.p12ym_solt, ce.p12ym_casa, ce.p12ym_sepa,
+    ce.pcon_disc, ce.pcon_limi, ce.psind_lim,
+    ce.psinder, ce.pder_ss, ce.pder_imss, ce.pder_iste,
+    ce.pder_segp, ce.pder_imssb, ce.pafil_ipriv,
+    ce.vph_inter, ce.vph_autom, ce.vph_refri, ce.vph_lavad, ce.vph_hmicro,
+    ce.vph_moto, ce.vph_bici, ce.vph_radio, ce.vph_tv,
+    ce.vph_pc, ce.vph_telef, ce.vph_cel,
+    ce.vph_stvp, ce.vph_spmvpi, ce.vph_cvj, ce.vph_snbien,
+    bl.periodo_cve     AS bl_periodo_cve,
+    bl.anio            AS bl_anio,
+    bl.trimestre       AS bl_trimestre,
+    bl.fecha           AS bl_fecha,
+    bl.beneficiarios   AS bl_beneficiarios,
+    bl.intervenciones  AS bl_intervenciones,
+    bl.dependencias    AS bl_dependencias,
+    bl.padrones        AS bl_padrones,
+    bl.programas       AS bl_programas
+  FROM censo_entidades ce
+  LEFT JOIN bienestar_estatal_latest bl ON bl.cve_ent = ce.cve_ent
+  WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
   const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
@@ -3894,6 +3907,8 @@ SELECT json_agg(row_to_json(t)) FROM (
   const r = rows[0];
   const num = (v: unknown): number | null =>
     v === null || v === undefined ? null : Number(v);
+  const str = (v: unknown): string | null =>
+    v === null || v === undefined ? null : String(v);
 
   const result: EntidadDetailResult = {
     cve_ent: String(r.cve_ent),
@@ -3976,6 +3991,17 @@ SELECT json_agg(row_to_json(t)) FROM (
       vph_spmvpi: num(r.vph_spmvpi),
       vph_cvj: num(r.vph_cvj),
       vph_snbien: num(r.vph_snbien),
+    },
+    bienestar_latest: {
+      periodo_cve: str(r.bl_periodo_cve),
+      anio: num(r.bl_anio),
+      trimestre: str(r.bl_trimestre),
+      fecha: str(r.bl_fecha),
+      beneficiarios: num(r.bl_beneficiarios),
+      intervenciones: num(r.bl_intervenciones),
+      dependencias: num(r.bl_dependencias),
+      padrones: num(r.bl_padrones),
+      programas: num(r.bl_programas),
     },
   };
   c.header("Cache-Control", "public, max-age=3600");

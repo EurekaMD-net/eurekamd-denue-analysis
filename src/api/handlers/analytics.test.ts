@@ -5039,7 +5039,7 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
     expect(body.assets.vph_hmicro).toBeNull();
   });
 
-  it("emits FROM censo_entidades + literal cve_ent in WHERE", async () => {
+  it("emits FROM censo_entidades + literal cve_ent in WHERE + bienestar JOIN (v0.2.11)", async () => {
     mockExec.mockReturnValue(JSON.stringify([]));
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/entidad-detail?cve_ent=07", {
@@ -5048,8 +5048,14 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
     expect(res.status).toBe(404);
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
-    expect(sql).toContain("FROM censo_entidades");
-    expect(sql).toContain("WHERE cve_ent = '07'");
+    expect(sql).toContain("FROM censo_entidades ce");
+    expect(sql).toContain("WHERE ce.cve_ent = '07'");
+    // v0.2.11: LEFT JOIN brings in latest-quarter bienestar metrics. LEFT
+    // (not inner) so entidades without a matching panel row still resolve.
+    expect(sql).toContain("LEFT JOIN bienestar_estatal_latest bl");
+    expect(sql).toContain("ON bl.cve_ent = ce.cve_ent");
+    expect(sql).toContain("bl.beneficiarios   AS bl_beneficiarios");
+    expect(sql).toContain("bl.periodo_cve     AS bl_periodo_cve");
     // Drift guard: the entidad-only education + asset detail cols must
     // appear in the SELECT list. A future cleanup that drops them would
     // silently truncate the response surface.
@@ -5163,4 +5169,192 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
       expect(mockExec).not.toHaveBeenCalled();
     });
   }
+
+  // -------------------------------------------------------------------------
+  // v0.2.11: bienestar_latest nested category (Padrón Único de Bienestar)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Build a minimal mock row for entidad-detail with all censo fields null
+   * and bienestar_latest fields filled to a plausible CDMX 2024Q3 shape.
+   * Keeps tests focused on bienestar surface without re-asserting the entire
+   * 60+ field censo surface (covered by tests above).
+   */
+  function bienestarMockRow(overrides: Record<string, unknown> = {}) {
+    const censoNullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ];
+    const base: Record<string, unknown> = {
+      cve_ent: "09",
+      entidad: "09",
+      nom_ent: "Ciudad de México",
+    };
+    for (const f of censoNullFields) base[f] = null;
+    base.bl_periodo_cve = "2024T3";
+    base.bl_anio = "2024";
+    base.bl_trimestre = "Julio-Septiembre";
+    base.bl_fecha = "2024-09-30";
+    base.bl_beneficiarios = "3500000";
+    base.bl_intervenciones = "12500000";
+    base.bl_dependencias = "11";
+    base.bl_padrones = "27";
+    base.bl_programas = "23";
+    return { ...base, ...overrides };
+  }
+
+  it("returns bienestar_latest nested category with all 9 fields populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([bienestarMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.bienestar_latest.periodo_cve).toBe("2024T3");
+    expect(body.bienestar_latest.anio).toBe(2024);
+    expect(body.bienestar_latest.trimestre).toBe("Julio-Septiembre");
+    expect(body.bienestar_latest.fecha).toBe("2024-09-30");
+    expect(body.bienestar_latest.beneficiarios).toBe(3500000);
+    expect(body.bienestar_latest.intervenciones).toBe(12500000);
+    expect(body.bienestar_latest.dependencias).toBe(11);
+    expect(body.bienestar_latest.padrones).toBe(27);
+    expect(body.bienestar_latest.programas).toBe(23);
+  });
+
+  it("preserves NULLs across all 9 bienestar_latest fields when LEFT JOIN misses", async () => {
+    // LEFT JOIN ensures the entidad row still resolves when no bienestar
+    // panel row exists (e.g. coverage gap, future entidad missing from
+    // CSV refresh). All 9 fields surface as null — no 404, no exception.
+    const overrides: Record<string, unknown> = {
+      bl_periodo_cve: null,
+      bl_anio: null,
+      bl_trimestre: null,
+      bl_fecha: null,
+      bl_beneficiarios: null,
+      bl_intervenciones: null,
+      bl_dependencias: null,
+      bl_padrones: null,
+      bl_programas: null,
+    };
+    mockExec.mockReturnValue(JSON.stringify([bienestarMockRow(overrides)]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.bienestar_latest.periodo_cve).toBeNull();
+    expect(body.bienestar_latest.anio).toBeNull();
+    expect(body.bienestar_latest.trimestre).toBeNull();
+    expect(body.bienestar_latest.fecha).toBeNull();
+    expect(body.bienestar_latest.beneficiarios).toBeNull();
+    expect(body.bienestar_latest.intervenciones).toBeNull();
+    expect(body.bienestar_latest.dependencias).toBeNull();
+    expect(body.bienestar_latest.padrones).toBeNull();
+    expect(body.bienestar_latest.programas).toBeNull();
+  });
+
+  it("preserves intervenciones decimal precision through JSON pipeline", async () => {
+    // Source CSV ships intervenciones as `1851607.0`; the view casts via
+    // ::numeric, which preserves the decimal type. JSON serialization
+    // turns it back into a number — confirm fractional values round-trip.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        bienestarMockRow({
+          bl_intervenciones: "1851607.5", // synthetic fractional
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.bienestar_latest.intervenciones).toBeCloseTo(1851607.5);
+  });
+
+  it("emits all 9 bl_* aliases in SELECT list (drift guard)", async () => {
+    // If a future refactor removes bienestar_latest fields from the SELECT
+    // list, the type still includes them — the response would silently
+    // surface all-null instead of erroring. Pin every column name.
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    for (const col of [
+      "bl_periodo_cve",
+      "bl_anio",
+      "bl_trimestre",
+      "bl_fecha",
+      "bl_beneficiarios",
+      "bl_intervenciones",
+      "bl_dependencias",
+      "bl_padrones",
+      "bl_programas",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
 });

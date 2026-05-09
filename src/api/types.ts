@@ -1368,6 +1368,36 @@ export interface EntidadDetailResult {
     vph_cvj: number | null;
     vph_snbien: number | null;
   };
+  /**
+   * Federal welfare program coverage for the most-recent quarter available in
+   * the Padrón Único de Bienestar panel (v0.2.11). All fields are nullable
+   * because the JOIN is LEFT — an entidad without a corresponding bienestar
+   * row (e.g. coverage gap) yields all-null rather than a 404.
+   *
+   * Source: datos.gob.mx Padrón Único de Bienestar (entidad × trimestre,
+   * 2019Q1+). National-rolled CVEENT=99 is excluded by the underlying view.
+   *
+   * - periodo_cve: e.g. "2024T3"
+   * - anio + trimestre: redundant decomposition for chart axes
+   * - fecha: ISO end-of-quarter date
+   * - beneficiarios: distinct people receiving any program
+   * - intervenciones: program-event participations (one person can have
+   *   multiple intervenciones across programs)
+   * - dependencias: federal agencies operating that quarter
+   * - padrones: registries reporting that quarter
+   * - programas: distinct programs delivered
+   */
+  bienestar_latest: {
+    periodo_cve: string | null;
+    anio: number | null;
+    trimestre: string | null;
+    fecha: string | null;
+    beneficiarios: number | null;
+    intervenciones: number | null;
+    dependencias: number | null;
+    padrones: number | null;
+    programas: number | null;
+  };
 }
 
 // ---------------------------------------------------------------------------
