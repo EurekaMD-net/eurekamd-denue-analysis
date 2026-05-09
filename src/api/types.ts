@@ -1270,6 +1270,106 @@ export interface MunicipioDetailResult {
   };
 }
 
+/**
+ * Full demographic surface for a single entidad federativa. Same nested
+ * category shape as `MunicipioDetailResult` but at state grain — backed
+ * by `censo_entidades` (32 rows, one per state).
+ *
+ * Drops vs muni: cve_mun, mun, nom_mun (muni-grain identity). Keeps the
+ * full demographic surface including civil_status / disability /
+ * education-detail / extended-asset list.
+ *
+ * Suppression: entidad rolls cover millions of households; INEGI 'N/D'
+ * essentially never fires. Fields are still nullable for defensive parity
+ * with sibling detail responses.
+ */
+export interface EntidadDetailResult {
+  /** 2-char zero-padded entidad code (e.g. "09" for CDMX). */
+  cve_ent: string;
+  /** Same value as `cve_ent` — surfaced redundantly to mirror sibling shape. */
+  entidad: string;
+  /** Human-readable entidad name (e.g. "Ciudad de México"). */
+  nom_ent: string;
+  population: {
+    pobtot: number | null;
+    pobfem: number | null;
+    pobmas: number | null;
+    p_60ymas: number | null;
+    p_15ymas: number | null;
+    p_18ymas: number | null;
+    pea: number | null;
+    pocupada: number | null;
+    graproes: number | null;
+    tvivhab: number | null;
+    tvivpar: number | null;
+  };
+  religion: {
+    pcatolica: number | null;
+    pro_crieva: number | null;
+    potras_rel: number | null;
+    psin_relig: number | null;
+  };
+  indigenous_afro: {
+    p3ym_hli: number | null;
+    p3hlinhe: number | null;
+    p3hli_he: number | null;
+    phog_ind: number | null;
+    pob_afro: number | null;
+  };
+  migration: {
+    pnacent: number | null;
+    pnacoe: number | null;
+    pres2015: number | null;
+    presoe15: number | null;
+  };
+  education: {
+    p15ym_an: number | null;
+    p15ym_se: number | null;
+    p15pri_in: number | null;
+    p15pri_co: number | null;
+    p15sec_in: number | null;
+    p15sec_co: number | null;
+    p18ym_pb: number | null;
+  };
+  civil_status: {
+    p12ym_solt: number | null;
+    p12ym_casa: number | null;
+    p12ym_sepa: number | null;
+  };
+  disability: {
+    pcon_disc: number | null;
+    pcon_limi: number | null;
+    psind_lim: number | null;
+  };
+  health_coverage: {
+    psinder: number | null;
+    pder_ss: number | null;
+    pder_imss: number | null;
+    pder_iste: number | null;
+    pder_segp: number | null;
+    pder_imssb: number | null;
+    pafil_ipriv: number | null;
+  };
+  assets: {
+    vph_inter: number | null;
+    vph_autom: number | null;
+    vph_refri: number | null;
+    vph_lavad: number | null;
+    vph_hmicro: number | null;
+    vph_moto: number | null;
+    vph_bici: number | null;
+    vph_radio: number | null;
+    vph_tv: number | null;
+    vph_pc: number | null;
+    vph_telef: number | null;
+    vph_cel: number | null;
+    vph_stvp: number | null;
+    vph_spmvpi: number | null;
+    vph_cvj: number | null;
+    vph_snbien: number | null;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tiles
 // ---------------------------------------------------------------------------

@@ -232,6 +232,110 @@ SELECT
 FROM censo_iter
 WHERE loc <> '0000' AND mun <> '000';
 
+-- =============================================================================
+-- censo_entidades — state-grain (v0.2.10 follow-on, 2026-05-09)
+-- =============================================================================
+-- One row per entidad (32 rows). Censo ITER raw has 33 rolled rows where
+-- mun='000' AND loc='0000' — 32 entidades plus a national-total row with
+-- entidad='00' (nom_ent='Total nacional'). The national row is excluded
+-- here; expose it via a separate /analytics/national-detail endpoint if
+-- ever needed (out of scope this bundle).
+--
+-- Same demographic surface as censo_municipios. Drops muni-grain identity
+-- (cve_mun, mun, nom_mun); adds cve_ent (=entidad) for clean joining.
+-- nom_ent already lives at this grain — no append-at-end needed.
+--
+-- Suppression: entidad-grain rolls cover millions of households per row,
+-- so 'N/D' essentially never fires. NULLIF guards still applied for
+-- defensive parity with sibling views.
+
+CREATE OR REPLACE VIEW censo_entidades AS
+SELECT
+  -- ─── Identity ───────────────────────────────────────────────────────────
+  entidad AS cve_ent,
+  entidad,
+  nom_ent,
+
+  -- ─── Population ─────────────────────────────────────────────────────────
+  NULLIF(NULLIF(pobtot,    ''), 'N/D')::int     AS pobtot,
+  NULLIF(NULLIF(pobfem,    ''), 'N/D')::int     AS pobfem,
+  NULLIF(NULLIF(pobmas,    ''), 'N/D')::int     AS pobmas,
+  NULLIF(NULLIF(p_60ymas,  ''), 'N/D')::int     AS p_60ymas,
+  NULLIF(NULLIF(p_15ymas,  ''), 'N/D')::int     AS p_15ymas,
+  NULLIF(NULLIF(p_18ymas,  ''), 'N/D')::int     AS p_18ymas,
+  NULLIF(NULLIF(pea,       ''), 'N/D')::int     AS pea,
+  NULLIF(NULLIF(pocupada,  ''), 'N/D')::int     AS pocupada,
+  NULLIF(NULLIF(graproes,  ''), 'N/D')::numeric AS graproes,
+  NULLIF(NULLIF(tvivhab,   ''), 'N/D')::int     AS tvivhab,
+  NULLIF(NULLIF(tvivpar,   ''), 'N/D')::int     AS tvivpar,
+
+  -- ─── Religion ───────────────────────────────────────────────────────────
+  NULLIF(NULLIF(pcatolica,  ''), 'N/D')::int    AS pcatolica,
+  NULLIF(NULLIF(pro_crieva, ''), 'N/D')::int    AS pro_crieva,
+  NULLIF(NULLIF(potras_rel, ''), 'N/D')::int    AS potras_rel,
+  NULLIF(NULLIF(psin_relig, ''), 'N/D')::int    AS psin_relig,
+
+  -- ─── Indigenous & Afro ──────────────────────────────────────────────────
+  NULLIF(NULLIF(p3ym_hli, ''), 'N/D')::int      AS p3ym_hli,
+  NULLIF(NULLIF(p3hlinhe, ''), 'N/D')::int      AS p3hlinhe,
+  NULLIF(NULLIF(p3hli_he, ''), 'N/D')::int      AS p3hli_he,
+  NULLIF(NULLIF(phog_ind, ''), 'N/D')::int      AS phog_ind,
+  NULLIF(NULLIF(pob_afro, ''), 'N/D')::int      AS pob_afro,
+
+  -- ─── Migration ──────────────────────────────────────────────────────────
+  NULLIF(NULLIF(pnacent,  ''), 'N/D')::int      AS pnacent,
+  NULLIF(NULLIF(pnacoe,   ''), 'N/D')::int      AS pnacoe,
+  NULLIF(NULLIF(pres2015, ''), 'N/D')::int      AS pres2015,
+  NULLIF(NULLIF(presoe15, ''), 'N/D')::int      AS presoe15,
+
+  -- ─── Education detail ───────────────────────────────────────────────────
+  NULLIF(NULLIF(p15ym_an,  ''), 'N/D')::int     AS p15ym_an,
+  NULLIF(NULLIF(p15ym_se,  ''), 'N/D')::int     AS p15ym_se,
+  NULLIF(NULLIF(p15pri_in, ''), 'N/D')::int     AS p15pri_in,
+  NULLIF(NULLIF(p15pri_co, ''), 'N/D')::int     AS p15pri_co,
+  NULLIF(NULLIF(p15sec_in, ''), 'N/D')::int     AS p15sec_in,
+  NULLIF(NULLIF(p15sec_co, ''), 'N/D')::int     AS p15sec_co,
+  NULLIF(NULLIF(p18ym_pb,  ''), 'N/D')::int     AS p18ym_pb,
+
+  -- ─── Civil status ───────────────────────────────────────────────────────
+  NULLIF(NULLIF(p12ym_solt, ''), 'N/D')::int    AS p12ym_solt,
+  NULLIF(NULLIF(p12ym_casa, ''), 'N/D')::int    AS p12ym_casa,
+  NULLIF(NULLIF(p12ym_sepa, ''), 'N/D')::int    AS p12ym_sepa,
+
+  -- ─── Disability summary ─────────────────────────────────────────────────
+  NULLIF(NULLIF(pcon_disc, ''), 'N/D')::int     AS pcon_disc,
+  NULLIF(NULLIF(pcon_limi, ''), 'N/D')::int     AS pcon_limi,
+  NULLIF(NULLIF(psind_lim, ''), 'N/D')::int     AS psind_lim,
+
+  -- ─── Health coverage ────────────────────────────────────────────────────
+  NULLIF(NULLIF(psinder,     ''), 'N/D')::int   AS psinder,
+  NULLIF(NULLIF(pder_ss,     ''), 'N/D')::int   AS pder_ss,
+  NULLIF(NULLIF(pder_imss,   ''), 'N/D')::int   AS pder_imss,
+  NULLIF(NULLIF(pder_iste,   ''), 'N/D')::int   AS pder_iste,
+  NULLIF(NULLIF(pder_segp,   ''), 'N/D')::int   AS pder_segp,
+  NULLIF(NULLIF(pder_imssb,  ''), 'N/D')::int   AS pder_imssb,
+  NULLIF(NULLIF(pafil_ipriv, ''), 'N/D')::int   AS pafil_ipriv,
+
+  -- ─── Household assets ───────────────────────────────────────────────────
+  NULLIF(NULLIF(vph_inter,  ''), 'N/D')::int    AS vph_inter,
+  NULLIF(NULLIF(vph_autom,  ''), 'N/D')::int    AS vph_autom,
+  NULLIF(NULLIF(vph_refri,  ''), 'N/D')::int    AS vph_refri,
+  NULLIF(NULLIF(vph_lavad,  ''), 'N/D')::int    AS vph_lavad,
+  NULLIF(NULLIF(vph_hmicro, ''), 'N/D')::int    AS vph_hmicro,
+  NULLIF(NULLIF(vph_moto,   ''), 'N/D')::int    AS vph_moto,
+  NULLIF(NULLIF(vph_bici,   ''), 'N/D')::int    AS vph_bici,
+  NULLIF(NULLIF(vph_radio,  ''), 'N/D')::int    AS vph_radio,
+  NULLIF(NULLIF(vph_tv,     ''), 'N/D')::int    AS vph_tv,
+  NULLIF(NULLIF(vph_pc,     ''), 'N/D')::int    AS vph_pc,
+  NULLIF(NULLIF(vph_telef,  ''), 'N/D')::int    AS vph_telef,
+  NULLIF(NULLIF(vph_cel,    ''), 'N/D')::int    AS vph_cel,
+  NULLIF(NULLIF(vph_stvp,   ''), 'N/D')::int    AS vph_stvp,
+  NULLIF(NULLIF(vph_spmvpi, ''), 'N/D')::int    AS vph_spmvpi,
+  NULLIF(NULLIF(vph_cvj,    ''), 'N/D')::int    AS vph_cvj,
+  NULLIF(NULLIF(vph_snbien, ''), 'N/D')::int    AS vph_snbien
+FROM censo_iter
+WHERE mun = '000' AND loc = '0000' AND entidad <> '00';
+
 -- Smoke-tests (manual; run after applying):
 --   SELECT cve_mun, pobtot, pcatolica, vph_inter FROM censo_municipios WHERE cve_mun='09015';
 --   SELECT count(*) FROM censo_localidades;
@@ -239,3 +343,6 @@ WHERE loc <> '0000' AND mun <> '000';
 --     WHERE cve_mun='09015' ORDER BY pobtot DESC NULLS LAST LIMIT 10;
 --   SELECT cve_loc, nom_loc, pobtot FROM censo_localidades
 --     WHERE pcatolica IS NULL AND pobtot > 0 LIMIT 5;  -- N/D suppression hits
+--   SELECT count(*), MIN(pobtot), MAX(pobtot) FROM censo_entidades;
+--   SELECT cve_ent, nom_ent, pobtot, pcatolica, vph_inter FROM censo_entidades
+--     WHERE cve_ent='09';  -- CDMX

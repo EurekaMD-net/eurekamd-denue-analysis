@@ -52,6 +52,7 @@ import {
   airportsByMunicipioHandler,
   coloniasByAgebHandler,
   coloniasByMunicipioHandler,
+  entidadDetailHandler,
   licensedPharmaciesByAgebHandler,
   licensedPharmaciesByMunicipioHandler,
   localitiesByMunicipioHandler,
@@ -186,6 +187,7 @@ export function createServer(config: ApiServerConfig): Hono {
   app.get("/analytics/municipio-detail", (c) =>
     municipioDetailHandler(c, config),
   );
+  app.get("/analytics/entidad-detail", (c) => entidadDetailHandler(c, config));
 
   return app;
 }

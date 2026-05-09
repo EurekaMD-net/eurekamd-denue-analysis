@@ -55,6 +55,7 @@ import type {
   ApiServerConfig,
   ColoniasByAgebResult,
   ColoniasByMunicipioResult,
+  EntidadDetailResult,
   LicensedPharmaciesByAgebResult,
   LicensedPharmaciesByMunicipioResult,
   LocalitiesByMunicipioResult,
@@ -4783,6 +4784,379 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
       const app = createServer(CONFIG);
       const res = await app.request(
         `/analytics/municipio-detail?cve_mun=${encodeURIComponent(v)}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(400);
+      expect(mockExec).not.toHaveBeenCalled();
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// /analytics/entidad-detail  (v0.2.10 entidad-side, surfaces censo_entidades)
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/entidad-detail (v0.2.10)", () => {
+  it("rejects missing cve_ent", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects national-rolled '00' (intentionally excluded from view)", async () => {
+    // ENTIDAD_RE = /^(0[1-9]|[12][0-9]|3[0-2])$/ — '00' fails the regex
+    // before SQL composition. The view also filters entidad <> '00' as a
+    // defense-in-depth, but the regex catches it first.
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=00", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("rejects entidad > 32", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=33", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects single-digit cve_ent (must be zero-padded)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=9", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects letter chars in cve_ent", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=AB", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 with structured code when entidad row missing", async () => {
+    // Synthetic miss: ENTIDAD_RE allows '32' (Zacatecas) but mock returns
+    // null to simulate a fresh DB without the migration applied.
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=32", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("entidad.not_found");
+  });
+
+  it("returns full entidad demographic surface with all 9 categories nested", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_ent: "09",
+          entidad: "09",
+          nom_ent: "Ciudad de México",
+          pobtot: "9209944",
+          pobfem: "4805017",
+          pobmas: "4404927",
+          p_60ymas: "1485000",
+          p_15ymas: "7600000",
+          p_18ymas: "7100000",
+          pea: "4900000",
+          pocupada: "4750000",
+          graproes: "11.5",
+          tvivhab: "2700000",
+          tvivpar: "2900000",
+          pcatolica: "6988016",
+          pro_crieva: "668246",
+          potras_rel: "180000",
+          psin_relig: "1300000",
+          p3ym_hli: "125153",
+          p3hlinhe: "1500",
+          p3hli_he: "123653",
+          phog_ind: "350000",
+          pob_afro: "180000",
+          pnacent: "5500000",
+          pnacoe: "3500000",
+          pres2015: "8800000",
+          presoe15: "350000",
+          p15ym_an: "100000",
+          p15ym_se: "60000",
+          p15pri_in: "350000",
+          p15pri_co: "1100000",
+          p15sec_in: "270000",
+          p15sec_co: "1700000",
+          p18ym_pb: "3700000",
+          p12ym_solt: "2800000",
+          p12ym_casa: "3200000",
+          p12ym_sepa: "1100000",
+          pcon_disc: "470000",
+          pcon_limi: "850000",
+          psind_lim: "7600000",
+          psinder: "2300000",
+          pder_ss: "6700000",
+          pder_imss: "4200000",
+          pder_iste: "850000",
+          pder_segp: "1500000",
+          pder_imssb: "20000",
+          pafil_ipriv: "350000",
+          vph_inter: "2084156",
+          vph_autom: "1300000",
+          vph_refri: "2700000",
+          vph_lavad: "2400000",
+          vph_hmicro: "1900000",
+          vph_moto: "200000",
+          vph_bici: "400000",
+          vph_radio: "1700000",
+          vph_tv: "2800000",
+          vph_pc: "1100000",
+          vph_telef: "850000",
+          vph_cel: "2800000",
+          vph_stvp: "1100000",
+          vph_spmvpi: "950000",
+          vph_cvj: "550000",
+          vph_snbien: "3000",
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.cve_ent).toBe("09");
+    expect(body.entidad).toBe("09");
+    expect(body.nom_ent).toBe("Ciudad de México");
+    // Identity invariant: cve_ent === entidad (sibling muni-detail
+    // verifies entidad === cve_mun.slice(0,2); here they're equal).
+    expect(body.entidad).toBe(body.cve_ent);
+    // Pin one field per category to catch mis-nesting / typos.
+    expect(body.population.pobtot).toBe(9209944);
+    expect(body.population.graproes).toBeCloseTo(11.5);
+    expect(body.religion.pcatolica).toBe(6988016);
+    expect(body.religion.psin_relig).toBe(1300000);
+    expect(body.indigenous_afro.p3ym_hli).toBe(125153);
+    expect(body.migration.pnacoe).toBe(3500000);
+    expect(body.education.p18ym_pb).toBe(3700000);
+    expect(body.education.p15pri_co).toBe(1100000);
+    expect(body.civil_status.p12ym_casa).toBe(3200000);
+    expect(body.disability.pcon_disc).toBe(470000);
+    expect(body.health_coverage.psinder).toBe(2300000);
+    expect(body.health_coverage.pder_imss).toBe(4200000);
+    expect(body.assets.vph_inter).toBe(2084156);
+    expect(body.assets.vph_hmicro).toBe(1900000);
+    expect(body.assets.vph_cvj).toBe(550000);
+  });
+
+  it("preserves NULLs across all categories (defensive — entidad rolls rarely hit N/D)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_ent: "01",
+          entidad: "01",
+          nom_ent: "Aguascalientes",
+          pobtot: "1425607",
+          pobfem: null,
+          pobmas: null,
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p15pri_in: null,
+          p15pri_co: null,
+          p15sec_in: null,
+          p15sec_co: null,
+          p18ym_pb: null,
+          p12ym_solt: null,
+          p12ym_casa: null,
+          p12ym_sepa: null,
+          pcon_disc: null,
+          pcon_limi: null,
+          psind_lim: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_hmicro: null,
+          vph_moto: null,
+          vph_bici: null,
+          vph_radio: null,
+          vph_tv: null,
+          vph_pc: null,
+          vph_telef: null,
+          vph_cel: null,
+          vph_stvp: null,
+          vph_spmvpi: null,
+          vph_cvj: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=01", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.population.pobtot).toBe(1425607);
+    expect(body.religion.pcatolica).toBeNull();
+    expect(body.education.p15pri_in).toBeNull();
+    expect(body.civil_status.p12ym_solt).toBeNull();
+    expect(body.disability.pcon_disc).toBeNull();
+    expect(body.assets.vph_hmicro).toBeNull();
+  });
+
+  it("emits FROM censo_entidades + literal cve_ent in WHERE", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=07", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("FROM censo_entidades");
+    expect(sql).toContain("WHERE cve_ent = '07'");
+    // Drift guard: the entidad-only education + asset detail cols must
+    // appear in the SELECT list. A future cleanup that drops them would
+    // silently truncate the response surface.
+    expect(sql).toContain("p15pri_in");
+    expect(sql).toContain("p15sec_co");
+    expect(sql).toContain("vph_hmicro");
+  });
+
+  it("emits Cache-Control + Vary headers on success", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_ent: "09",
+          entidad: "09",
+          nom_ent: "Ciudad de México",
+          pobtot: "9209944",
+          pobfem: null,
+          pobmas: null,
+          p_60ymas: null,
+          p_15ymas: null,
+          p_18ymas: null,
+          pea: null,
+          pocupada: null,
+          graproes: null,
+          tvivhab: null,
+          tvivpar: null,
+          pcatolica: null,
+          pro_crieva: null,
+          potras_rel: null,
+          psin_relig: null,
+          p3ym_hli: null,
+          p3hlinhe: null,
+          p3hli_he: null,
+          phog_ind: null,
+          pob_afro: null,
+          pnacent: null,
+          pnacoe: null,
+          pres2015: null,
+          presoe15: null,
+          p15ym_an: null,
+          p15ym_se: null,
+          p15pri_in: null,
+          p15pri_co: null,
+          p15sec_in: null,
+          p15sec_co: null,
+          p18ym_pb: null,
+          p12ym_solt: null,
+          p12ym_casa: null,
+          p12ym_sepa: null,
+          pcon_disc: null,
+          pcon_limi: null,
+          psind_lim: null,
+          psinder: null,
+          pder_ss: null,
+          pder_imss: null,
+          pder_iste: null,
+          pder_segp: null,
+          pder_imssb: null,
+          pafil_ipriv: null,
+          vph_inter: null,
+          vph_autom: null,
+          vph_refri: null,
+          vph_lavad: null,
+          vph_hmicro: null,
+          vph_moto: null,
+          vph_bici: null,
+          vph_radio: null,
+          vph_tv: null,
+          vph_pc: null,
+          vph_telef: null,
+          vph_cel: null,
+          vph_stvp: null,
+          vph_spmvpi: null,
+          vph_cvj: null,
+          vph_snbien: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+  });
+
+  // SQL-injection contract — full parity with locality + muni vectors.
+  // Vectors adapted to entidad shape (2 chars expected): the digit-only
+  // ones get truncated/expanded, the letter/path/url-encoded forms reused
+  // verbatim. ENTIDAD_RE is strict 01-32 so almost everything fails.
+  const INJECTION_VECTORS = [
+    "09'; DROP TABLE censo_iter--",
+    "09 OR 1=1",
+    "09;SELECT 1",
+    "0'; DROP TABLE x--",
+    "../../../../etc/passwd",
+    "%27%20OR%201%3D1",
+    "0a", // 1 digit + letter — covers the R1 letter-vector pattern
+    "AB",
+    "33", // out of 01-32 range
+    "00", // national-rolled, intentionally rejected
+  ];
+  for (const v of INJECTION_VECTORS) {
+    it(`rejects "${v}" before SQL composition`, async () => {
+      const app = createServer(CONFIG);
+      const res = await app.request(
+        `/analytics/entidad-detail?cve_ent=${encodeURIComponent(v)}`,
         { headers: AUTH },
       );
       expect(res.status).toBe(400);
