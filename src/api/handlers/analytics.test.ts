@@ -5952,6 +5952,284 @@ describe("/analytics/municipio-detail (v0.2.13 datos_viales)", () => {
   });
 });
 
+// ===========================================================================
+// v0.2.14: SEDATU SNIIV Financiamientos 2025 — vivienda_financiamientos
+// ===========================================================================
+
+describe("/analytics/municipio-detail (v0.2.14 vivienda_financiamientos)", () => {
+  /**
+   * Build a muni-detail mock row with all censo / cnbv / sict fields null
+   * and sf_-prefixed SEDATU cols filled to a Cuernavaca-shaped fingerprint.
+   * Cuernavaca (17007) shipped 2,422 acciones in 2025; INFONAVIT-dominant.
+   */
+  function sedatuMuniMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_mun: "17007",
+      entidad: "17",
+      mun: "007",
+      nom_mun: "Cuernavaca",
+      nom_ent: "Morelos",
+    };
+    // Null all the censo + cnbv + sict leaves not exercised here.
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ];
+    for (const f of nullFields) base[f] = null;
+    // SEDATU sf_ — pre-resolved labels arrive as strings; numerics as
+    // strings too (json_agg numeric-as-string contract).
+    base.sf_acciones_total = "2422";
+    base.sf_monto_total = "3140000000.00";
+    base.sf_monto_per_accion_avg = "1296449.61";
+    base.sf_top_organismo_code = "1";
+    base.sf_top_organismo_nombre = "INFONAVIT";
+    base.sf_top_organismo_share = "78.45";
+    base.sf_pct_vivienda_nueva = "14.12";
+    base.sf_pct_mejoramientos = "27.42";
+    base.sf_pct_vivienda_usada = "51.65";
+    base.sf_pct_otros = "6.81";
+    base.sf_pct_femenino = "44.32";
+    base.sf_pct_credito_individual = "82.10";
+    base.sf_pct_economica = "0.20";
+    base.sf_pct_popular = "5.40";
+    base.sf_pct_tradicional = "27.30";
+    base.sf_pct_media = "45.10";
+    base.sf_pct_residencial = "18.50";
+    base.sf_pct_residencial_plus = "3.50";
+    return { ...base, ...overrides };
+  }
+
+  it("returns vivienda_financiamientos with full muni shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sedatuMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.vivienda_financiamientos;
+    expect(v).not.toBeNull();
+    expect(v!.acciones_total).toBe(2422);
+    expect(v!.monto_total).toBe(3140000000);
+    expect(v!.monto_per_accion_avg).toBeCloseTo(1296449.61, 2);
+    expect(v!.top_organismo).toEqual({
+      code: 1,
+      nombre: "INFONAVIT",
+      share: 78.45,
+    });
+    expect(v!.modalidad.pct_vivienda_nueva).toBeCloseTo(14.12);
+    expect(v!.modalidad.pct_mejoramientos).toBeCloseTo(27.42);
+    expect(v!.modalidad.pct_vivienda_usada).toBeCloseTo(51.65);
+    expect(v!.modalidad.pct_otros).toBeCloseTo(6.81);
+    expect(v!.demografico.pct_femenino).toBeCloseTo(44.32);
+    expect(v!.demografico.pct_credito_individual).toBeCloseTo(82.1);
+    expect(v!.vivienda_tier).not.toBeNull();
+    expect(v!.vivienda_tier!.pct_media).toBeCloseTo(45.1);
+    expect(v!.periodo).toBe("2025");
+  });
+
+  it("modality percentages sum to ~100 (always-known dimension invariant)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sedatuMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const m = body.vivienda_financiamientos!.modalidad;
+    const sum =
+      m.pct_vivienda_nueva +
+      m.pct_mejoramientos +
+      m.pct_vivienda_usada +
+      m.pct_otros;
+    expect(sum).toBeGreaterThan(99.5);
+    expect(sum).toBeLessThan(100.5);
+  });
+
+  it("returns vivienda_financiamientos=null when LEFT JOIN misses (muni with no 2025 financing)", async () => {
+    // ~621 of 2,469 munis have no SEDATU 2025 activity — sample is muni
+    // 05001 (Abasolo, Coahuila). Marshaller surfaces the miss as null,
+    // not as an all-null subtree.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sedatuMuniMockRow({
+          cve_mun: "05001",
+          nom_mun: "Abasolo",
+          nom_ent: "Coahuila",
+          sf_acciones_total: null,
+          sf_monto_total: null,
+          sf_monto_per_accion_avg: null,
+          sf_top_organismo_code: null,
+          sf_top_organismo_nombre: null,
+          sf_top_organismo_share: null,
+          sf_pct_vivienda_nueva: null,
+          sf_pct_mejoramientos: null,
+          sf_pct_vivienda_usada: null,
+          sf_pct_otros: null,
+          sf_pct_femenino: null,
+          sf_pct_credito_individual: null,
+          sf_pct_economica: null,
+          sf_pct_popular: null,
+          sf_pct_tradicional: null,
+          sf_pct_media: null,
+          sf_pct_residencial: null,
+          sf_pct_residencial_plus: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=05001", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.vivienda_financiamientos).toBeNull();
+  });
+
+  it("vivienda_tier subtree is null when all 6 tier %s are null (100% rows lack tier)", async () => {
+    // Small munis where INFONAVIT/state programs don't classify
+    // vivienda_valor — the muni HAS financing activity but tier is unknown
+    // for every row. The subtree returns null; consumers can distinguish
+    // "tier mix unknown" from "0% tradicional".
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sedatuMuniMockRow({
+          sf_pct_economica: null,
+          sf_pct_popular: null,
+          sf_pct_tradicional: null,
+          sf_pct_media: null,
+          sf_pct_residencial: null,
+          sf_pct_residencial_plus: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.vivienda_financiamientos!;
+    expect(v.vivienda_tier).toBeNull();
+    // But other fields still populate normally
+    expect(v.acciones_total).toBe(2422);
+    expect(v.modalidad.pct_vivienda_nueva).toBeCloseTo(14.12);
+  });
+
+  it("pct_femenino is null when 100% of muni rows have unknown sexo", async () => {
+    // CNBV banca-múltiple aggregates may not collect sexo at the loan
+    // level in some munis; surface null rather than confidently 0%.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sedatuMuniMockRow({
+          sf_pct_femenino: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.vivienda_financiamientos!.demografico.pct_femenino).toBeNull();
+    // Other demographic field still populated independently
+    expect(
+      body.vivienda_financiamientos!.demografico.pct_credito_individual,
+    ).toBeCloseTo(82.1);
+  });
+
+  it("SQL contains LEFT JOIN sedatu_financing_by_municipio + sf_ aliases", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "LEFT JOIN sedatu_financing_by_municipio sf ON sf.cve_mun = cm.cve_mun",
+    );
+    // Pin one alias from each surface family so a SELECT-list refactor
+    // doesn't silently drop a leaf.
+    for (const col of [
+      "sf_acciones_total",
+      "sf_monto_total",
+      "sf_monto_per_accion_avg",
+      "sf_top_organismo_code",
+      "sf_top_organismo_nombre",
+      "sf_top_organismo_share",
+      "sf_pct_vivienda_nueva",
+      "sf_pct_mejoramientos",
+      "sf_pct_vivienda_usada",
+      "sf_pct_otros",
+      "sf_pct_femenino",
+      "sf_pct_credito_individual",
+      "sf_pct_economica",
+      "sf_pct_residencial_plus",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
 describe("/analytics/entidad-detail (v0.2.12 inclusion_financiera)", () => {
   /**
    * Build an entidad-detail mock row with all censo + bienestar fields null

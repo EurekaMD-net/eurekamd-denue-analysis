@@ -94,6 +94,7 @@ import {
   type DatosVialesResult,
   type EntidadDetailResult,
   type InclusionFinancieraResult,
+  type ViviendaFinanciamientosResult,
   type LocalitiesByMunicipioResult,
   type LocalitiesOrderBy,
   type LocalityDetailResult,
@@ -4116,6 +4117,115 @@ function datosVialesFromRow(
 }
 
 /**
+ * SELECT column list for the LEFT JOIN against `sedatu_financing_by_municipio`.
+ * All cols `sf_`-prefixed (sf = sedatu financing). The MV pre-resolves the
+ * `top_organismo_nombre` label via JOIN to `sedatu_organismos` — we surface
+ * the resolved string directly, avoiding a 4th JOIN at the handler layer.
+ */
+const SEDATU_MUNI_COLS = `
+    sf.acciones_total           AS sf_acciones_total,
+    sf.monto_total              AS sf_monto_total,
+    sf.monto_per_accion_avg     AS sf_monto_per_accion_avg,
+    sf.top_organismo_code       AS sf_top_organismo_code,
+    sf.top_organismo_nombre     AS sf_top_organismo_nombre,
+    sf.top_organismo_share      AS sf_top_organismo_share,
+    sf.pct_vivienda_nueva       AS sf_pct_vivienda_nueva,
+    sf.pct_mejoramientos        AS sf_pct_mejoramientos,
+    sf.pct_vivienda_usada       AS sf_pct_vivienda_usada,
+    sf.pct_otros                AS sf_pct_otros,
+    sf.pct_femenino             AS sf_pct_femenino,
+    sf.pct_credito_individual   AS sf_pct_credito_individual,
+    sf.pct_economica            AS sf_pct_economica,
+    sf.pct_popular              AS sf_pct_popular,
+    sf.pct_tradicional          AS sf_pct_tradicional,
+    sf.pct_media                AS sf_pct_media,
+    sf.pct_residencial          AS sf_pct_residencial,
+    sf.pct_residencial_plus     AS sf_pct_residencial_plus,
+    sf.periodo                  AS sf_periodo
+`.trim();
+
+/**
+ * Marshal SEDATU muni-grain row into the `vivienda_financiamientos` subtree,
+ * OR return `null` if the LEFT JOIN missed (no housing-financing activity
+ * inside this muni — ~621 of 2,469 munis nationally for 2025).
+ *
+ * Miss signal: `sf_acciones_total IS NULL` happens ONLY when the LEFT JOIN
+ * to `sedatu_financing_by_municipio` doesn't match — the MV's GROUP BY
+ * guarantees every present row has a non-null sum (audit W3 round-2
+ * follow-up). The `vivienda_tier` subtree returns null when ALL six
+ * tier %s are null (= 100% of muni rows had unknown `vivienda_valor`);
+ * per-leaf nulls within an otherwise-populated subtree preserve mixed-
+ * coverage signals.
+ */
+function viviendaFinanciamientosFromRow(
+  r: Record<string, unknown>,
+): ViviendaFinanciamientosResult | null {
+  if (r.sf_acciones_total === null || r.sf_acciones_total === undefined) {
+    return null;
+  }
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const numReq = (v: unknown): number => Number(v);
+
+  const tier = {
+    pct_economica: num(r.sf_pct_economica),
+    pct_popular: num(r.sf_pct_popular),
+    pct_tradicional: num(r.sf_pct_tradicional),
+    pct_media: num(r.sf_pct_media),
+    pct_residencial: num(r.sf_pct_residencial),
+    pct_residencial_plus: num(r.sf_pct_residencial_plus),
+  };
+  const tierAllNull =
+    tier.pct_economica === null &&
+    tier.pct_popular === null &&
+    tier.pct_tradicional === null &&
+    tier.pct_media === null &&
+    tier.pct_residencial === null &&
+    tier.pct_residencial_plus === null;
+
+  return {
+    acciones_total: numReq(r.sf_acciones_total),
+    monto_total: numReq(r.sf_monto_total),
+    monto_per_accion_avg: numReq(r.sf_monto_per_accion_avg),
+    top_organismo: {
+      code: numReq(r.sf_top_organismo_code),
+      nombre:
+        typeof r.sf_top_organismo_nombre === "string"
+          ? r.sf_top_organismo_nombre
+          : String(r.sf_top_organismo_nombre ?? ""),
+      share: numReq(r.sf_top_organismo_share),
+    },
+    modalidad: {
+      pct_vivienda_nueva: numReq(r.sf_pct_vivienda_nueva),
+      pct_mejoramientos: numReq(r.sf_pct_mejoramientos),
+      pct_vivienda_usada: numReq(r.sf_pct_vivienda_usada),
+      pct_otros: numReq(r.sf_pct_otros),
+    },
+    demografico: {
+      pct_femenino: num(r.sf_pct_femenino),
+      pct_credito_individual: num(r.sf_pct_credito_individual),
+    },
+    vivienda_tier: tierAllNull
+      ? null
+      : {
+          pct_economica: tier.pct_economica ?? 0,
+          pct_popular: tier.pct_popular ?? 0,
+          pct_tradicional: tier.pct_tradicional ?? 0,
+          pct_media: tier.pct_media ?? 0,
+          pct_residencial: tier.pct_residencial ?? 0,
+          pct_residencial_plus: tier.pct_residencial_plus ?? 0,
+        },
+    // Periodo sourced from the MV column (audit W4 round-2): the MV
+    // exposes MIN(ano) from the data itself, so future yearly ingests
+    // (2026/2027/etc) don't need a marshaller code change.
+    periodo:
+      typeof r.sf_periodo === "string"
+        ? r.sf_periodo
+        : String(r.sf_periodo ?? "2025"),
+  };
+}
+
+/**
  * GET /analytics/municipio-detail?cve_mun=NNNNN
  *
  * Single-municipio demographic surface — same nested-category shape as
@@ -4165,10 +4275,12 @@ SELECT json_agg(row_to_json(t)) FROM (
     cm.vph_moto, cm.vph_bici, cm.vph_radio, cm.vph_tv, cm.vph_pc, cm.vph_telef, cm.vph_cel,
     cm.vph_stvp, cm.vph_spmvpi, cm.vph_cvj, cm.vph_snbien,
     ${CNBV_MUNI_COLS},
-    ${SICT_MUNI_COLS}
+    ${SICT_MUNI_COLS},
+    ${SEDATU_MUNI_COLS}
   FROM censo_municipios cm
   LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
   LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun
+  LEFT JOIN sedatu_financing_by_municipio sf ON sf.cve_mun = cm.cve_mun
   WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
@@ -4273,6 +4385,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     },
     inclusion_financiera: inclusionFinancieraFromRow(r, "muni"),
     datos_viales: datosVialesFromRow(r),
+    vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

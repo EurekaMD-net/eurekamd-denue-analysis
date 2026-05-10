@@ -1308,6 +1308,20 @@ export interface MunicipioDetailResult {
    * (all heavy-truck axle configs).
    */
   datos_viales: DatosVialesResult | null;
+  /**
+   * Housing finance flows (SEDATU SNIIV Financiamientos 2025, v0.2.14).
+   * Sourced from `sedatu_financing_by_municipio` materialized view via
+   * direct cve_mun join (no spatial computation). LEFT JOIN — munis with
+   * zero financing activity in 2025 surface as null (~621 of 2,469
+   * national munis are not covered).
+   *
+   * Aggregates 325,254 stratum-month rows down to per-muni totals + modal
+   * lender + modality / demographic / housing-tier composition. Code
+   * dimensions (organismo / modalidad / vivienda_valor) are seeded from
+   * SEDATU's official codebook into 4 lookup tables; this subtree
+   * surfaces the resolved labels (e.g. `"INFONAVIT"` instead of `1`).
+   */
+  vivienda_financiamientos: ViviendaFinanciamientosResult | null;
 }
 
 /**
@@ -1500,6 +1514,64 @@ export interface DatosVialesResult {
   };
   route_count: number;
   routes_top: string[];
+}
+
+/**
+ * Housing finance flows at muni grain. Source: SEDATU SNIIV Financiamientos
+ * a la Vivienda 2025 (v0.2.14), `sedatu_financing_by_municipio` materialized
+ * view. 325k stratum-month records aggregate to per-muni totals + dominant
+ * lender + modality / demographic / housing-tier composition.
+ *
+ * Money is in Mexican pesos (MXN). National 2025 totals: 998,745 acciones
+ * (financings) for $617B MXN volume across 1,848 munis (~75% coverage).
+ *
+ * **Modality breakdown** (always populated, sums to ~100): every financing
+ * has a known modalidad (1-4). `pct_vivienda_nueva + pct_mejoramientos +
+ * pct_vivienda_usada + pct_otros` lands in 99.5..100.5 (rounding noise).
+ *
+ * **Demographic %** (`pct_femenino`, `pct_credito_individual`): denominator
+ * is acciones where the dimension is KNOWN (not total acciones). A muni
+ * where 100% of rows have unknown sexo returns null for `pct_femenino` —
+ * signals "we can't tell" rather than confidently reporting 0%.
+ *
+ * **Housing-tier subtree**: returns `null` (the whole subtree, not
+ * per-leaf) when 100% of muni rows lack `vivienda_valor`. ~22% of
+ * national rows have unknown tier; per-muni this concentrates in small
+ * munis where INFONAVIT/state programs don't classify.
+ *
+ * **`top_organismo`**: modal lender by acciones count (not monto). Ties
+ * broken by lower organismo code (deterministic). `share` is the
+ * percentage of muni acciones from this organism — typically 60-90% for
+ * INFONAVIT-dominant munis.
+ */
+export interface ViviendaFinanciamientosResult {
+  acciones_total: number;
+  monto_total: number;
+  monto_per_accion_avg: number;
+  top_organismo: {
+    code: number;
+    nombre: string;
+    share: number;
+  };
+  modalidad: {
+    pct_vivienda_nueva: number;
+    pct_mejoramientos: number;
+    pct_vivienda_usada: number;
+    pct_otros: number;
+  };
+  demografico: {
+    pct_femenino: number | null;
+    pct_credito_individual: number | null;
+  };
+  vivienda_tier: {
+    pct_economica: number;
+    pct_popular: number;
+    pct_tradicional: number;
+    pct_media: number;
+    pct_residencial: number;
+    pct_residencial_plus: number;
+  } | null;
+  periodo: string;
 }
 
 /**
