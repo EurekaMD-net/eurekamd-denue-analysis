@@ -29,6 +29,7 @@ import {
   RAW_DDL,
   RAW_HEADER_COLS,
   STATIONS_VIEW_DDL,
+  TRAFFIC_BY_ESTADO_DDL,
   TRAFFIC_BY_MUNI_DDL,
   VIEWS_DDL_TRANSACTION,
   rewriteHeader,
@@ -161,10 +162,11 @@ describe("loadSictDatosViales (orchestration)", () => {
     expect(statIdx).toBeLessThan(mvIdx);
     // Round-3 audit R1: pin the BEGIN ... DROP ... COMMIT shape so a future
     // refactor that inserts foreign statements (e.g. `\connect`) between
-    // the markers and the DDL is caught. Allows `\echo` between them
-    // (W2: per-step audit markers for ON_ERROR_STOP debugging).
+    // the markers and the DDL is caught. Allows `\echo` markers AND a
+    // header comment block between them (the C1 fix adds explanatory
+    // comments before the DROP cascade).
     expect(VIEWS_DDL_TRANSACTION).toMatch(
-      /^BEGIN;\s+(\\echo[^\n]*\n\s*)?DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_municipio;[\s\S]*COMMIT;$/,
+      /^BEGIN;\s+(\\echo[^\n]*\n\s*)?(--[^\n]*\n\s*)*DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_estado;\s*DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_municipio;[\s\S]*COMMIT;$/,
     );
     // Both \echo markers present for operator-facing failure localization.
     expect(VIEWS_DDL_TRANSACTION).toContain(
@@ -172,6 +174,9 @@ describe("loadSictDatosViales (orchestration)", () => {
     );
     expect(VIEWS_DDL_TRANSACTION).toContain(
       "\\echo [load-sict] building traffic-by-municipio MV",
+    );
+    expect(VIEWS_DDL_TRANSACTION).toContain(
+      "\\echo [load-sict] building traffic-by-estado MV",
     );
   });
 
@@ -272,6 +277,25 @@ describe("DDL invariants", () => {
     expect(STATIONS_VIEW_DDL).toContain("AND NULLIF(tdpa, '') IS NOT NULL");
   });
 
+  it("STATIONS_VIEW_DDL drops dependent MVs (estado, then muni) BEFORE the base view (audit C1)", () => {
+    // Postgres DROP VIEW does not cascade. After v0.2.15 ships, a second
+    // --force reload would fail with "cannot drop view sict_estaciones_viales
+    // because other objects depend on it" if the estado MV isn't dropped
+    // first. Pin the ordering so a future regression aborts at unit-test time.
+    const dropEstado = STATIONS_VIEW_DDL.indexOf(
+      "DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_estado",
+    );
+    const dropMuni = STATIONS_VIEW_DDL.indexOf(
+      "DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_municipio",
+    );
+    const dropView = STATIONS_VIEW_DDL.indexOf(
+      "DROP VIEW IF EXISTS sict_estaciones_viales",
+    );
+    expect(dropEstado).toBeGreaterThan(0);
+    expect(dropMuni).toBeGreaterThan(dropEstado);
+    expect(dropView).toBeGreaterThan(dropMuni);
+  });
+
   it("STATIONS_VIEW_DDL spatial-joins via ST_Contains with SRID 4326", () => {
     expect(STATIONS_VIEW_DDL).toContain("ST_Contains(mp.geom");
     expect(STATIONS_VIEW_DDL).toContain(
@@ -308,6 +332,119 @@ describe("DDL invariants", () => {
   it("TRAFFIC_BY_MUNI_DDL returns empty array (not NULL) for routes_top fallback", () => {
     expect(TRAFFIC_BY_MUNI_DDL).toContain(
       "COALESCE(tr.routes_top, ARRAY[]::TEXT[]) AS routes_top",
+    );
+  });
+
+  it("TRAFFIC_BY_MUNI_DDL ARRAY_AGG tie-breaker matches inner ROW_NUMBER (audit W1)", () => {
+    // Without the secondary `ruta ASC`, ARRAY_AGG output order is
+    // nondeterministic on count ties — REFRESH cycles can reshuffle
+    // routes_top even with no underlying data change. Pinned in the
+    // estado MV from day-one; backported here in the same bundle.
+    expect(TRAFFIC_BY_MUNI_DDL).toContain(
+      "ARRAY_AGG(ruta ORDER BY n DESC, ruta ASC)",
+    );
+  });
+
+  // --- v0.2.15: estado-grain MV ---
+
+  it("TRAFFIC_BY_ESTADO_DDL is MATERIALIZED with unique btree index on cve_ent", () => {
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "CREATE MATERIALIZED VIEW sict_traffic_by_estado",
+    );
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "CREATE UNIQUE INDEX idx_sict_tbe_cve_ent",
+    );
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "CREATE INDEX idx_sict_tbe_tdpa_total",
+    );
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL aggregates from station-level dedupe view, not muni MV", () => {
+    // Critical correctness invariant: re-applying TDPA-weighted formula at
+    // estado grain MUST use station-level rows. Aggregating from
+    // sict_traffic_by_municipio would give percentage-of-percentages drift.
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain("FROM sict_estaciones_viales");
+    expect(TRAFFIC_BY_ESTADO_DDL).not.toContain("sict_traffic_by_municipio");
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL groups by SUBSTRING(cve_mun, 1, 2) for spatial-join attribution", () => {
+    // Estado attribution derives from spatially-joined cve_mun, not the
+    // CSV-published estado column — keeps semantics aligned with muni MV.
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "GROUP BY SUBSTRING(cve_mun, 1, 2)",
+    );
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL camiones aggregates ALL 5 truck-axle classes", () => {
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "(c2 + c3 + t3s2 + t3s3 + t3s2r4) * tdpa",
+    );
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL guards weighted-avg division-by-zero on every pct", () => {
+    const matches = TRAFFIC_BY_ESTADO_DDL.match(/NULLIF\(SUM\(tdpa\),\s*0\)/g);
+    expect(matches?.length ?? 0).toBeGreaterThanOrEqual(5);
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL returns empty array (not NULL) for routes_top fallback", () => {
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "COALESCE(tr.routes_top, ARRAY[]::TEXT[]) AS routes_top",
+    );
+  });
+
+  it("TRAFFIC_BY_ESTADO_DDL ROW_NUMBER + ARRAY_AGG tie-breakers symmetric (audit R2/R3)", () => {
+    // Two layers must match: which routes survive the rk<=3 cut (inner
+    // ROW_NUMBER) AND the order they appear in routes_top (outer ARRAY_AGG).
+    // Both must use COUNT(*) DESC, ruta ASC — otherwise REFRESH cycles
+    // can shuffle either WHO makes the top-3 OR the top-3's order on ties.
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain(
+      "ARRAY_AGG(ruta ORDER BY n DESC, ruta ASC)",
+    );
+    expect(TRAFFIC_BY_ESTADO_DDL).toContain("ORDER BY COUNT(*) DESC, ruta ASC");
+  });
+
+  it("VIEWS_DDL_TRANSACTION embeds estado MV between muni MV and COMMIT", () => {
+    const idxMuni = VIEWS_DDL_TRANSACTION.indexOf(
+      "sict_traffic_by_municipio AS",
+    );
+    const idxEstado = VIEWS_DDL_TRANSACTION.indexOf(
+      "sict_traffic_by_estado AS",
+    );
+    const idxCommit = VIEWS_DDL_TRANSACTION.lastIndexOf("COMMIT;");
+    expect(idxMuni).toBeGreaterThan(0);
+    expect(idxEstado).toBeGreaterThan(idxMuni);
+    expect(idxCommit).toBeGreaterThan(idxEstado);
+  });
+
+  it("POST_LOAD_VERIFY_SQL counts both grain MVs", () => {
+    expect(POST_LOAD_VERIFY_SQL).toContain(
+      "SELECT COUNT(*) FROM sict_traffic_by_municipio",
+    );
+    expect(POST_LOAD_VERIFY_SQL).toContain(
+      "SELECT COUNT(*) FROM sict_traffic_by_estado",
+    );
+  });
+});
+
+describe("refresh-matviews.sh integration (regression guard)", () => {
+  // Bug-class: v0.2.13 SICT muni and v0.2.14 SEDATU loaders BOTH shipped
+  // without their MV listed in refresh-matviews.sh. Both caught as audit C1.
+  // This guard makes the regression a unit-test failure, not an audit find.
+  it("references sict_traffic_by_estado in REFRESH list", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await vi.importActual<typeof import("node:path")>("node:path");
+    const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
+    const script = fs.readFileSync(scriptPath, "utf-8");
+    expect(script).toMatch(/REFRESH MATERIALIZED VIEW sict_traffic_by_estado/);
+  });
+
+  it("still references sict_traffic_by_municipio (no regression)", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await vi.importActual<typeof import("node:path")>("node:path");
+    const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
+    const script = fs.readFileSync(scriptPath, "utf-8");
+    expect(script).toMatch(
+      /REFRESH MATERIALIZED VIEW sict_traffic_by_municipio/,
     );
   });
 });

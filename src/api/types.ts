@@ -1712,6 +1712,23 @@ export interface EntidadDetailResult {
    * remesas.per_capita, genero. See InclusionFinancieraResult JSDoc.
    */
   inclusion_financiera: InclusionFinancieraResult;
+  /**
+   * Federal-highway traffic intensity (SICT Datos Viales 2024, v0.2.15).
+   * Sourced from `sict_traffic_by_estado` materialized view, which re-applies
+   * the muni-grain MV's TDPA-weighted formula at estado level using
+   * station-level rows from the `sict_estaciones_viales` dedupe view.
+   *
+   * Live coverage 2024: **32/32 estados** (every estado has ≥1 geo-located
+   * federal-highway station, including CDMX with 44 stations on MEX-015D/
+   * MEX-150D/MEX-095 arterials terminating at the metro). The `null` subtree
+   * is preserved as a defensive contract for future years where SICT may not
+   * publish a given estado.
+   *
+   * Same shape as `MunicipioDetailResult.datos_viales` — the inner subtree
+   * is grain-agnostic; only the cve_mun → cve_ent attribution key changes
+   * upstream. See `DatosVialesResult` for field-level docs.
+   */
+  datos_viales: DatosVialesResult | null;
 }
 
 // ---------------------------------------------------------------------------

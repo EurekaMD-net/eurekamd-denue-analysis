@@ -3836,6 +3836,28 @@ const CNBV_ESTADO_COLS = `
     cp.periodo               AS cp_periodo`;
 
 /**
+ * SELECT column list for the LEFT JOIN against `sict_traffic_by_estado`
+ * (v0.2.15). All cols `sv_`-prefixed (sv = sict viales) so the existing
+ * `datosVialesFromRow` marshaller — keyed on these names — works unchanged
+ * across muni and estado grains. The two prefixes never collide because
+ * they appear in different handler SELECT statements (municipio-detail vs
+ * entidad-detail).
+ */
+const SICT_ESTADO_COLS = `
+    se.station_count    AS sv_station_count,
+    se.tdpa_total       AS sv_tdpa_total,
+    se.tdpa_max         AS sv_tdpa_max,
+    se.tdpa_mean        AS sv_tdpa_mean,
+    se.pct_motos        AS sv_pct_motos,
+    se.pct_autos        AS sv_pct_autos,
+    se.pct_buses        AS sv_pct_buses,
+    se.pct_camiones     AS sv_pct_camiones,
+    se.pct_otros        AS sv_pct_otros,
+    se.route_count      AS sv_route_count,
+    se.routes_top       AS sv_routes_top
+`.trim();
+
+/**
  * Marshal a row from a cnbv_panorama LEFT JOIN into the
  * `inclusion_financiera` nested category. Fields populated per grain are
  * documented at the InclusionFinancieraResult type definition.
@@ -4450,10 +4472,12 @@ SELECT json_agg(row_to_json(t)) FROM (
     bl.dependencias    AS bl_dependencias,
     bl.padrones        AS bl_padrones,
     bl.programas       AS bl_programas,
-    ${CNBV_ESTADO_COLS}
+    ${CNBV_ESTADO_COLS},
+    ${SICT_ESTADO_COLS}
   FROM censo_entidades ce
   LEFT JOIN bienestar_estatal_latest bl ON bl.cve_ent = ce.cve_ent
   LEFT JOIN cnbv_panorama_estatal cp ON cp.cve_ent = ce.cve_ent
+  LEFT JOIN sict_traffic_by_estado se ON se.cve_ent = ce.cve_ent
   WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
@@ -4568,6 +4592,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       programas: num(r.bl_programas),
     },
     inclusion_financiera: inclusionFinancieraFromRow(r, "estado"),
+    datos_viales: datosVialesFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

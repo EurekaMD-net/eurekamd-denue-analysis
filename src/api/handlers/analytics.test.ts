@@ -6496,6 +6496,273 @@ describe("/analytics/entidad-detail (v0.2.12 inclusion_financiera)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// v0.2.15: SICT estado-grain — datos_viales nested category on entidad-detail
+// ---------------------------------------------------------------------------
+
+describe("/analytics/entidad-detail (v0.2.15 datos_viales)", () => {
+  /**
+   * Build an entidad-detail mock row with all censo + bienestar + cnbv fields
+   * null and sv_-prefixed SICT estado-grain cols filled to a Jalisco-shape
+   * fingerprint (cve_ent='14', high TDPA across MEX-080/MEX-090/MEX-15D).
+   * The marshaller is grain-agnostic — these are the SAME column aliases as
+   * muni-grain, just sourced from `sict_traffic_by_estado` not `_by_municipio`.
+   */
+  function sictEstadoMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_ent: "14",
+      entidad: "14",
+      nom_ent: "Jalisco",
+    };
+    // Null all the censo + bienestar + cnbv leaves we don't care about here.
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+      "bl_periodo_cve",
+      "bl_anio",
+      "bl_trimestre",
+      "bl_fecha",
+      "bl_beneficiarios",
+      "bl_intervenciones",
+      "bl_dependencias",
+      "bl_padrones",
+      "bl_programas",
+    ];
+    for (const f of nullFields) base[f] = null;
+    // CNBV cols — the shape pinning exists in v0.2.12 tests already; here we
+    // just need them non-undefined for the marshaller's `num()` to coerce
+    // (null is fine — populates `inclusion_financiera` with all nulls).
+    const cnbvNullFields = [
+      "cp_poblacion_total",
+      "cp_poblacion_adulta",
+      "cp_sucursales_bm",
+      "cp_sucursales_bd",
+      "cp_sucursales_socap",
+      "cp_sucursales_sofipo",
+      "cp_sucursales_total",
+      "cp_corresponsales_max",
+      "cp_cajeros_bm",
+      "cp_cajeros_bd",
+      "cp_cajeros_socap",
+      "cp_cajeros_sofipo",
+      "cp_cajeros_total",
+      "cp_tpv_bm",
+      "cp_tpv_bd",
+      "cp_tpv_socap",
+      "cp_tpv_sofipo",
+      "cp_tpv_total_eacp",
+      "cp_tpv_agregadores",
+      "cp_tpv_adq_no_banc",
+      "cp_tpv_total_ag_adq",
+      "cp_tpv_total",
+      "cp_cuentas_bm",
+      "cp_cuentas_bd",
+      "cp_cuentas_socap",
+      "cp_cuentas_sofipo",
+      "cp_cuentas_total",
+      "cp_creditos_bm",
+      "cp_creditos_bd",
+      "cp_creditos_socap",
+      "cp_creditos_sofipo",
+      "cp_creditos_total",
+      "cp_sar_asignado",
+      "cp_sar_registrado",
+      "cp_sar_total",
+      "cp_seg_vida",
+      "cp_seg_pensiones",
+      "cp_seg_accidentes",
+      "cp_seg_danos_sin_autos",
+      "cp_seg_automoviles",
+      "cp_seg_total",
+      "cp_tx_tpv_bm",
+      "cp_tx_tpv_bd",
+      "cp_tx_tpv_socap",
+      "cp_tx_tpv_sofipo",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_condusef_ubicacion",
+      "cp_condusef_reclamaciones",
+      "cp_ac_inf_sucursales",
+      "cp_ac_inf_corresponsales",
+      "cp_ac_inf_cajeros",
+      "cp_ac_inf_tpv",
+      "cp_ac_inf_total_ag_adq",
+      "cp_ac_pf_captacion",
+      "cp_ac_pf_credito",
+      "cp_ac_pf_afore",
+      "cp_ac_pf_vida",
+      "cp_ac_pf_pensiones",
+      "cp_ac_pf_accidentes",
+      "cp_ac_pf_danos_sin_autos",
+      "cp_ac_pf_automoviles",
+      "cp_ac_mp_tx_tpv",
+      "cp_ac_mp_remesas",
+      "cp_ac_mp_ubicacion",
+      "cp_ac_mp_reclamaciones",
+      "cp_periodo",
+    ];
+    for (const f of cnbvNullFields) base[f] = null;
+    // sv_ — SICT estado-grain aggregate cols. Strings to match json_agg's
+    // numeric-as-string contract.
+    base.sv_station_count = "245";
+    base.sv_tdpa_total = "5800000";
+    base.sv_tdpa_max = "98000";
+    base.sv_tdpa_mean = "23673";
+    base.sv_pct_motos = "3.42";
+    base.sv_pct_autos = "78.15";
+    base.sv_pct_buses = "1.93";
+    base.sv_pct_camiones = "16.21";
+    base.sv_pct_otros = "0.29";
+    base.sv_route_count = "18";
+    base.sv_routes_top = "{MEX-080,MEX-15D,MEX-090}";
+    return { ...base, ...overrides };
+  }
+
+  it("returns datos_viales with full estado shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sictEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    const v = body.datos_viales;
+    expect(v).not.toBeNull();
+    expect(v!.station_count).toBe(245);
+    expect(v!.tdpa_total).toBe(5800000);
+    expect(v!.tdpa_max).toBe(98000);
+    expect(v!.tdpa_mean).toBe(23673);
+    expect(v!.composition.pct_motos).toBeCloseTo(3.42);
+    expect(v!.composition.pct_autos).toBeCloseTo(78.15);
+    expect(v!.composition.pct_buses).toBeCloseTo(1.93);
+    expect(v!.composition.pct_camiones).toBeCloseTo(16.21);
+    expect(v!.composition.pct_otros).toBeCloseTo(0.29);
+    expect(v!.route_count).toBe(18);
+    expect(v!.routes_top).toEqual(["MEX-080", "MEX-15D", "MEX-090"]);
+  });
+
+  it("returns datos_viales: null for estados with zero geo-located stations (defensive contract)", async () => {
+    // 2024 data has all 32/32 estados covered (CDMX has 44 stations on
+    // MEX-015D/MEX-150D/MEX-095 arterials), so this `null` path is not
+    // exercised in production today. Pin the marshaller's miss-handling
+    // anyway — future SICT releases may drop an estado, and the LEFT JOIN
+    // miss must collapse the entire datos_viales subtree to null (not
+    // partial-null).
+    const overrides: Record<string, unknown> = {
+      cve_ent: "09",
+      nom_ent: "Ciudad de México",
+      sv_station_count: null,
+      sv_tdpa_total: null,
+      sv_tdpa_max: null,
+      sv_tdpa_mean: null,
+      sv_pct_motos: null,
+      sv_pct_autos: null,
+      sv_pct_buses: null,
+      sv_pct_camiones: null,
+      sv_pct_otros: null,
+      sv_route_count: null,
+      sv_routes_top: null,
+    };
+    mockExec.mockReturnValue(JSON.stringify([sictEstadoMockRow(overrides)]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.datos_viales).toBeNull();
+  });
+
+  it("entidad-detail SQL LEFT-JOINs sict_traffic_by_estado on cve_ent", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sictEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    const sql = String(mockExec.mock.calls.at(-1)?.[1]?.at(-1) ?? "");
+    expect(sql).toContain(
+      "LEFT JOIN sict_traffic_by_estado se ON se.cve_ent = ce.cve_ent",
+    );
+    // Pin every sv_-aliased column so a future column rename is caught
+    // before the marshaller silently returns null.
+    for (const col of [
+      "sv_station_count",
+      "sv_tdpa_total",
+      "sv_tdpa_max",
+      "sv_tdpa_mean",
+      "sv_pct_motos",
+      "sv_pct_autos",
+      "sv_pct_buses",
+      "sv_pct_camiones",
+      "sv_pct_otros",
+      "sv_route_count",
+      "sv_routes_top",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
 describe("InclusionFinancieraResult shape symmetry (v0.2.12)", () => {
   /**
    * Both /analytics/municipio-detail and /analytics/entidad-detail expose

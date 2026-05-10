@@ -19,6 +19,10 @@
  *      - Per-muni aggregates (station_count, tdpa_total/max/mean).
  *      - TDPA-weighted vehicle composition.
  *      - Top-3 routes by station count.
+ *   5. Build MATERIALIZED VIEW `sict_traffic_by_estado` (v0.2.15):
+ *      - Per-estado aggregates with the SAME formula as muni MV (re-applied
+ *        from station-level rows; not rolled up from muni MV — averaging
+ *        muni-percentages across estados drifts the weighted composition).
  *
  * Usage:
  *   npx tsx --env-file=.env scripts/load-sict-datos-viales.ts \
@@ -172,6 +176,11 @@ const numericCast = (col: string): string =>
 // per (lat, lon, clave, punto_generador, km, te, sc) regardless of which
 // estado published it. Empirically simpler: dedupe BEFORE the spatial join.
 export const STATIONS_VIEW_DDL = `
+-- Drop dependents BEFORE the base view. Postgres DROP VIEW does not cascade;
+-- without this ordering a second \`--force\` reload after v0.2.15 fails with
+-- "cannot drop view sict_estaciones_viales because other objects depend on it"
+-- (the estado MV references this view). Audit C1 round-1 fix.
+DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_estado;
 DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_municipio;
 DROP VIEW IF EXISTS sict_estaciones_viales;
 
@@ -240,9 +249,12 @@ WITH per_muni AS (
   GROUP BY cve_mun, cve_ent
 ),
 top_routes AS (
+  -- Audit W1 round-1: tie-breaker ruta ASC matches the inner ROW_NUMBER's
+  -- so ARRAY_AGG output ordering stays deterministic across REFRESH cycles
+  -- AND mirrors the estado MV's tie-breaker (avoids cross-grain drift).
   SELECT
     cve_mun,
-    ARRAY_AGG(ruta ORDER BY n DESC)::TEXT[] AS routes_top
+    ARRAY_AGG(ruta ORDER BY n DESC, ruta ASC)::TEXT[] AS routes_top
   FROM (
     SELECT cve_mun, ruta, COUNT(*) AS n,
            ROW_NUMBER() OVER (PARTITION BY cve_mun ORDER BY COUNT(*) DESC, ruta ASC) AS rk
@@ -278,17 +290,90 @@ CREATE INDEX idx_sict_tbm_tdpa_total
   ON sict_traffic_by_municipio(tdpa_total DESC);
 `.trim();
 
-// Audit W1 (round-2): execute BOTH view DDLs in ONE transaction so a partial
-// failure (e.g. transient psql restart between the two calls) cannot leave
-// `sict_estaciones_viales` alive without `sict_traffic_by_municipio` —
-// which would 500 every `municipio-detail` request via the LEFT JOIN.
-// `BEGIN ... COMMIT` makes the two creates atomic; rollback restores the
-// prior state (no view, no MV).
+// View 3 (v0.2.15): per-estado aggregates. Built from the dedupe view, NOT
+// from `sict_traffic_by_municipio` — averaging muni-level percentages would
+// weight a 5-station muni equal to a 100-station muni and drift the estado
+// composition. Re-applying the TDPA-weighted formula at estado grain uses
+// the station-level absolute percentages (m, a, b, c2..t3s2r4, otros) which
+// are already PER-TDPA fractions on the source row.
 //
-// Round-3 audit W2: `\echo` markers between the two DDL blocks so a partial
-// psql failure (under `ON_ERROR_STOP=1`) emits an unambiguous "we got past
-// X, failed at Y" trail in stderr. Otherwise the merged log line in the
-// loader hides which DDL block failed.
+// Estado attribution uses SUBSTRING(cve_mun, 1, 2) — i.e. the spatially-
+// joined muni's home estado, not the CSV-published `estado_publicado` column.
+// This keeps semantics aligned with the muni MV: traffic physically inside
+// estado X's borders, even if SICT published the station under a neighbor.
+export const TRAFFIC_BY_ESTADO_DDL = `
+CREATE MATERIALIZED VIEW sict_traffic_by_estado AS
+WITH per_estado AS (
+  SELECT
+    SUBSTRING(cve_mun, 1, 2) AS cve_ent,
+    COUNT(*)::INTEGER AS station_count,
+    SUM(tdpa)::INTEGER AS tdpa_total,
+    MAX(tdpa)::INTEGER AS tdpa_max,
+    ROUND(AVG(tdpa))::INTEGER AS tdpa_mean,
+    ROUND((SUM(m * tdpa) / NULLIF(SUM(tdpa), 0))::numeric, 2) AS pct_motos,
+    ROUND((SUM(a * tdpa) / NULLIF(SUM(tdpa), 0))::numeric, 2) AS pct_autos,
+    ROUND((SUM(b * tdpa) / NULLIF(SUM(tdpa), 0))::numeric, 2) AS pct_buses,
+    ROUND(
+      (SUM((c2 + c3 + t3s2 + t3s3 + t3s2r4) * tdpa) / NULLIF(SUM(tdpa), 0))::numeric,
+      2
+    ) AS pct_camiones,
+    ROUND((SUM(otros * tdpa) / NULLIF(SUM(tdpa), 0))::numeric, 2) AS pct_otros,
+    COUNT(DISTINCT ruta)::INTEGER AS route_count
+  FROM sict_estaciones_viales
+  WHERE cve_mun IS NOT NULL
+  GROUP BY SUBSTRING(cve_mun, 1, 2)
+),
+top_routes AS (
+  SELECT
+    cve_ent,
+    ARRAY_AGG(ruta ORDER BY n DESC, ruta ASC)::TEXT[] AS routes_top
+  FROM (
+    SELECT
+      SUBSTRING(cve_mun, 1, 2) AS cve_ent,
+      ruta,
+      COUNT(*) AS n,
+      ROW_NUMBER() OVER (
+        PARTITION BY SUBSTRING(cve_mun, 1, 2)
+        ORDER BY COUNT(*) DESC, ruta ASC
+      ) AS rk
+    FROM sict_estaciones_viales
+    WHERE cve_mun IS NOT NULL AND ruta IS NOT NULL
+    GROUP BY SUBSTRING(cve_mun, 1, 2), ruta
+  ) ranked
+  WHERE rk <= 3
+  GROUP BY cve_ent
+)
+SELECT
+  pe.cve_ent,
+  pe.station_count,
+  pe.tdpa_total,
+  pe.tdpa_max,
+  pe.tdpa_mean,
+  pe.pct_motos,
+  pe.pct_autos,
+  pe.pct_buses,
+  pe.pct_camiones,
+  pe.pct_otros,
+  pe.route_count,
+  COALESCE(tr.routes_top, ARRAY[]::TEXT[]) AS routes_top
+FROM per_estado pe
+LEFT JOIN top_routes tr USING (cve_ent);
+
+CREATE UNIQUE INDEX idx_sict_tbe_cve_ent
+  ON sict_traffic_by_estado(cve_ent);
+CREATE INDEX idx_sict_tbe_tdpa_total
+  ON sict_traffic_by_estado(tdpa_total DESC);
+`.trim();
+
+// Audit W1 (round-2): execute ALL view DDLs in ONE transaction so a partial
+// failure (e.g. transient psql restart between calls) cannot leave
+// `sict_estaciones_viales` alive without its consumer MVs — which would 500
+// every `municipio-detail` and `entidad-detail` request via the LEFT JOIN.
+// `BEGIN ... COMMIT` makes the creates atomic; rollback restores prior state.
+//
+// Round-3 audit W2: `\echo` markers between DDL blocks so a partial psql
+// failure (under `ON_ERROR_STOP=1`) emits an unambiguous "we got past X,
+// failed at Y" trail in stderr.
 export const VIEWS_DDL_TRANSACTION = `
 BEGIN;
 
@@ -300,6 +385,10 @@ ${STATIONS_VIEW_DDL}
 
 ${TRAFFIC_BY_MUNI_DDL}
 
+\\echo [load-sict] building traffic-by-estado MV + indexes...
+
+${TRAFFIC_BY_ESTADO_DDL}
+
 COMMIT;
 `.trim();
 
@@ -308,7 +397,8 @@ SELECT
   (SELECT COUNT(*) FROM sict_estaciones_viales_raw_2024) AS raw_rows,
   (SELECT COUNT(*) FROM sict_estaciones_viales) AS view_stations,
   (SELECT COUNT(DISTINCT cve_mun) FROM sict_estaciones_viales WHERE cve_mun IS NOT NULL) AS distinct_muni,
-  (SELECT COUNT(*) FROM sict_traffic_by_municipio) AS muni_with_traffic;
+  (SELECT COUNT(*) FROM sict_traffic_by_municipio) AS muni_with_traffic,
+  (SELECT COUNT(*) FROM sict_traffic_by_estado) AS estados_with_traffic;
 `.trim();
 
 // --- Loader ---

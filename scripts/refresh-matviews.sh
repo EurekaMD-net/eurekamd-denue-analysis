@@ -6,7 +6,7 @@
 #   - SESNSP loader (load-sesnsp.ts) → mv_delitos_municipal_yearly
 #   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
-#   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio
+#   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio + sict_traffic_by_estado
 #   - SEDATU loader (load-sedatu-financiamientos.ts) → sedatu_financing_by_municipio
 #
 # The handlers fall back to live aggregation when an MV is missing entirely
@@ -42,6 +42,9 @@ REFRESH MATERIALIZED VIEW mv_mortalidad_municipal_yearly;
 
 \echo Refreshing sict_traffic_by_municipio...
 REFRESH MATERIALIZED VIEW sict_traffic_by_municipio;
+
+\echo Refreshing sict_traffic_by_estado...
+REFRESH MATERIALIZED VIEW sict_traffic_by_estado;
 
 \echo Refreshing sedatu_financing_by_municipio...
 REFRESH MATERIALIZED VIEW sedatu_financing_by_municipio;
