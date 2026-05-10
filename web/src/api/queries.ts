@@ -28,69 +28,69 @@ import {
 async function fetchJson<S extends z.ZodTypeAny>(
   path: string,
   schema: S,
-  apiKey: string | null,
+  accessToken: string | null,
 ): Promise<z.infer<S>> {
-  const res = await apiFetch(path, {}, apiKey);
+  const res = await apiFetch(path, {}, accessToken);
   const body: unknown = await res.json();
   return schema.parse(body);
 }
 
 /** Loads 32-entry dropdown source. Cached 5 minutes by TanStack default. */
 export function useEntidades(): UseQueryResult<EntidadesResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["entidades"],
-    queryFn: () => fetchJson("/entidades", ENTIDADES_RESULT, apiKey),
-    enabled: apiKey !== null,
+    queryFn: () => fetchJson("/entidades", ENTIDADES_RESULT, accessToken),
+    enabled: accessToken !== null,
   });
 }
 
 export function useSectors(): UseQueryResult<SectorsResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["sectors"],
-    queryFn: () => fetchJson("/sectors", SECTORS_RESULT, apiKey),
-    enabled: apiKey !== null,
+    queryFn: () => fetchJson("/sectors", SECTORS_RESULT, accessToken),
+    enabled: accessToken !== null,
   });
 }
 
 export function useNationalTreemap(): UseQueryResult<NationalTreemapResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "national-treemap"],
     queryFn: () =>
-      fetchJson("/analytics/national-treemap", NATIONAL_TREEMAP_RESULT, apiKey),
-    enabled: apiKey !== null,
+      fetchJson("/analytics/national-treemap", NATIONAL_TREEMAP_RESULT, accessToken),
+    enabled: accessToken !== null,
   });
 }
 
 export function useSectorGradeMatrix(): UseQueryResult<SectorGradeMatrixResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "sector-grade-matrix"],
     queryFn: () =>
       fetchJson(
         "/analytics/sector-grade-matrix",
         SECTOR_GRADE_MATRIX_RESULT,
-        apiKey,
+        accessToken,
       ),
-    enabled: apiKey !== null,
+    enabled: accessToken !== null,
   });
 }
 
 export function useMunicipiosAnalytics(
   entidad: string | null,
 ): UseQueryResult<MunicipiosAnalyticsResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "municipios", entidad],
     queryFn: () =>
       fetchJson(
         `/analytics/municipios?entidad=${encodeURIComponent(entidad ?? "")}`,
         MUNICIPIOS_ANALYTICS_RESULT,
-        apiKey,
+        accessToken,
       ),
-    enabled: apiKey !== null && entidad !== null,
+    enabled: accessToken !== null && entidad !== null,
   });
 }
 
@@ -98,7 +98,7 @@ export function useTopSectorsByEntidad(
   entidad: string | null,
   limit = 10,
 ): UseQueryResult<TopSectorsResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "top-sectors", entidad, limit],
     queryFn: () =>
@@ -107,9 +107,9 @@ export function useTopSectorsByEntidad(
           entidad ?? "",
         )}&limit=${limit}`,
         TOP_SECTORS_RESULT,
-        apiKey,
+        accessToken,
       ),
-    enabled: apiKey !== null && entidad !== null,
+    enabled: accessToken !== null && entidad !== null,
   });
 }
 
@@ -118,15 +118,15 @@ export function useTopSectorsByEntidad(
  * Caller is responsible for debounce upstream (we just gate on length).
  */
 export function useSearch(q: string): UseQueryResult<SearchResult> {
-  const apiKey = useUiStore((s) => s.accessToken());
-  const enabled = apiKey !== null && q.trim().length >= 3;
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
+  const enabled = accessToken !== null && q.trim().length >= 3;
   return useQuery({
     queryKey: ["search", q],
     queryFn: () =>
       fetchJson(
         `/search?q=${encodeURIComponent(q)}&limit=20`,
         SEARCH_RESULT,
-        apiKey,
+        accessToken,
       ),
     enabled,
     staleTime: 30_000,

@@ -43,7 +43,7 @@ export async function apiFetch(
   const token =
     tokenOverride !== undefined
       ? tokenOverride
-      : useUiStore.getState().accessToken();
+      : (useUiStore.getState().session?.access_token ?? null);
   if (!token) {
     throw new ApiError("No active session", 401, "no_session");
   }

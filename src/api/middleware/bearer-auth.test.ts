@@ -16,8 +16,8 @@ function b64url(input: Buffer | string): string {
 function makeJwt(
   payload: Record<string, unknown>,
   secret: string = JWT_SECRET,
+  header: Record<string, unknown> = { alg: "HS256", typ: "JWT" },
 ): string {
-  const header = { alg: "HS256", typ: "JWT" };
   const headerB64 = b64url(JSON.stringify(header));
   const payloadB64 = b64url(JSON.stringify(payload));
   const sig = createHmac("sha256", secret)
@@ -106,6 +106,176 @@ describe("verifyBearer", () => {
     const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("WRONG_ROLE");
+  });
+
+  // ---- Audit A C1: strict aud/role enforcement -----------------------
+  it("rejects token missing aud claim (R1 audit C1)", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      // aud omitted
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_AUD");
+  });
+
+  it("rejects token missing role claim", () => {
+    const tok = makeJwt({
+      sub: "u",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_ROLE");
+  });
+
+  it("rejects token with empty-string aud", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_AUD");
+  });
+
+  // ---- Audit A C2: strict exp type ------------------------------------
+  it("rejects token with non-numeric exp (string)", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: "9999999999",
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("EXPIRED");
+  });
+
+  it("rejects token with missing exp", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("EXPIRED");
+  });
+
+  it("rejects token with exp=NaN-coercible value (object)", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      exp: {},
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("EXPIRED");
+  });
+
+  // ---- Audit A W2: alg confusion --------------------------------------
+  it("rejects alg=none token", () => {
+    const tok = makeJwt(
+      {
+        sub: "u",
+        role: "authenticated",
+        aud: "authenticated",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      JWT_SECRET,
+      { alg: "none", typ: "JWT" },
+    );
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_ALG");
+  });
+
+  it("rejects alg=RS256 token (algorithm confusion defense)", () => {
+    const tok = makeJwt(
+      {
+        sub: "u",
+        role: "authenticated",
+        aud: "authenticated",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      JWT_SECRET,
+      { alg: "RS256", typ: "JWT" },
+    );
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_ALG");
+  });
+
+  // ---- Audit A R3: strict sub type ------------------------------------
+  it("rejects token with non-string sub", () => {
+    const tok = makeJwt({
+      sub: { id: "abc" },
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("MALFORMED");
+  });
+
+  // ---- Audit A R1: structural malformedness ---------------------------
+  it("rejects 2-part token (missing signature)", () => {
+    const r = verifyBearer(`Bearer abc.def`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("MALFORMED");
+  });
+
+  it("rejects 4-part token", () => {
+    const r = verifyBearer(`Bearer a.b.c.d`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("MALFORMED");
+  });
+
+  it("rejects empty-segment token", () => {
+    const r = verifyBearer(`Bearer a..c`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("MALFORMED");
+  });
+
+  // ---- Audit A W3: header parsing -------------------------------------
+  it("trims leading/trailing whitespace from the header", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`  Bearer ${tok}  `, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(true);
+  });
+
+  it("accepts case-insensitive 'bearer' prefix (audit B W1)", () => {
+    const tok = makeJwt({
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const r = verifyBearer(`bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(true);
   });
 
   it("caches subsequent verifications", () => {

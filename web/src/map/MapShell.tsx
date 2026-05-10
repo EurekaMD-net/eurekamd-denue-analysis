@@ -57,7 +57,12 @@ export function extractCleeFromFeature(feature: unknown): string | null {
 export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapInstance | null>(null);
-  const apiKey = useUiStore((s) => s.accessToken());
+  // Audit C N1: this is a JWT access_token now, not an API key.
+  // Audit C W1: subscribe to session.access_token directly so the
+  // selector tracks the real value across token refresh (the
+  // accessToken() function reference would otherwise stay stable
+  // forever and miss refreshes).
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
 
@@ -89,16 +94,16 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
       maxZoom: 17,
       minZoom: 3,
       attributionControl: { compact: true },
-      // Inject X-Api-Key on every tile fetch hitting our backend. Other
-      // requests (basemap tiles to Carto) pass through unchanged.
-      // Audit W1 fix: short-circuit when no key is set so we don't
-      // silently 401 every tile with an empty header. Audit S3 fix:
-      // dropped redundant URL.includes("/api/tiles/") clause (subset).
-      // 2026-05-04 fix: tile URLs are now absolute (must be — MapLibre
-      // calls new Request(url)), so match by pathname rather than by
-      // prefix. Same-origin guard via window.location.origin so we
-      // don't accidentally inject the key into a third-party basemap
-      // CDN that happens to have /api/ in its path.
+      // Inject Authorization: Bearer <jwt> on every tile fetch hitting
+      // our backend. Other requests (basemap tiles to Carto) pass
+      // through unchanged. Audit C C1 fix: was sending JWT under the
+      // X-Api-Key header — backend's bearer auth path never saw it,
+      // every tile 401'd.
+      // 2026-05-04: tile URLs are absolute (must be — MapLibre calls
+      // new Request(url)), so match by pathname. Same-origin guard via
+      // window.location.origin so we don't accidentally inject auth
+      // into a third-party basemap CDN that happens to have /api/ in
+      // its path.
       transformRequest: (url, _resourceType) => {
         let isOurApi = false;
         try {
@@ -112,15 +117,20 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
           isOurApi = false;
         }
         if (!isOurApi) return { url };
-        if (!apiKey) {
-          // No key = no point firing the request. Backend would 401
+        if (!accessToken) {
+          // No session = no point firing the request. Backend would 401
           // every tile and the user would see a blank map with no
-          // signal. Better to skip until ApiKeyGate sets a key, which
-          // bumps the dep array and recreates the map with auth.
-          console.warn("[map] skipping tile fetch — no API key set");
+          // signal. Better to skip until LoginGate restores a session,
+          // which bumps the dep array and recreates the map with auth.
+          if (import.meta.env.DEV) {
+            console.warn("[map] skipping tile fetch — no active session");
+          }
           return { url, headers: {} };
         }
-        return { url, headers: { "X-Api-Key": apiKey } };
+        return {
+          url,
+          headers: { Authorization: `Bearer ${accessToken}` },
+        };
       },
     });
     mapRef.current = map;
@@ -162,8 +172,8 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [basemap, apiKey, onMapLoad, onPointClick]);
-  // ^ apiKey change forces re-create so transformRequest closes over fresh key
+  }, [basemap, accessToken, onMapLoad, onPointClick]);
+  // ^ accessToken change forces re-create so transformRequest closes over fresh token
 
   // Filter changes: rebuild the source URL without remounting the map,
   // and shift the layer zoom ranges so dots are visible immediately

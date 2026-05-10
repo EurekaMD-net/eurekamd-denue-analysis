@@ -140,8 +140,15 @@ function translateAuthError(raw: string): string {
   if (/email not confirmed/i.test(raw)) {
     return "El correo aún no está confirmado.";
   }
-  if (/rate limit/i.test(raw)) {
+  // Supabase rate-limit shapes vary across versions (audit C R4).
+  if (
+    /rate limit|too many requests|security purposes|too many login/i.test(raw)
+  ) {
     return "Demasiados intentos. Espera unos segundos.";
+  }
+  // Network failures (Supabase down, CORS misconfig, offline). Audit C W4.
+  if (/failed to fetch|network|networkerror/i.test(raw)) {
+    return "No se pudo contactar al servidor. Revisa tu conexión.";
   }
   return raw;
 }

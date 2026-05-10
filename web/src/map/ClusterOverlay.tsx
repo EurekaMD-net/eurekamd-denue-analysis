@@ -37,12 +37,12 @@ const CLUSTERS_RESULT = z.object({
 type ClusterCentroid = z.infer<typeof CLUSTER_CENTROID>;
 
 export function ClusterOverlay({ map }: Props) {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
   const overlayRef = useRef<MapboxOverlay | null>(null);
 
-  const enabled = apiKey !== null && entidad !== null && sector !== null;
+  const enabled = accessToken !== null && entidad !== null && sector !== null;
 
   const { data } = useQuery({
     queryKey: ["clusters", entidad, sector],
@@ -51,7 +51,7 @@ export function ClusterOverlay({ map }: Props) {
         `/clusters?entidad=${encodeURIComponent(entidad ?? "")}` +
           `&scian=${encodeURIComponent(sector ?? "")}&k=10`,
         {},
-        apiKey,
+        accessToken,
       );
       const body: unknown = await res.json();
       // The backend returns { entidad, scian, k, centroids: [{cluster_id,

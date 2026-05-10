@@ -29,7 +29,7 @@ const INITIAL_AXIS: AxisState = {
  * starter configurations.
  */
 export function LocustMode() {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   const [xAxis, setXAxis] = useState<AxisState>(INITIAL_AXIS);
   const [yAxis, setYAxis] = useState<AxisState>(INITIAL_AXIS);
   const [zAxis, setZAxis] = useState<AxisState>(INITIAL_AXIS);
@@ -65,7 +65,7 @@ export function LocustMode() {
   );
   const chartType = chartOverride ?? derivedChartType;
 
-  const dataset = useLocustDataset(xAxis, yAxis, zAxis, apiKey);
+  const dataset = useLocustDataset(xAxis, yAxis, zAxis, accessToken);
 
   const onFieldPicked = (field: FieldDef) => {
     if (!pickerOpen) return;
@@ -336,7 +336,7 @@ function useLocustDataset(
   xAxis: AxisState,
   yAxis: AxisState,
   _zAxis: AxisState,
-  apiKey: string | null,
+  accessToken: string | null,
 ) {
   const grain = xAxis.field?.grain ?? yAxis.field?.grain ?? "estado";
   const entidad = useUiStore((s) => s.entidad);
@@ -348,11 +348,11 @@ function useLocustDataset(
         grain === "muni" && entidad
           ? `/analytics/municipios?entidad=${entidad}`
           : "/analytics/national-treemap";
-      const res = await apiFetch(path, {}, apiKey);
+      const res = await apiFetch(path, {}, accessToken);
       return res.json() as Promise<unknown>;
     },
     enabled:
-      apiKey !== null &&
+      accessToken !== null &&
       xAxis.field !== null &&
       yAxis.field !== null &&
       (!needsEntidad || entidad !== null),

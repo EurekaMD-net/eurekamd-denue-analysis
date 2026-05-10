@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Session } from "@supabase/supabase-js";
+import type { QueryClient } from "@tanstack/react-query";
 
 export type Mode = "map" | "locust";
 
@@ -12,9 +13,26 @@ export interface UiState {
    */
   session: Session | null;
   setSession: (s: Session | null) => void;
-  /** Convenience accessor for the access_token header. */
-  accessToken: () => string | null;
-  /** Sign out via Supabase + clear session locally. */
+  /**
+   * QueryClient handle, set once at App mount so signOut can call
+   * cancelQueries + clear before the new sign-in lands. Without this
+   * the previous user's cached data would survive the gate and a
+   * different account would briefly see their predecessor's results.
+   * Audit C C3.
+   */
+  queryClient: QueryClient | null;
+  setQueryClient: (qc: QueryClient) => void;
+  /**
+   * Sign-out abort surface. Long-lived consumers (Sage SSE stream,
+   * in-flight fetches) register their AbortController; signOut() walks
+   * the set and aborts each. Without this, an in-flight Sage stream
+   * keeps consuming bytes using the previous JWT after the user clicks
+   * Sign out. Audit C C2.
+   */
+  abortRegistry: Set<AbortController>;
+  registerAbort: (ctrl: AbortController) => () => void;
+
+  /** Sign out: abort in-flight, clear cache, drop session. */
   signOut: () => Promise<void>;
 
   entidad: string | null;
@@ -27,12 +45,39 @@ export interface UiState {
 export const useUiStore = create<UiState>((set, get) => ({
   session: null,
   setSession: (s) => set({ session: s }),
-  accessToken: () => get().session?.access_token ?? null,
+
+  queryClient: null,
+  setQueryClient: (qc) => set({ queryClient: qc }),
+
+  abortRegistry: new Set<AbortController>(),
+  registerAbort: (ctrl) => {
+    const reg = get().abortRegistry;
+    reg.add(ctrl);
+    return () => reg.delete(ctrl);
+  },
+
   signOut: async () => {
-    // Lazy import to avoid a circular dependency: supabase client
-    // depends on env, which Vite resolves before the store mounts.
+    // 1. Cancel in-flight TanStack queries so they don't write stale
+    //    results into the new user's cache.
+    const qc = get().queryClient;
+    if (qc) {
+      await qc.cancelQueries();
+      qc.clear();
+    }
+    // 2. Abort long-lived consumers (Sage SSE, etc.).
+    for (const ctrl of get().abortRegistry) {
+      try {
+        ctrl.abort();
+      } catch {
+        // already aborted
+      }
+    }
+    get().abortRegistry.clear();
+    // 3. Tell Supabase to invalidate the refresh token + clear local
+    //    storage. Lazy-import to avoid a circular dep at module init.
     const { supabase } = await import("./lib/supabase");
     await supabase.auth.signOut();
+    // 4. Drop the session in the store so LoginGate re-shows.
     set({ session: null });
   },
 

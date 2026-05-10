@@ -38,6 +38,36 @@ function requireEnv(name: string): string {
   return v;
 }
 
+// Trim + validate SUPABASE_JWT_SECRET at boot. Operator-error like
+// trailing newline / surrounding quotes / leading whitespace would
+// otherwise silently break JWT verification: the HMAC uses the busted
+// bytes but GoTrue signs with the clean ones, so every browser sign-in
+// fails BAD_SIGNATURE while X-Api-Key keeps working — diagnosable but
+// easy to miss in incident review. Audit B W2.
+function trimAndValidateJwtSecret(): string | undefined {
+  const raw = process.env["SUPABASE_JWT_SECRET"];
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    console.warn(
+      "⚠️  SUPABASE_JWT_SECRET is empty after trim — Bearer auth disabled.",
+    );
+    return undefined;
+  }
+  if (trimmed !== raw) {
+    console.warn(
+      "⚠️  SUPABASE_JWT_SECRET had leading/trailing whitespace; using trimmed value. " +
+        "Fix .env to avoid silent HMAC mismatches.",
+    );
+  }
+  if (trimmed.length < 32) {
+    console.warn(
+      `⚠️  SUPABASE_JWT_SECRET is only ${trimmed.length} chars; HS256 best-practice is ≥32 bytes of entropy.`,
+    );
+  }
+  return trimmed;
+}
+
 const config: ApiServerConfig = {
   supabaseUrl: requireEnv("SUPABASE_URL"),
   serviceRoleKey: requireEnv("SUPABASE_SERVICE_KEY"),
@@ -46,7 +76,7 @@ const config: ApiServerConfig = {
   // Optional. When present, browser users authenticate via Supabase
   // Auth and the API accepts Authorization: Bearer <jwt>. Absent =
   // X-Api-Key only.
-  supabaseJwtSecret: process.env["SUPABASE_JWT_SECRET"],
+  supabaseJwtSecret: trimAndValidateJwtSecret(),
 };
 
 const port = parseInt(process.env["API_PORT"] ?? "3030", 10);

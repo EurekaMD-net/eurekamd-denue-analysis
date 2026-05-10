@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import {
   createBrowserRouter,
   Navigate,
@@ -9,6 +9,7 @@ import { LoginGate } from "./components/LoginGate";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
 import { LocustMode } from "./modes/LocustMode";
+import { useUiStore } from "./store";
 
 // MapMode pulls maplibre-gl + deck.gl (~1.5 MB JS). Lazy-loaded so the
 // default /locust landing doesn't pay the cost. Audit P3-perf D fix
@@ -86,6 +87,12 @@ export function App() {
         },
       }),
   );
+  // Wire the QueryClient into the store so signOut() can cancel +
+  // clear before the next user lands (audit C C3).
+  const setQueryClient = useUiStore((s) => s.setQueryClient);
+  useEffect(() => {
+    setQueryClient(queryClient);
+  }, [queryClient, setQueryClient]);
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>

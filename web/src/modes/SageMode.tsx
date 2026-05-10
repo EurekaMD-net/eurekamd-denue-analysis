@@ -26,7 +26,7 @@ interface ChatTurn {
  * "load thread" UI is out of scope for the demo).
  */
 export function SageMode() {
-  const apiKey = useUiStore((s) => s.accessToken());
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -36,8 +36,8 @@ export function SageMode() {
 
   const health = useQuery({
     queryKey: ["sage", "health"],
-    queryFn: () => fetchSageHealth(apiKey),
-    enabled: apiKey !== null,
+    queryFn: () => fetchSageHealth(accessToken),
+    enabled: accessToken !== null,
     staleTime: 60_000,
   });
 
@@ -68,11 +68,16 @@ export function SageMode() {
       const idx = turns.length;
       const ctrl = new AbortController();
       abortRef.current = ctrl;
+      // Register with the global abort registry so signOut() can cancel
+      // this stream — without this, an in-flight SSE keeps consuming
+      // bytes using the (still valid until exp) JWT after sign-out
+      // (audit C C2).
+      const unregister = useUiStore.getState().registerAbort(ctrl);
       try {
         for await (const ev of sageQueryStream(
           question,
           threadId,
-          apiKey,
+          accessToken,
           ctrl.signal,
         )) {
           setTurns((current) => {
@@ -162,9 +167,10 @@ export function SageMode() {
       } finally {
         setStreaming(false);
         abortRef.current = null;
+        unregister();
       }
     },
-    [apiKey, threadId, turns.length, streaming],
+    [accessToken, threadId, turns.length, streaming],
   );
 
   const newThread = useCallback(() => {

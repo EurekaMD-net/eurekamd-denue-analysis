@@ -19,8 +19,8 @@ interface Props {
  * useful fields. Unknown fields are listed verbatim at the bottom.
  */
 export function EstablishmentCard({ clee, onClose }: Props) {
-  const apiKey = useUiStore((s) => s.accessToken());
-  const enabled = clee !== null && apiKey !== null;
+  const accessToken = useUiStore((s) => s.session?.access_token ?? null);
+  const enabled = clee !== null && accessToken !== null;
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["establishment", clee],
@@ -28,7 +28,7 @@ export function EstablishmentCard({ clee, onClose }: Props) {
       const res = await apiFetch(
         `/establishment/${encodeURIComponent(clee ?? "")}`,
         {},
-        apiKey,
+        accessToken,
       );
       const body: unknown = await res.json();
       return ESTABLISHMENT_RESULT.parse(body);
