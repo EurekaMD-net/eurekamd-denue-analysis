@@ -1294,6 +1294,20 @@ export interface MunicipioDetailResult {
    * "missing" from "n<100 suppressed" — both surface as null.
    */
   inclusion_financiera: InclusionFinancieraResult;
+  /**
+   * Federal-highway road traffic intensity (SICT Datos Viales 2024, v0.2.13).
+   * Sourced from `sict_traffic_by_municipio` materialized view, populated
+   * via PostGIS spatial join (ST_Contains) of TDPA stations to muni polygons.
+   * LEFT JOIN — munis without a federal-highway station surface as null
+   * (~1,316 of 2,469 munis nationally have no station inside their polygon).
+   *
+   * Vehicle composition is **TDPA-weighted** across stations in the muni:
+   * a 2-station muni with one 80k-TDPA truck-heavy corridor and one 800-TDPA
+   * automovil-heavy access road weights the heavy corridor ~100× more.
+   * `pct_camiones` aggregates SICT classes c2+c3+t3s2+t3s3+t3s2r4
+   * (all heavy-truck axle configs).
+   */
+  datos_viales: DatosVialesResult | null;
 }
 
 /**
@@ -1451,6 +1465,41 @@ export interface GeneroBreakdown {
   socap: { m: number | null; h: number | null; brecha: number | null };
   sofipo: { m: number | null; h: number | null; brecha: number | null };
   total: { m: number | null; h: number | null; brecha: number | null };
+}
+
+/**
+ * Federal-highway road traffic intensity at muni grain. Source: SICT Datos
+ * Viales 2024 (v0.2.13), `sict_traffic_by_municipio` materialized view.
+ *
+ * Aggregation strategy: stations are spatially-joined to munis (PostGIS
+ * ST_Contains) then aggregated. TDPA = Tránsito Diario Promedio Anual
+ * (average vehicles per day across the year).
+ *
+ * Vehicle composition fields (`pct_*`) are **TDPA-weighted** across stations
+ * in the muni — a higher-traffic station pulls the muni average toward its
+ * own composition. They are percentages of vehicle count, not of TDPA mass:
+ * `pct_motos + pct_autos + pct_buses + pct_camiones + pct_otros ≈ 100`
+ * (rounding noise puts live values in 99.98..100.02). `pct_camiones`
+ * aggregates SICT's 5 truck-axle classes (c2 + c3 + t3s2 + t3s3 + t3s2r4)
+ * into one heavy-truck share.
+ *
+ * `routes_top` returns up to 3 federal-route codes ordered by station count
+ * desc (e.g. `["MEX-095D", "MEX-095", "MEX-162"]` for Cuernavaca, MOR).
+ */
+export interface DatosVialesResult {
+  station_count: number;
+  tdpa_total: number;
+  tdpa_max: number;
+  tdpa_mean: number;
+  composition: {
+    pct_motos: number | null;
+    pct_autos: number | null;
+    pct_buses: number | null;
+    pct_camiones: number | null;
+    pct_otros: number | null;
+  };
+  route_count: number;
+  routes_top: string[];
 }
 
 /**

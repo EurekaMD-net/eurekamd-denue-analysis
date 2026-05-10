@@ -91,6 +91,7 @@ import {
   type LicensedPharmaciesByAgebResult,
   type LicensedPharmaciesByMunicipioResult,
   type ColoniasByAgebResult,
+  type DatosVialesResult,
   type EntidadDetailResult,
   type InclusionFinancieraResult,
   type LocalitiesByMunicipioResult,
@@ -4043,6 +4044,78 @@ function inclusionFinancieraFromRow(
 }
 
 /**
+ * SELECT column list for the LEFT JOIN against `sict_traffic_by_municipio`.
+ * All cols aliased with a `sv_` prefix (sv = sict_viales) to avoid collision
+ * with cm.* and cp.* in the same SELECT list. The materialized view itself
+ * is keyed on `cve_mun`; we reference the join-side attributes only.
+ */
+const SICT_MUNI_COLS = `
+    sv.station_count    AS sv_station_count,
+    sv.tdpa_total       AS sv_tdpa_total,
+    sv.tdpa_max         AS sv_tdpa_max,
+    sv.tdpa_mean        AS sv_tdpa_mean,
+    sv.pct_motos        AS sv_pct_motos,
+    sv.pct_autos        AS sv_pct_autos,
+    sv.pct_buses        AS sv_pct_buses,
+    sv.pct_camiones     AS sv_pct_camiones,
+    sv.pct_otros        AS sv_pct_otros,
+    sv.route_count      AS sv_route_count,
+    sv.routes_top       AS sv_routes_top
+`.trim();
+
+/**
+ * Marshal SICT muni-grain row into the `datos_viales` subtree, OR return
+ * `null` if the LEFT JOIN missed (no federal-highway TDPA station inside
+ * this muni's polygon — ~1,316 of 2,469 munis nationally).
+ *
+ * The miss signal we use is `sv_station_count IS NULL` — an integer NOT NULL
+ * column in the materialized view, so `null` here means "no row joined".
+ *
+ * `routes_top` arrives from PostgreSQL as a string-array literal (e.g.
+ * `'{MEX-095D,MEX-095,MEX-162}'` if pg-native, or already a parsed array
+ * via the JSON path). We accept both and normalize to string[].
+ */
+function datosVialesFromRow(
+  r: Record<string, unknown>,
+): DatosVialesResult | null {
+  if (r.sv_station_count === null || r.sv_station_count === undefined) {
+    return null;
+  }
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const numReq = (v: unknown): number => Number(v);
+
+  let routesTop: string[] = [];
+  const raw = r.sv_routes_top;
+  if (Array.isArray(raw)) {
+    routesTop = raw.filter((x): x is string => typeof x === "string");
+  } else if (typeof raw === "string") {
+    // PG array literal `{a,b,c}` — strip braces, split on comma.
+    const trimmed = raw.replace(/^\{/, "").replace(/\}$/, "");
+    routesTop =
+      trimmed.length === 0
+        ? []
+        : trimmed.split(",").map((s) => s.replace(/^"|"$/g, ""));
+  }
+
+  return {
+    station_count: numReq(r.sv_station_count),
+    tdpa_total: numReq(r.sv_tdpa_total),
+    tdpa_max: numReq(r.sv_tdpa_max),
+    tdpa_mean: numReq(r.sv_tdpa_mean),
+    composition: {
+      pct_motos: num(r.sv_pct_motos),
+      pct_autos: num(r.sv_pct_autos),
+      pct_buses: num(r.sv_pct_buses),
+      pct_camiones: num(r.sv_pct_camiones),
+      pct_otros: num(r.sv_pct_otros),
+    },
+    route_count: numReq(r.sv_route_count),
+    routes_top: routesTop,
+  };
+}
+
+/**
  * GET /analytics/municipio-detail?cve_mun=NNNNN
  *
  * Single-municipio demographic surface — same nested-category shape as
@@ -4091,9 +4164,11 @@ SELECT json_agg(row_to_json(t)) FROM (
     cm.vph_inter, cm.vph_autom, cm.vph_refri, cm.vph_lavad, cm.vph_hmicro,
     cm.vph_moto, cm.vph_bici, cm.vph_radio, cm.vph_tv, cm.vph_pc, cm.vph_telef, cm.vph_cel,
     cm.vph_stvp, cm.vph_spmvpi, cm.vph_cvj, cm.vph_snbien,
-    ${CNBV_MUNI_COLS}
+    ${CNBV_MUNI_COLS},
+    ${SICT_MUNI_COLS}
   FROM censo_municipios cm
   LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
+  LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun
   WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
@@ -4197,6 +4272,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       vph_snbien: num(r.vph_snbien),
     },
     inclusion_financiera: inclusionFinancieraFromRow(r, "muni"),
+    datos_viales: datosVialesFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

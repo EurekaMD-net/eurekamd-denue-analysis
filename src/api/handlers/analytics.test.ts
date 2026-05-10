@@ -5699,6 +5699,259 @@ describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
   });
 });
 
+// ===========================================================================
+// v0.2.13: SICT Datos Viales 2024 — datos_viales nested category
+// ===========================================================================
+
+describe("/analytics/municipio-detail (v0.2.13 datos_viales)", () => {
+  /**
+   * Build a muni-detail mock row with all censo + cnbv fields null and
+   * sv_-prefixed SICT cols filled to a Cuernavaca-shaped fingerprint
+   * (top-TDPA muni in the live data, MEX-095/MEX-095D corridor).
+   */
+  function sictMuniMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_mun: "17007",
+      entidad: "17",
+      mun: "007",
+      nom_mun: "Cuernavaca",
+      nom_ent: "Morelos",
+    };
+    // Null all the censo and cnbv leaves we don't care about here.
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ];
+    for (const f of nullFields) base[f] = null;
+    // sv_ — SICT muni-grain aggregate cols. Strings to match json_agg's
+    // numeric-as-string contract.
+    base.sv_station_count = "26";
+    base.sv_tdpa_total = "837080";
+    base.sv_tdpa_max = "59489";
+    base.sv_tdpa_mean = "32195";
+    base.sv_pct_motos = "4.69";
+    base.sv_pct_autos = "86.29";
+    base.sv_pct_buses = "1.61";
+    base.sv_pct_camiones = "7.19";
+    base.sv_pct_otros = "0.22";
+    base.sv_route_count = "4";
+    // PG array literal (what comes back from psql --json text columns —
+    // covers the parser's `{a,b,c}` branch).
+    base.sv_routes_top = "{MEX-095,MEX-095D,MEX-162}";
+    return { ...base, ...overrides };
+  }
+
+  it("returns datos_viales with full muni shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sictMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.datos_viales;
+    expect(v).not.toBeNull();
+    expect(v!.station_count).toBe(26);
+    expect(v!.tdpa_total).toBe(837080);
+    expect(v!.tdpa_max).toBe(59489);
+    expect(v!.tdpa_mean).toBe(32195);
+    expect(v!.composition.pct_motos).toBeCloseTo(4.69);
+    expect(v!.composition.pct_autos).toBeCloseTo(86.29);
+    expect(v!.composition.pct_buses).toBeCloseTo(1.61);
+    // pct_camiones = c2 + c3 + t3s2 + t3s3 + t3s2r4 — heavy-truck total share.
+    expect(v!.composition.pct_camiones).toBeCloseTo(7.19);
+    expect(v!.composition.pct_otros).toBeCloseTo(0.22);
+    expect(v!.route_count).toBe(4);
+    // routes_top: parsed from PG array literal `{MEX-095,MEX-095D,MEX-162}`.
+    expect(v!.routes_top).toEqual(["MEX-095", "MEX-095D", "MEX-162"]);
+  });
+
+  it("composition percentages sum to ~100 (TDPA-weighted aggregate invariant)", async () => {
+    // The TDPA-weighted aggregate over a muni's stations should land in
+    // 99.98..100.02 in production. Pin that the marshaller round-trips
+    // values without rescaling.
+    mockExec.mockReturnValue(JSON.stringify([sictMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const c = body.datos_viales!.composition;
+    const sum =
+      (c.pct_motos ?? 0) +
+      (c.pct_autos ?? 0) +
+      (c.pct_buses ?? 0) +
+      (c.pct_camiones ?? 0) +
+      (c.pct_otros ?? 0);
+    expect(sum).toBeGreaterThan(99.5);
+    expect(sum).toBeLessThan(100.5);
+  });
+
+  it("accepts native JS array for sv_routes_top (alternate parser branch)", async () => {
+    // When pg-native or json_agg renders the array as a parsed JS array
+    // rather than a `{a,b}` literal, the parser must not double-strip.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sictMuniMockRow({
+          sv_routes_top: ["MEX-095", "MEX-095D", "MEX-162"],
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.datos_viales!.routes_top).toEqual([
+      "MEX-095",
+      "MEX-095D",
+      "MEX-162",
+    ]);
+  });
+
+  it("returns datos_viales=null when LEFT JOIN misses (no station in muni)", async () => {
+    // Most CDMX urban munis have no federal-highway TDPA stations inside
+    // their polygon. Verify that surfaces as `null` (not as an all-null
+    // sub-tree, which would mis-encode "miss" as "all measurements zero").
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sictMuniMockRow({
+          cve_mun: "09015",
+          nom_mun: "Cuauhtémoc",
+          nom_ent: "Ciudad de México",
+          sv_station_count: null,
+          sv_tdpa_total: null,
+          sv_tdpa_max: null,
+          sv_tdpa_mean: null,
+          sv_pct_motos: null,
+          sv_pct_autos: null,
+          sv_pct_buses: null,
+          sv_pct_camiones: null,
+          sv_pct_otros: null,
+          sv_route_count: null,
+          sv_routes_top: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.datos_viales).toBeNull();
+  });
+
+  it("returns empty array (not null) for routes_top when sv_routes_top is missing", async () => {
+    // Materialized-view fallback: COALESCE(tr.routes_top, ARRAY[]::TEXT[])
+    // — the muni HAS stations but no rows landed in the top-routes CTE.
+    // Marshaller must preserve [] (not null) so consumers can iterate.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        sictMuniMockRow({
+          sv_routes_top: "{}",
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.datos_viales!.routes_top).toEqual([]);
+  });
+
+  it("SQL contains LEFT JOIN sict_traffic_by_municipio + sv_ aliases", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=17007", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun",
+    );
+    // Pin one alias from each surface family so a SELECT-list refactor
+    // doesn't silently drop a leaf.
+    for (const col of [
+      "sv_station_count",
+      "sv_tdpa_total",
+      "sv_tdpa_max",
+      "sv_tdpa_mean",
+      "sv_pct_motos",
+      "sv_pct_autos",
+      "sv_pct_buses",
+      "sv_pct_camiones",
+      "sv_pct_otros",
+      "sv_route_count",
+      "sv_routes_top",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
 describe("/analytics/entidad-detail (v0.2.12 inclusion_financiera)", () => {
   /**
    * Build an entidad-detail mock row with all censo + bienestar fields null

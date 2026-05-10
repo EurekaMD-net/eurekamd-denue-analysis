@@ -6,6 +6,7 @@
 #   - SESNSP loader (load-sesnsp.ts) → mv_delitos_municipal_yearly
 #   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
+#   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio
 #
 # The handlers fall back to live aggregation when an MV is missing entirely
 # (audit M1, 2026-05-05), but they have NO way to detect "MV exists but is
@@ -35,6 +36,9 @@ REFRESH MATERIALIZED VIEW mv_delitos_municipal_yearly;
 
 \echo Refreshing mv_mortalidad_municipal_yearly...
 REFRESH MATERIALIZED VIEW mv_mortalidad_municipal_yearly;
+
+\echo Refreshing sict_traffic_by_municipio...
+REFRESH MATERIALIZED VIEW sict_traffic_by_municipio;
 SQL
 end=$(date +%s)
 
