@@ -94,6 +94,7 @@ import {
   type DatosVialesResult,
   type EntidadDetailResult,
   type InclusionFinancieraResult,
+  type ViviendaCreditoComercialResult,
   type ViviendaFinanciamientosResult,
   type LocalitiesByMunicipioResult,
   type LocalitiesOrderBy,
@@ -3888,6 +3889,38 @@ const SEDATU_ESTADO_COLS = `
 `.trim();
 
 /**
+ * SELECT column list for the LEFT JOIN against `cnbv_credito_by_estado`
+ * (v0.2.17). All cols `cc_`-prefixed (cc = cnbv credito) so the
+ * `creditoComercialFromRow` marshaller works unchanged across muni and
+ * estado grains. Mirror posture of SICT/SEDATU estado-grain wiring — the
+ * two prefixes never collide because they appear in different handler
+ * SELECT statements (municipio-detail vs entidad-detail).
+ */
+const CNBV_CREDITO_ESTADO_COLS = `
+    cce.acciones_total           AS cc_acciones_total,
+    cce.monto_total              AS cc_monto_total,
+    cce.monto_per_accion_avg     AS cc_monto_per_accion_avg,
+    cce.top_intermediario_code   AS cc_top_intermediario_code,
+    cce.top_intermediario_nombre AS cc_top_intermediario_nombre,
+    cce.top_intermediario_share  AS cc_top_intermediario_share,
+    cce.top_linea_credito_code   AS cc_top_linea_credito_code,
+    cce.top_esquema_code         AS cc_top_esquema_code,
+    cce.pct_vivienda_nueva       AS cc_pct_vivienda_nueva,
+    cce.pct_mejoramientos        AS cc_pct_mejoramientos,
+    cce.pct_vivienda_usada       AS cc_pct_vivienda_usada,
+    cce.pct_otros                AS cc_pct_otros,
+    cce.pct_femenino             AS cc_pct_femenino,
+    cce.pct_indigena             AS cc_pct_indigena,
+    cce.pct_economica            AS cc_pct_economica,
+    cce.pct_popular              AS cc_pct_popular,
+    cce.pct_tradicional          AS cc_pct_tradicional,
+    cce.pct_media                AS cc_pct_media,
+    cce.pct_residencial          AS cc_pct_residencial,
+    cce.pct_residencial_plus     AS cc_pct_residencial_plus,
+    cce.periodo                  AS cc_periodo
+`.trim();
+
+/**
  * Marshal a row from a cnbv_panorama LEFT JOIN into the
  * `inclusion_financiera` nested category. Fields populated per grain are
  * documented at the InclusionFinancieraResult type definition.
@@ -4197,6 +4230,125 @@ const SEDATU_MUNI_COLS = `
 `.trim();
 
 /**
+ * SELECT column list for the LEFT JOIN against `cnbv_credito_by_municipio`
+ * (v0.2.17). All cols `cc_`-prefixed (cc = cnbv credito). The MV
+ * pre-resolves `top_intermediario_nombre` via JOIN to `cnbv_intermediarios`
+ * — handler surfaces the resolved string directly. `top_linea_credito_code`
+ * and `top_esquema_code` are exposed numeric-only (CNBV codebook gap).
+ */
+const CNBV_CREDITO_MUNI_COLS = `
+    cc.acciones_total           AS cc_acciones_total,
+    cc.monto_total              AS cc_monto_total,
+    cc.monto_per_accion_avg     AS cc_monto_per_accion_avg,
+    cc.top_intermediario_code   AS cc_top_intermediario_code,
+    cc.top_intermediario_nombre AS cc_top_intermediario_nombre,
+    cc.top_intermediario_share  AS cc_top_intermediario_share,
+    cc.top_linea_credito_code   AS cc_top_linea_credito_code,
+    cc.top_esquema_code         AS cc_top_esquema_code,
+    cc.pct_vivienda_nueva       AS cc_pct_vivienda_nueva,
+    cc.pct_mejoramientos        AS cc_pct_mejoramientos,
+    cc.pct_vivienda_usada       AS cc_pct_vivienda_usada,
+    cc.pct_otros                AS cc_pct_otros,
+    cc.pct_femenino             AS cc_pct_femenino,
+    cc.pct_indigena             AS cc_pct_indigena,
+    cc.pct_economica            AS cc_pct_economica,
+    cc.pct_popular              AS cc_pct_popular,
+    cc.pct_tradicional          AS cc_pct_tradicional,
+    cc.pct_media                AS cc_pct_media,
+    cc.pct_residencial          AS cc_pct_residencial,
+    cc.pct_residencial_plus     AS cc_pct_residencial_plus,
+    cc.periodo                  AS cc_periodo
+`.trim();
+
+/**
+ * Marshal CNBV credito row (muni or estado grain) into the
+ * `vivienda_credito_comercial` subtree, OR return `null` if the LEFT JOIN
+ * missed (muni/estado has no commercial-bank credit activity in 2025).
+ *
+ * Miss signal: `cc_acciones_total IS NULL` ONLY when the LEFT JOIN to
+ * cnbv_credito_by_municipio/by_estado doesn't match — the MV's GROUP BY
+ * guarantees every present row has a non-null sum. The `vivienda_tier`
+ * subtree returns null when ALL six tier %s are null (= 100% of rows
+ * had unknown vivienda_valor).
+ *
+ * Grain-agnostic: works for both cnbv_credito_by_municipio (cve_mun key)
+ * and cnbv_credito_by_estado (cve_ent key) since both MVs project the
+ * same shape and both are aliased via the cc_ prefix.
+ */
+function creditoComercialFromRow(
+  r: Record<string, unknown>,
+): ViviendaCreditoComercialResult | null {
+  if (r.cc_acciones_total === null || r.cc_acciones_total === undefined) {
+    return null;
+  }
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const numReq = (v: unknown): number => Number(v);
+
+  const tier = {
+    pct_economica: num(r.cc_pct_economica),
+    pct_popular: num(r.cc_pct_popular),
+    pct_tradicional: num(r.cc_pct_tradicional),
+    pct_media: num(r.cc_pct_media),
+    pct_residencial: num(r.cc_pct_residencial),
+    pct_residencial_plus: num(r.cc_pct_residencial_plus),
+  };
+  const tierAllNull =
+    tier.pct_economica === null &&
+    tier.pct_popular === null &&
+    tier.pct_tradicional === null &&
+    tier.pct_media === null &&
+    tier.pct_residencial === null &&
+    tier.pct_residencial_plus === null;
+
+  return {
+    acciones_total: numReq(r.cc_acciones_total),
+    monto_total: numReq(r.cc_monto_total),
+    monto_per_accion_avg: numReq(r.cc_monto_per_accion_avg),
+    top_intermediario: {
+      // Code is TEXT (6-digit CNBV institutional code with leading zero).
+      // String() on number would lose the zero — defend by checking type
+      // first; in practice the MV ships TEXT and pg-native preserves it.
+      code:
+        typeof r.cc_top_intermediario_code === "string"
+          ? r.cc_top_intermediario_code
+          : String(r.cc_top_intermediario_code ?? ""),
+      nombre:
+        typeof r.cc_top_intermediario_nombre === "string"
+          ? r.cc_top_intermediario_nombre
+          : String(r.cc_top_intermediario_nombre ?? ""),
+      share: numReq(r.cc_top_intermediario_share),
+    },
+    top_linea_credito_code: num(r.cc_top_linea_credito_code),
+    top_esquema_code: num(r.cc_top_esquema_code),
+    modalidad: {
+      pct_vivienda_nueva: numReq(r.cc_pct_vivienda_nueva),
+      pct_mejoramientos: numReq(r.cc_pct_mejoramientos),
+      pct_vivienda_usada: numReq(r.cc_pct_vivienda_usada),
+      pct_otros: numReq(r.cc_pct_otros),
+    },
+    demografico: {
+      pct_femenino: num(r.cc_pct_femenino),
+      pct_indigena: num(r.cc_pct_indigena),
+    },
+    vivienda_tier: tierAllNull
+      ? null
+      : {
+          pct_economica: tier.pct_economica ?? 0,
+          pct_popular: tier.pct_popular ?? 0,
+          pct_tradicional: tier.pct_tradicional ?? 0,
+          pct_media: tier.pct_media ?? 0,
+          pct_residencial: tier.pct_residencial ?? 0,
+          pct_residencial_plus: tier.pct_residencial_plus ?? 0,
+        },
+    periodo:
+      typeof r.cc_periodo === "string"
+        ? r.cc_periodo
+        : String(r.cc_periodo ?? "2025"),
+  };
+}
+
+/**
  * Marshal SEDATU muni-grain row into the `vivienda_financiamientos` subtree,
  * OR return `null` if the LEFT JOIN missed (no housing-financing activity
  * inside this muni — ~621 of 2,469 munis nationally for 2025).
@@ -4328,11 +4480,13 @@ SELECT json_agg(row_to_json(t)) FROM (
     cm.vph_stvp, cm.vph_spmvpi, cm.vph_cvj, cm.vph_snbien,
     ${CNBV_MUNI_COLS},
     ${SICT_MUNI_COLS},
-    ${SEDATU_MUNI_COLS}
+    ${SEDATU_MUNI_COLS},
+    ${CNBV_CREDITO_MUNI_COLS}
   FROM censo_municipios cm
   LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
   LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun
   LEFT JOIN sedatu_financing_by_municipio sf ON sf.cve_mun = cm.cve_mun
+  LEFT JOIN cnbv_credito_by_municipio cc ON cc.cve_mun = cm.cve_mun
   WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
@@ -4438,6 +4592,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     inclusion_financiera: inclusionFinancieraFromRow(r, "muni"),
     datos_viales: datosVialesFromRow(r),
     vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
+    vivienda_credito_comercial: creditoComercialFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
@@ -4504,12 +4659,14 @@ SELECT json_agg(row_to_json(t)) FROM (
     bl.programas       AS bl_programas,
     ${CNBV_ESTADO_COLS},
     ${SICT_ESTADO_COLS},
-    ${SEDATU_ESTADO_COLS}
+    ${SEDATU_ESTADO_COLS},
+    ${CNBV_CREDITO_ESTADO_COLS}
   FROM censo_entidades ce
   LEFT JOIN bienestar_estatal_latest bl ON bl.cve_ent = ce.cve_ent
   LEFT JOIN cnbv_panorama_estatal cp ON cp.cve_ent = ce.cve_ent
   LEFT JOIN sict_traffic_by_estado se ON se.cve_ent = ce.cve_ent
   LEFT JOIN sedatu_financing_by_estado sfe ON sfe.cve_ent = ce.cve_ent
+  LEFT JOIN cnbv_credito_by_estado cce ON cce.cve_ent = ce.cve_ent
   WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
@@ -4626,6 +4783,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     inclusion_financiera: inclusionFinancieraFromRow(r, "estado"),
     datos_viales: datosVialesFromRow(r),
     vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
+    vivienda_credito_comercial: creditoComercialFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

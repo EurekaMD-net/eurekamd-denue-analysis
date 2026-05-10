@@ -7185,3 +7185,491 @@ describe("InclusionFinancieraResult shape symmetry (v0.2.12)", () => {
     expect(i.genero!.creditos).toBeDefined();
   });
 });
+
+// ===========================================================================
+// v0.2.17: CNBV Crédito Comercial 2025 — vivienda_credito_comercial
+// (commercial-bank housing-credit microdata; SIBLING to vivienda_financiamientos)
+// ===========================================================================
+
+describe("/analytics/municipio-detail (v0.2.17 vivienda_credito_comercial)", () => {
+  /**
+   * Build a muni-detail mock row populating cc_-prefixed CNBV credito cols
+   * to a Guadalajara-shape fingerprint (BBVA-dominant 040012). Censo +
+   * cnbv_panorama + sict + sedatu fields are nulled out — this describe
+   * focuses on credito_comercial only.
+   */
+  function cnbvCreditoMuniMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_mun: "14039",
+      entidad: "14",
+      mun: "039",
+      nom_mun: "Guadalajara",
+      nom_ent: "Jalisco",
+    };
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ];
+    for (const f of nullFields) base[f] = null;
+    // CNBV credito muni fields. Code preserves leading zero as TEXT
+    // (040012 = BBVA México per CNBV institutional catalog).
+    base.cc_acciones_total = "3402";
+    base.cc_monto_total = "5840000000.00";
+    base.cc_monto_per_accion_avg = "1716929.45";
+    base.cc_top_intermediario_code = "040012";
+    base.cc_top_intermediario_nombre = "BBVA México";
+    base.cc_top_intermediario_share = "32.18";
+    base.cc_top_linea_credito_code = "3";
+    base.cc_top_esquema_code = "7";
+    base.cc_pct_vivienda_nueva = "44.20";
+    base.cc_pct_mejoramientos = "12.10";
+    base.cc_pct_vivienda_usada = "39.30";
+    base.cc_pct_otros = "4.40";
+    base.cc_pct_femenino = "39.85";
+    base.cc_pct_indigena = "0.42";
+    base.cc_pct_economica = "1.20";
+    base.cc_pct_popular = "8.50";
+    base.cc_pct_tradicional = "22.40";
+    base.cc_pct_media = "38.20";
+    base.cc_pct_residencial = "24.50";
+    base.cc_pct_residencial_plus = "5.20";
+    base.cc_periodo = "2025";
+    return { ...base, ...overrides };
+  }
+
+  it("returns vivienda_credito_comercial with full muni shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvCreditoMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=14039", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.vivienda_credito_comercial;
+    expect(v).not.toBeNull();
+    expect(v!.acciones_total).toBe(3402);
+    expect(v!.monto_total).toBeCloseTo(5840000000);
+    expect(v!.top_intermediario.code).toBe("040012");
+    expect(v!.top_intermediario.nombre).toBe("BBVA México");
+    expect(v!.top_intermediario.share).toBeCloseTo(32.18);
+    expect(v!.top_linea_credito_code).toBe(3);
+    expect(v!.top_esquema_code).toBe(7);
+    expect(v!.modalidad.pct_vivienda_nueva).toBeCloseTo(44.2);
+    expect(v!.demografico.pct_femenino).toBeCloseTo(39.85);
+    expect(v!.demografico.pct_indigena).toBeCloseTo(0.42);
+    expect(v!.vivienda_tier).not.toBeNull();
+    expect(v!.vivienda_tier!.pct_media).toBeCloseTo(38.2);
+    expect(v!.periodo).toBe("2025");
+  });
+
+  it("preserves leading zero in top_intermediario.code (TEXT, not INT)", async () => {
+    // Critical: 040012 → if marshaller cast to number then back to string,
+    // would arrive as "40012" and break consumer FK lookups against
+    // cnbv_intermediarios. Type-level guard pinned at handler.
+    mockExec.mockReturnValue(JSON.stringify([cnbvCreditoMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.vivienda_credito_comercial!.top_intermediario.code).toBe(
+      "040012",
+    );
+    expect(typeof body.vivienda_credito_comercial!.top_intermediario.code).toBe(
+      "string",
+    );
+    // Audit R3 round-1: contract-level guard — code is always 6-digit
+    // string starting with "0" (CNBV institutional code format), even if
+    // a future loader change swaps which intermediario surfaces as top.
+    // Number()→String() round-trip would produce "40012" and trip this.
+    expect(body.vivienda_credito_comercial!.top_intermediario.code).toMatch(
+      /^0\d{5}$/,
+    );
+  });
+
+  it("returns vivienda_credito_comercial: null when LEFT JOIN misses (rural muni, zero commercial credit)", async () => {
+    // Most CNBV credito activity concentrates in urban metros; small
+    // rural munis have no commercial-bank loans in 2025. Marshaller
+    // surfaces miss as full subtree null, not as all-null fields.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        cnbvCreditoMuniMockRow({
+          cve_mun: "07043",
+          nom_mun: "Chamula",
+          nom_ent: "Chiapas",
+          cc_acciones_total: null,
+          cc_monto_total: null,
+          cc_monto_per_accion_avg: null,
+          cc_top_intermediario_code: null,
+          cc_top_intermediario_nombre: null,
+          cc_top_intermediario_share: null,
+          cc_top_linea_credito_code: null,
+          cc_top_esquema_code: null,
+          cc_pct_vivienda_nueva: null,
+          cc_pct_mejoramientos: null,
+          cc_pct_vivienda_usada: null,
+          cc_pct_otros: null,
+          cc_pct_femenino: null,
+          cc_pct_indigena: null,
+          cc_pct_economica: null,
+          cc_pct_popular: null,
+          cc_pct_tradicional: null,
+          cc_pct_media: null,
+          cc_pct_residencial: null,
+          cc_pct_residencial_plus: null,
+          cc_periodo: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=07043", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.vivienda_credito_comercial).toBeNull();
+  });
+
+  it("vivienda_tier subtree is null when all 6 tier %s are null (100% rows lack tier)", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        cnbvCreditoMuniMockRow({
+          cc_pct_economica: null,
+          cc_pct_popular: null,
+          cc_pct_tradicional: null,
+          cc_pct_media: null,
+          cc_pct_residencial: null,
+          cc_pct_residencial_plus: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.vivienda_credito_comercial!;
+    expect(v.vivienda_tier).toBeNull();
+    // Other fields still populate normally (subtree-NULL is local).
+    expect(v.acciones_total).toBe(3402);
+    expect(v.modalidad.pct_vivienda_nueva).toBeCloseTo(44.2);
+  });
+
+  it("top_linea_credito_code and top_esquema_code surface as numeric codes (codebook gap)", async () => {
+    // Until operator supplies CNBV codebook, these come back as numeric
+    // codes only. Marshaller does NOT fabricate labels.
+    mockExec.mockReturnValue(JSON.stringify([cnbvCreditoMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const v = body.vivienda_credito_comercial!;
+    expect(typeof v.top_linea_credito_code).toBe("number");
+    expect(typeof v.top_esquema_code).toBe("number");
+    // Type-level guard: no `_nombre` field smuggled in.
+    expect(
+      (v as unknown as Record<string, unknown>).top_linea_credito_nombre,
+    ).toBeUndefined();
+    expect(
+      (v as unknown as Record<string, unknown>).top_esquema_nombre,
+    ).toBeUndefined();
+  });
+
+  it("muni-detail SQL contains LEFT JOIN cnbv_credito_by_municipio + cc_ aliases", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "LEFT JOIN cnbv_credito_by_municipio cc ON cc.cve_mun = cm.cve_mun",
+    );
+    for (const col of [
+      "cc_acciones_total",
+      "cc_monto_total",
+      "cc_monto_per_accion_avg",
+      "cc_top_intermediario_code",
+      "cc_top_intermediario_nombre",
+      "cc_top_intermediario_share",
+      "cc_top_linea_credito_code",
+      "cc_top_esquema_code",
+      "cc_pct_vivienda_nueva",
+      "cc_pct_mejoramientos",
+      "cc_pct_vivienda_usada",
+      "cc_pct_otros",
+      "cc_pct_femenino",
+      "cc_pct_indigena",
+      "cc_pct_economica",
+      "cc_pct_residencial_plus",
+      "cc_periodo",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
+describe("/analytics/entidad-detail (v0.2.17 vivienda_credito_comercial)", () => {
+  /**
+   * Estado-grain mock — Jalisco shape (cve_ent=14). Same marshaller as
+   * muni grain, sourced from cnbv_credito_by_estado not _by_municipio.
+   */
+  function cnbvCreditoEstadoMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_ent: "14",
+      entidad: "14",
+      nom_ent: "Jalisco",
+    };
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+      "bl_periodo_cve",
+      "bl_anio",
+      "bl_trimestre",
+      "bl_fecha",
+      "bl_beneficiarios",
+      "bl_intervenciones",
+      "bl_dependencias",
+      "bl_padrones",
+      "bl_programas",
+    ];
+    for (const f of nullFields) base[f] = null;
+    base.cc_acciones_total = "8420";
+    base.cc_monto_total = "13200000000.00";
+    base.cc_monto_per_accion_avg = "1567696.91";
+    base.cc_top_intermediario_code = "040012";
+    base.cc_top_intermediario_nombre = "BBVA México";
+    base.cc_top_intermediario_share = "31.74";
+    base.cc_top_linea_credito_code = "3";
+    base.cc_top_esquema_code = "7";
+    base.cc_pct_vivienda_nueva = "47.30";
+    base.cc_pct_mejoramientos = "10.20";
+    base.cc_pct_vivienda_usada = "39.10";
+    base.cc_pct_otros = "3.40";
+    base.cc_pct_femenino = "40.21";
+    base.cc_pct_indigena = "0.85";
+    base.cc_pct_economica = "1.50";
+    base.cc_pct_popular = "9.40";
+    base.cc_pct_tradicional = "24.20";
+    base.cc_pct_media = "39.10";
+    base.cc_pct_residencial = "21.30";
+    base.cc_pct_residencial_plus = "4.50";
+    base.cc_periodo = "2025";
+    return { ...base, ...overrides };
+  }
+
+  it("returns vivienda_credito_comercial with full estado shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvCreditoEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    const cc = body.vivienda_credito_comercial;
+    expect(cc).not.toBeNull();
+    expect(cc!.acciones_total).toBe(8420);
+    expect(cc!.monto_total).toBeCloseTo(13200000000);
+    expect(cc!.top_intermediario.code).toBe("040012");
+    expect(cc!.top_intermediario.code).toMatch(/^0\d{5}$/);
+    expect(cc!.top_intermediario.nombre).toBe("BBVA México");
+    expect(cc!.top_intermediario.share).toBeCloseTo(31.74);
+    expect(cc!.top_linea_credito_code).toBe(3);
+    expect(cc!.top_esquema_code).toBe(7);
+    expect(cc!.modalidad.pct_vivienda_nueva).toBeCloseTo(47.3);
+    expect(cc!.demografico.pct_femenino).toBeCloseTo(40.21);
+    expect(cc!.demografico.pct_indigena).toBeCloseTo(0.85);
+    expect(cc!.vivienda_tier).not.toBeNull();
+    expect(cc!.vivienda_tier!.pct_media).toBeCloseTo(39.1);
+    expect(cc!.periodo).toBe("2025");
+  });
+
+  it("returns vivienda_credito_comercial: null when an estado has zero CNBV rows (defensive contract)", async () => {
+    // 2025 data has 32/32 estados populated. Pin marshaller's miss path
+    // for forward-defense if a future year drops an estado.
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        cnbvCreditoEstadoMockRow({
+          cc_acciones_total: null,
+          cc_monto_total: null,
+          cc_monto_per_accion_avg: null,
+          cc_top_intermediario_code: null,
+          cc_top_intermediario_nombre: null,
+          cc_top_intermediario_share: null,
+          cc_top_linea_credito_code: null,
+          cc_top_esquema_code: null,
+          cc_pct_vivienda_nueva: null,
+          cc_pct_mejoramientos: null,
+          cc_pct_vivienda_usada: null,
+          cc_pct_otros: null,
+          cc_pct_femenino: null,
+          cc_pct_indigena: null,
+          cc_pct_economica: null,
+          cc_pct_popular: null,
+          cc_pct_tradicional: null,
+          cc_pct_media: null,
+          cc_pct_residencial: null,
+          cc_pct_residencial_plus: null,
+          cc_periodo: null,
+        }),
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.vivienda_credito_comercial).toBeNull();
+  });
+
+  it("entidad-detail SQL LEFT-JOINs cnbv_credito_by_estado on cve_ent + cc_ aliases", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvCreditoEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    const sql = String(mockExec.mock.calls.at(-1)?.[1]?.at(-1) ?? "");
+    expect(sql).toContain(
+      "LEFT JOIN cnbv_credito_by_estado cce ON cce.cve_ent = ce.cve_ent",
+    );
+    for (const col of [
+      "cc_acciones_total",
+      "cc_monto_total",
+      "cc_top_intermediario_code",
+      "cc_top_intermediario_nombre",
+      "cc_top_intermediario_share",
+      "cc_top_linea_credito_code",
+      "cc_top_esquema_code",
+      "cc_pct_vivienda_nueva",
+      "cc_pct_femenino",
+      "cc_pct_indigena",
+      "cc_pct_residencial_plus",
+      "cc_periodo",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});

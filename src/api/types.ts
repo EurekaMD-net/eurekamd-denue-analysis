@@ -1322,6 +1322,32 @@ export interface MunicipioDetailResult {
    * surfaces the resolved labels (e.g. `"INFONAVIT"` instead of `1`).
    */
   vivienda_financiamientos: ViviendaFinanciamientosResult | null;
+  /**
+   * Commercial-bank housing credit (CNBV regulator microdata 2025, v0.2.17).
+   * Sibling — NOT duplicate — of `vivienda_financiamientos`: SEDATU lens
+   * captures FEDERAL SUBSIDY programs (organismo = INFONAVIT, FOVISSSTE,
+   * CONAVI, state institutos); CNBV lens captures COMMERCIAL bank
+   * originations (intermediario = BANAMEX, BBVA, SANTANDER, etc.). The two
+   * together capture both subsidy and commercial sides of household housing
+   * finance. Sourced from `cnbv_credito_by_municipio` materialized view.
+   *
+   * Aggregates 94,763 stratum-month records down to per-muni totals + modal
+   * intermediario + modality / demographic / housing-tier composition.
+   *
+   * **Composition signal** (compute downstream): `monto_subsidiado /
+   * (subsidiado + comercial)` from this subtree's `monto_total` and
+   * `vivienda_financiamientos.monto_total` surfaces "% subsidy reliance"
+   * at muni grain — material for analyzing whether a muni's housing market
+   * leans federal-subsidy (typically Mejoramientos-heavy) vs commercial
+   * (Vivienda nueva / Vivienda usada heavy at higher tiers).
+   *
+   * **Codebook gaps** (operator-pending): `top_linea_credito_code` and
+   * `top_esquema_code` are exposed as numeric codes only — CNBV's official
+   * dictionary for these dimensions has not yet been operator-supplied.
+   * When it lands, label fields (`top_linea_credito_nombre` etc.) will be
+   * added without breaking the existing shape.
+   */
+  vivienda_credito_comercial: ViviendaCreditoComercialResult | null;
 }
 
 /**
@@ -1575,6 +1601,88 @@ export interface ViviendaFinanciamientosResult {
 }
 
 /**
+ * Commercial-bank housing credit at muni or estado grain. Source: CNBV
+ * regulator microdata 2025 (v0.2.17), `cnbv_credito_by_municipio` /
+ * `cnbv_credito_by_estado` materialized views. 94,763 stratum-month
+ * records aggregate to per-grain totals + dominant intermediario + modality
+ * / demographic / housing-tier composition.
+ *
+ * Money is in Mexican pesos (MXN). National 2025 totals: ~94.7k acciones
+ * for ~$18B MXN volume across 18 distinct CNBV-regulated banks.
+ *
+ * **Sibling to `vivienda_financiamientos`** (NOT duplicate). SEDATU lens =
+ * federal subsidy programs (organismo = INFONAVIT/FOVISSSTE/CONAVI/...);
+ * CNBV lens = commercial bank originations (intermediario = BANAMEX/BBVA/
+ * SANTANDER/...). Same modality/demographic/housing-tier dimensions, same
+ * MXN basis, comparable monto units. Composition `monto_subsidiado /
+ * (subsidiado + comercial)` from the two subtrees' `monto_total` surfaces
+ * subsidy-vs-commercial reliance.
+ *
+ * **Modality breakdown** (always populated, sums to ~100): same 4-code
+ * scheme as SEDATU (Vivienda nueva / Mejoramientos / Vivienda usada /
+ * Otros programas).
+ *
+ * **Demographic %** (`pct_femenino`, `pct_indigena`):
+ * - `pct_femenino` denominator is acciones where sexo is KNOWN.
+ * - `pct_indigena` numerator filters `poblacion_indigena = 1` (Sí);
+ *   denominator excludes 3 ("No especificado") and NULL/empty rows so
+ *   the rate is computed over rows with a definitive yes/no answer.
+ *   Empirical 2025 distribution: PI=1 ≈ 0.6%, PI=2 ≈ 71%, PI=3 ≈ 28%
+ *   nationally (raw shares over total acciones) — the ~28% PI=3 share
+ *   is material; including it as denominator would dilute every state-
+ *   level rate. Post-formula pct_indigena verified against real load
+ *   2026-05-10: Chiapas 10.06%, Jalisco 0.01%, CDMX 0.00%.
+ *
+ * **Housing-tier subtree**: returns `null` when 100% of rows lack
+ * `vivienda_valor` — same posture as SEDATU.
+ *
+ * **`top_intermediario`**: modal bank by acciones count (not monto). Code
+ * is TEXT (6-digit CNBV institutional code with leading zero, e.g.
+ * `"040021"` for HSBC). Ties broken by lower code (deterministic).
+ *
+ * **Codebook gaps** (operator-pending): `top_linea_credito_code` and
+ * `top_esquema_code` are numeric codes without resolved labels. When the
+ * CNBV dictionary lands, label fields will be added.
+ */
+export interface ViviendaCreditoComercialResult {
+  acciones_total: number;
+  monto_total: number;
+  monto_per_accion_avg: number;
+  top_intermediario: {
+    /** TEXT — 6-digit CNBV institutional code with leading zero (e.g. "040012" = BBVA México). */
+    code: string;
+    nombre: string;
+    share: number;
+  };
+  /** Numeric code only — CNBV codebook for `linea_credito` not yet
+   *  operator-supplied. Empirically observed values: 1, 2, 3, 4, 5, 6, 7,
+   *  8, 11, 13. NULL when muni/estado has no credito rows. */
+  top_linea_credito_code: number | null;
+  /** Same posture as `top_linea_credito_code`. Empirically observed:
+   *  1, 2, 3, 5, 6, 7, 11, 15. NULL when grain has no credito rows. */
+  top_esquema_code: number | null;
+  modalidad: {
+    pct_vivienda_nueva: number;
+    pct_mejoramientos: number;
+    pct_vivienda_usada: number;
+    pct_otros: number;
+  };
+  demografico: {
+    pct_femenino: number | null;
+    pct_indigena: number | null;
+  };
+  vivienda_tier: {
+    pct_economica: number;
+    pct_popular: number;
+    pct_tradicional: number;
+    pct_media: number;
+    pct_residencial: number;
+    pct_residencial_plus: number;
+  } | null;
+  periodo: string;
+}
+
+/**
  * Full demographic surface for a single entidad federativa. Same nested
  * category shape as `MunicipioDetailResult` but at state grain — backed
  * by `censo_entidades` (32 rows, one per state).
@@ -1763,6 +1871,27 @@ export interface EntidadDetailResult {
    * for field-level docs.
    */
   vivienda_financiamientos: ViviendaFinanciamientosResult | null;
+  /**
+   * Commercial-bank housing credit at estado grain (CNBV regulator microdata
+   * 2025, v0.2.17). Sibling-not-rollup of `cnbv_credito_by_municipio` per
+   * feedback_estado_grain_sibling_pattern: aggregated from station-level rows
+   * via `cnbv_credito_estado_grain_2025` base view (cve_ent-only filter), NOT
+   * rolled up from the muni MV.
+   *
+   * **Sum invariant**: estado.acciones_total = SUM(muni.acciones_total) AND
+   * estado.monto_total = SUM(muni.monto_total). CNBV 2025 has 0 catch-all
+   * rows empirically (every commercial-credit row has cve_mun); the estado
+   * view structure is preserved as forward-defense for future ingests where
+   * regulator may publish state-level rolls. If a future load shows
+   * divergence, that's a data-shape change to flag, NOT a bug.
+   *
+   * Live coverage 2025: **32/32 estados**. Same shape as
+   * `MunicipioDetailResult.vivienda_credito_comercial` — the inner subtree is
+   * grain-agnostic; only the attribution key changes. See
+   * `ViviendaCreditoComercialResult` for field-level docs and codebook-gap
+   * caveats.
+   */
+  vivienda_credito_comercial: ViviendaCreditoComercialResult | null;
 }
 
 // ---------------------------------------------------------------------------
