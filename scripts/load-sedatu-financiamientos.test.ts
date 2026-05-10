@@ -32,7 +32,9 @@ import {
   POST_LOAD_VERIFY_SQL,
   RAW_DDL,
   RAW_HEADER_COLS,
+  FINANCIAMIENTOS_ESTADO_VIEW_DDL,
   FINANCIAMIENTOS_VIEW_DDL,
+  FINANCING_BY_ESTADO_DDL,
   FINANCING_BY_MUNI_DDL,
   transcodeLatin1ToUtf8,
   VIEWS_DDL_TRANSACTION,
@@ -146,23 +148,52 @@ describe("loadSedatuFinanciamientos (orchestration)", () => {
     );
   });
 
-  it("VIEWS_DDL_TRANSACTION wraps lookup + view + MV in BEGIN/COMMIT (W1 atomicity)", () => {
+  it("VIEWS_DDL_TRANSACTION wraps lookup + views + MVs in BEGIN/COMMIT (W1 atomicity)", () => {
     expect(VIEWS_DDL_TRANSACTION.startsWith("BEGIN;")).toBe(true);
     expect(VIEWS_DDL_TRANSACTION.endsWith("COMMIT;")).toBe(true);
-    // All 3 DDL families included verbatim
+    // All 5 DDL families included verbatim (v0.2.16: estado view + estado MV).
     expect(VIEWS_DDL_TRANSACTION).toContain(LOOKUPS_DDL);
     expect(VIEWS_DDL_TRANSACTION).toContain(FINANCIAMIENTOS_VIEW_DDL);
+    expect(VIEWS_DDL_TRANSACTION).toContain(FINANCIAMIENTOS_ESTADO_VIEW_DDL);
     expect(VIEWS_DDL_TRANSACTION).toContain(FINANCING_BY_MUNI_DDL);
-    // Order matters: drops first, lookups before view, view before MV
-    const dropIdx = VIEWS_DDL_TRANSACTION.indexOf(
+    expect(VIEWS_DDL_TRANSACTION).toContain(FINANCING_BY_ESTADO_DDL);
+    // Order matters: drops first (estado MV → muni MV → both views, the
+    // dependency chain), then lookups, then both views, then both MVs.
+    const lookupIdx = VIEWS_DDL_TRANSACTION.indexOf(LOOKUPS_DDL);
+    const muniViewIdx = VIEWS_DDL_TRANSACTION.indexOf(FINANCIAMIENTOS_VIEW_DDL);
+    const estadoViewIdx = VIEWS_DDL_TRANSACTION.indexOf(
+      FINANCIAMIENTOS_ESTADO_VIEW_DDL,
+    );
+    const muniMvIdx = VIEWS_DDL_TRANSACTION.indexOf(FINANCING_BY_MUNI_DDL);
+    const estadoMvIdx = VIEWS_DDL_TRANSACTION.indexOf(FINANCING_BY_ESTADO_DDL);
+    expect(lookupIdx).toBeLessThan(muniViewIdx);
+    expect(lookupIdx).toBeLessThan(estadoViewIdx);
+    expect(muniViewIdx).toBeLessThan(muniMvIdx);
+    expect(estadoViewIdx).toBeLessThan(estadoMvIdx);
+  });
+
+  it("VIEWS_DDL_TRANSACTION DROP cascade is dependency-safe (audit C1 lesson from v0.2.15)", () => {
+    // Postgres DROP TABLE on a lookup table fails when an MV references it
+    // for label resolution. With v0.2.16 there are two MVs (muni + estado),
+    // both depending on sedatu_organismos. Drop ordering MUST be:
+    //   estado MV → muni MV → estado view → muni view → lookups
+    // so that LOOKUPS_DDL's DROP TABLE statements see no dependents.
+    const idxEstadoMv = VIEWS_DDL_TRANSACTION.indexOf(
+      "DROP MATERIALIZED VIEW IF EXISTS sedatu_financing_by_estado",
+    );
+    const idxMuniMv = VIEWS_DDL_TRANSACTION.indexOf(
       "DROP MATERIALIZED VIEW IF EXISTS sedatu_financing_by_municipio",
     );
-    const lookupIdx = VIEWS_DDL_TRANSACTION.indexOf(LOOKUPS_DDL);
-    const viewIdx = VIEWS_DDL_TRANSACTION.indexOf(FINANCIAMIENTOS_VIEW_DDL);
-    const mvIdx = VIEWS_DDL_TRANSACTION.indexOf(FINANCING_BY_MUNI_DDL);
-    expect(dropIdx).toBeLessThan(lookupIdx);
-    expect(lookupIdx).toBeLessThan(viewIdx);
-    expect(viewIdx).toBeLessThan(mvIdx);
+    const idxEstadoView = VIEWS_DDL_TRANSACTION.indexOf(
+      "DROP VIEW IF EXISTS sedatu_financiamientos_estado_grain_2025",
+    );
+    const idxMuniView = VIEWS_DDL_TRANSACTION.indexOf(
+      "DROP VIEW IF EXISTS sedatu_financiamientos_2025",
+    );
+    expect(idxEstadoMv).toBeGreaterThan(0);
+    expect(idxMuniMv).toBeGreaterThan(idxEstadoMv);
+    expect(idxEstadoView).toBeGreaterThan(idxMuniMv);
+    expect(idxMuniView).toBeGreaterThan(idxEstadoView);
   });
 
   it("cleans up tempdir even on docker-exec failure during DDL step", async () => {
@@ -244,6 +275,15 @@ describe("DDL invariants", () => {
     );
   });
 
+  it("FINANCIAMIENTOS_VIEW_DDL projects no dead muni-string columns (audit W4 symmetric to R4)", () => {
+    // Sibling-residue cleanup: cve_mun_short + municipio were dropped
+    // from the muni view at the same time as the estado view (audit
+    // R2 round-2 — grep-sweep discipline per CLAUDE.md). MV never
+    // references either; zero downstream consumers across src/+scripts/.
+    expect(FINANCIAMIENTOS_VIEW_DDL).not.toContain("cve_mun_short");
+    expect(FINANCIAMIENTOS_VIEW_DDL).not.toMatch(/,\s*municipio,/);
+  });
+
   it("FINANCIAMIENTOS_VIEW_DDL filters No-distribuido catch-all rows + entidad sentinel guard", () => {
     // TRIM-then-NULLIF (audit W1 round-2): defends against future
     // whitespace-padded codes.
@@ -304,6 +344,134 @@ describe("DDL invariants", () => {
     // different organismos non-deterministically.
     expect(FINANCING_BY_MUNI_DDL).toContain(
       "ORDER BY SUM(acciones) DESC, organismo ASC",
+    );
+  });
+
+  // --- v0.2.16: estado-grain base view + MV ---
+
+  it("FINANCIAMIENTOS_ESTADO_VIEW_DDL filters on cve_ent ONLY (no cve_mun gate)", () => {
+    // Critical contract: this view INTENTIONALLY re-includes the 384
+    // state-level "no distribuido por municipio" rows the muni view
+    // excludes. A regression that adds a cve_mun filter here would
+    // silently shrink estado-grain totals back to muni-grain coverage.
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).toContain(
+      "CREATE VIEW sedatu_financiamientos_estado_grain_2025",
+    );
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).toContain(
+      "TRIM(cve_ent) ~ '^(0[1-9]|[12][0-9]|3[0-2])$'",
+    );
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).not.toMatch(/TRIM\(cve_mun\)\s*~/);
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).not.toContain(
+      "AND NULLIF(TRIM(cve_mun)",
+    );
+  });
+
+  it("FINANCIAMIENTOS_ESTADO_VIEW_DDL does NOT compose a 5-char cve_mun (no LPAD)", () => {
+    // The estado-grain view doesn't produce a join key — by design, the
+    // MV groups on cve_ent. Including LPAD here would (a) be cosmetic,
+    // (b) churn cve_mun for catch-all rows where cve_mun is empty/garbage.
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).not.toContain(
+      "LPAD(cve_mun, 3, '0')",
+    );
+  });
+
+  it("FINANCIAMIENTOS_ESTADO_VIEW_DDL projects no dead muni-string columns (audit R4)", () => {
+    // cve_mun_short + municipio were dropped — they were copy-paste
+    // residue from the muni view; estado MV never references them.
+    // Re-adding without justification would also break this assertion.
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).not.toContain("cve_mun_short");
+    expect(FINANCIAMIENTOS_ESTADO_VIEW_DDL).not.toMatch(/,\s*municipio\b/);
+  });
+
+  it("FINANCING_BY_ESTADO_DDL is MATERIALIZED with unique btree index on cve_ent", () => {
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "CREATE MATERIALIZED VIEW sedatu_financing_by_estado",
+    );
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "CREATE UNIQUE INDEX idx_sedatu_fin_est_cve_ent",
+    );
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "CREATE INDEX idx_sedatu_fin_est_monto_total",
+    );
+  });
+
+  it("FINANCING_BY_ESTADO_DDL aggregates from estado-grain base view, not muni MV", () => {
+    // Re-applying the formulas at estado grain MUST source from the
+    // catch-all-inclusive base view, NOT roll up the muni MV (which
+    // already filtered out 384 rows).
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "FROM sedatu_financiamientos_estado_grain_2025",
+    );
+    expect(FINANCING_BY_ESTADO_DDL).not.toContain(
+      "FROM sedatu_financing_by_municipio",
+    );
+  });
+
+  it("FINANCING_BY_ESTADO_DDL groups by cve_ent (not cve_mun)", () => {
+    // Both per_estado and top_org_estado CTEs group by cve_ent.
+    const groupByCveEntCount = (
+      FINANCING_BY_ESTADO_DDL.match(/GROUP BY cve_ent/g) ?? []
+    ).length;
+    expect(groupByCveEntCount).toBeGreaterThanOrEqual(1);
+    expect(FINANCING_BY_ESTADO_DDL).not.toContain("GROUP BY cve_mun");
+  });
+
+  it("FINANCING_BY_ESTADO_DDL modality % uses COALESCE-guarded zero-row handling", () => {
+    // Same pattern as muni MV: SUM(acciones) FILTER returns NULL for
+    // empty filter, so wrap with COALESCE(..., 0) to surface 0% not NULL.
+    const matches = FINANCING_BY_ESTADO_DDL.match(
+      /COALESCE\(SUM\(acciones\) FILTER \(WHERE modalidad = \d+\),\s*0\)/g,
+    );
+    expect(matches?.length ?? 0).toBe(4); // modalidades 1-4
+  });
+
+  it("FINANCING_BY_ESTADO_DDL ROW_NUMBER tie-break matches muni MV (organismo ASC)", () => {
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "ORDER BY SUM(acciones) DESC, organismo ASC",
+    );
+  });
+
+  it("FINANCING_BY_ESTADO_DDL resolves top_organismo via JOIN to sedatu_organismos", () => {
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "LEFT JOIN sedatu_organismos o ON o.code = t.top_organismo_code",
+    );
+    expect(FINANCING_BY_ESTADO_DDL).toContain(
+      "o.nombre AS top_organismo_nombre",
+    );
+  });
+
+  it("POST_LOAD_VERIFY_SQL counts both grain MVs", () => {
+    expect(POST_LOAD_VERIFY_SQL).toContain(
+      "SELECT COUNT(*) FROM sedatu_financing_by_municipio",
+    );
+    expect(POST_LOAD_VERIFY_SQL).toContain(
+      "SELECT COUNT(*) FROM sedatu_financing_by_estado",
+    );
+  });
+});
+
+describe("refresh-matviews.sh integration (regression guard)", () => {
+  // Bug-class: v0.2.13 SICT muni and v0.2.14 SEDATU loaders BOTH shipped
+  // without their MV in refresh-matviews.sh. v0.2.15 added an analogous
+  // guard for sict_traffic_by_estado. This guard fails fast at unit-test
+  // time if the SEDATU estado-grain MV is forgotten.
+  it("references sedatu_financing_by_estado in REFRESH list", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await vi.importActual<typeof import("node:path")>("node:path");
+    const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
+    const script = fs.readFileSync(scriptPath, "utf-8");
+    expect(script).toMatch(
+      /REFRESH MATERIALIZED VIEW sedatu_financing_by_estado/,
+    );
+  });
+
+  it("still references sedatu_financing_by_municipio (no regression)", async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await vi.importActual<typeof import("node:path")>("node:path");
+    const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
+    const script = fs.readFileSync(scriptPath, "utf-8");
+    expect(script).toMatch(
+      /REFRESH MATERIALIZED VIEW sedatu_financing_by_municipio/,
     );
   });
 });

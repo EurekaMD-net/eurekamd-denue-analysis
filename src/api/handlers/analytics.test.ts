@@ -6763,6 +6763,312 @@ describe("/analytics/entidad-detail (v0.2.15 datos_viales)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// v0.2.16: SEDATU estado-grain — vivienda_financiamientos on entidad-detail
+// ---------------------------------------------------------------------------
+
+describe("/analytics/entidad-detail (v0.2.16 vivienda_financiamientos)", () => {
+  /**
+   * Build an entidad-detail mock row with all censo + bienestar + cnbv +
+   * sict fields null and sf_-prefixed SEDATU estado-grain cols filled to
+   * a Jalisco-shape fingerprint (cve_ent='14', INFONAVIT-dominant). The
+   * marshaller is grain-agnostic — these are the SAME column aliases as
+   * muni-grain, just sourced from `sedatu_financing_by_estado` not
+   * `_by_municipio`.
+   */
+  function sedatuEstadoMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      cve_ent: "14",
+      entidad: "14",
+      nom_ent: "Jalisco",
+    };
+    const censoNullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+      "bl_periodo_cve",
+      "bl_anio",
+      "bl_trimestre",
+      "bl_fecha",
+      "bl_beneficiarios",
+      "bl_intervenciones",
+      "bl_dependencias",
+      "bl_padrones",
+      "bl_programas",
+    ];
+    for (const f of censoNullFields) base[f] = null;
+    const cnbvNullFields = [
+      "cp_poblacion_total",
+      "cp_poblacion_adulta",
+      "cp_sucursales_bm",
+      "cp_sucursales_bd",
+      "cp_sucursales_socap",
+      "cp_sucursales_sofipo",
+      "cp_sucursales_total",
+      "cp_corresponsales_max",
+      "cp_cajeros_bm",
+      "cp_cajeros_bd",
+      "cp_cajeros_socap",
+      "cp_cajeros_sofipo",
+      "cp_cajeros_total",
+      "cp_tpv_bm",
+      "cp_tpv_bd",
+      "cp_tpv_socap",
+      "cp_tpv_sofipo",
+      "cp_tpv_total_eacp",
+      "cp_tpv_agregadores",
+      "cp_tpv_adq_no_banc",
+      "cp_tpv_total_ag_adq",
+      "cp_tpv_total",
+      "cp_cuentas_bm",
+      "cp_cuentas_bd",
+      "cp_cuentas_socap",
+      "cp_cuentas_sofipo",
+      "cp_cuentas_total",
+      "cp_creditos_bm",
+      "cp_creditos_bd",
+      "cp_creditos_socap",
+      "cp_creditos_sofipo",
+      "cp_creditos_total",
+      "cp_sar_asignado",
+      "cp_sar_registrado",
+      "cp_sar_total",
+      "cp_seg_vida",
+      "cp_seg_pensiones",
+      "cp_seg_accidentes",
+      "cp_seg_danos_sin_autos",
+      "cp_seg_automoviles",
+      "cp_seg_total",
+      "cp_tx_tpv_bm",
+      "cp_tx_tpv_bd",
+      "cp_tx_tpv_socap",
+      "cp_tx_tpv_sofipo",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_condusef_ubicacion",
+      "cp_condusef_reclamaciones",
+      "cp_ac_inf_sucursales",
+      "cp_ac_inf_corresponsales",
+      "cp_ac_inf_cajeros",
+      "cp_ac_inf_tpv",
+      "cp_ac_inf_total_ag_adq",
+      "cp_ac_pf_captacion",
+      "cp_ac_pf_credito",
+      "cp_ac_pf_afore",
+      "cp_ac_pf_vida",
+      "cp_ac_pf_pensiones",
+      "cp_ac_pf_accidentes",
+      "cp_ac_pf_danos_sin_autos",
+      "cp_ac_pf_automoviles",
+      "cp_ac_mp_tx_tpv",
+      "cp_ac_mp_remesas",
+      "cp_ac_mp_ubicacion",
+      "cp_ac_mp_reclamaciones",
+      "cp_periodo",
+    ];
+    for (const f of cnbvNullFields) base[f] = null;
+    // SICT estado cols also null — keeps the test focused on SEDATU.
+    const sictNullFields = [
+      "sv_station_count",
+      "sv_tdpa_total",
+      "sv_tdpa_max",
+      "sv_tdpa_mean",
+      "sv_pct_motos",
+      "sv_pct_autos",
+      "sv_pct_buses",
+      "sv_pct_camiones",
+      "sv_pct_otros",
+      "sv_route_count",
+      "sv_routes_top",
+    ];
+    for (const f of sictNullFields) base[f] = null;
+    // sf_ — SEDATU estado-grain aggregate cols. Strings to match
+    // json_agg's numeric-as-string contract.
+    base.sf_acciones_total = "78421";
+    base.sf_monto_total = "62300000000.00"; // $62.3B MXN
+    base.sf_monto_per_accion_avg = "794472.50";
+    base.sf_top_organismo_code = "1";
+    base.sf_top_organismo_nombre = "INFONAVIT";
+    base.sf_top_organismo_share = "68.42";
+    base.sf_pct_vivienda_nueva = "52.18";
+    base.sf_pct_mejoramientos = "31.05";
+    base.sf_pct_vivienda_usada = "12.41";
+    base.sf_pct_otros = "4.36";
+    base.sf_pct_femenino = "37.84";
+    base.sf_pct_credito_individual = "92.11";
+    base.sf_pct_economica = "8.20";
+    base.sf_pct_popular = "44.50";
+    base.sf_pct_tradicional = "31.10";
+    base.sf_pct_media = "12.30";
+    base.sf_pct_residencial = "3.40";
+    base.sf_pct_residencial_plus = "0.50";
+    base.sf_periodo = "2025";
+    return { ...base, ...overrides };
+  }
+
+  it("returns vivienda_financiamientos with full estado shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sedatuEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    const vf = body.vivienda_financiamientos;
+    expect(vf).not.toBeNull();
+    expect(vf!.acciones_total).toBe(78421);
+    expect(vf!.monto_total).toBeCloseTo(62300000000);
+    expect(vf!.monto_per_accion_avg).toBeCloseTo(794472.5);
+    expect(vf!.top_organismo.code).toBe(1);
+    expect(vf!.top_organismo.nombre).toBe("INFONAVIT");
+    expect(vf!.top_organismo.share).toBeCloseTo(68.42);
+    expect(vf!.modalidad.pct_vivienda_nueva).toBeCloseTo(52.18);
+    expect(vf!.modalidad.pct_mejoramientos).toBeCloseTo(31.05);
+    expect(vf!.modalidad.pct_vivienda_usada).toBeCloseTo(12.41);
+    expect(vf!.modalidad.pct_otros).toBeCloseTo(4.36);
+    expect(vf!.demografico.pct_femenino).toBeCloseTo(37.84);
+    expect(vf!.demografico.pct_credito_individual).toBeCloseTo(92.11);
+    expect(vf!.vivienda_tier).not.toBeNull();
+    expect(vf!.vivienda_tier!.pct_economica).toBeCloseTo(8.2);
+    expect(vf!.vivienda_tier!.pct_popular).toBeCloseTo(44.5);
+    expect(vf!.vivienda_tier!.pct_tradicional).toBeCloseTo(31.1);
+    expect(vf!.periodo).toBe("2025");
+  });
+
+  it("returns vivienda_financiamientos: null for estados with no financing rows (defensive)", async () => {
+    // 2025 data has all 32/32 estados populated, so this path is not
+    // exercised in production today. Pin the marshaller's miss-handling
+    // anyway — future SEDATU releases may drop an estado, and the LEFT
+    // JOIN miss must collapse the entire vivienda_financiamientos
+    // subtree to null (not partial-null).
+    const overrides: Record<string, unknown> = {
+      sf_acciones_total: null,
+      sf_monto_total: null,
+      sf_monto_per_accion_avg: null,
+      sf_top_organismo_code: null,
+      sf_top_organismo_nombre: null,
+      sf_top_organismo_share: null,
+      sf_pct_vivienda_nueva: null,
+      sf_pct_mejoramientos: null,
+      sf_pct_vivienda_usada: null,
+      sf_pct_otros: null,
+      sf_pct_femenino: null,
+      sf_pct_credito_individual: null,
+      sf_pct_economica: null,
+      sf_pct_popular: null,
+      sf_pct_tradicional: null,
+      sf_pct_media: null,
+      sf_pct_residencial: null,
+      sf_pct_residencial_plus: null,
+      sf_periodo: null,
+    };
+    mockExec.mockReturnValue(JSON.stringify([sedatuEstadoMockRow(overrides)]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    expect(body.vivienda_financiamientos).toBeNull();
+  });
+
+  it("entidad-detail SQL LEFT-JOINs sedatu_financing_by_estado on cve_ent", async () => {
+    mockExec.mockReturnValue(JSON.stringify([sedatuEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/entidad-detail?cve_ent=14", {
+      headers: AUTH,
+    });
+    const sql = String(mockExec.mock.calls.at(-1)?.[1]?.at(-1) ?? "");
+    expect(sql).toContain(
+      "LEFT JOIN sedatu_financing_by_estado sfe ON sfe.cve_ent = ce.cve_ent",
+    );
+    // Pin every sf_-aliased column so a future column rename is caught
+    // before the marshaller silently returns null.
+    for (const col of [
+      "sf_acciones_total",
+      "sf_monto_total",
+      "sf_monto_per_accion_avg",
+      "sf_top_organismo_code",
+      "sf_top_organismo_nombre",
+      "sf_top_organismo_share",
+      "sf_pct_vivienda_nueva",
+      "sf_pct_mejoramientos",
+      "sf_pct_vivienda_usada",
+      "sf_pct_otros",
+      "sf_pct_femenino",
+      "sf_pct_credito_individual",
+      "sf_pct_economica",
+      "sf_pct_popular",
+      "sf_pct_tradicional",
+      "sf_pct_media",
+      "sf_pct_residencial",
+      "sf_pct_residencial_plus",
+      "sf_periodo",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
 describe("InclusionFinancieraResult shape symmetry (v0.2.12)", () => {
   /**
    * Both /analytics/municipio-detail and /analytics/entidad-detail expose

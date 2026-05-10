@@ -3858,6 +3858,36 @@ const SICT_ESTADO_COLS = `
 `.trim();
 
 /**
+ * SELECT column list for the LEFT JOIN against `sedatu_financing_by_estado`
+ * (v0.2.16). All cols `sf_`-prefixed (sf = sedatu financing) so the existing
+ * `viviendaFinanciamientosFromRow` marshaller works unchanged across muni
+ * and estado grains. Mirror posture of v0.2.15 SICT_ESTADO_COLS — the two
+ * prefixes never collide because they appear in different handler SELECT
+ * statements (municipio-detail vs entidad-detail).
+ */
+const SEDATU_ESTADO_COLS = `
+    sfe.acciones_total           AS sf_acciones_total,
+    sfe.monto_total              AS sf_monto_total,
+    sfe.monto_per_accion_avg     AS sf_monto_per_accion_avg,
+    sfe.top_organismo_code       AS sf_top_organismo_code,
+    sfe.top_organismo_nombre     AS sf_top_organismo_nombre,
+    sfe.top_organismo_share      AS sf_top_organismo_share,
+    sfe.pct_vivienda_nueva       AS sf_pct_vivienda_nueva,
+    sfe.pct_mejoramientos        AS sf_pct_mejoramientos,
+    sfe.pct_vivienda_usada       AS sf_pct_vivienda_usada,
+    sfe.pct_otros                AS sf_pct_otros,
+    sfe.pct_femenino             AS sf_pct_femenino,
+    sfe.pct_credito_individual   AS sf_pct_credito_individual,
+    sfe.pct_economica            AS sf_pct_economica,
+    sfe.pct_popular              AS sf_pct_popular,
+    sfe.pct_tradicional          AS sf_pct_tradicional,
+    sfe.pct_media                AS sf_pct_media,
+    sfe.pct_residencial          AS sf_pct_residencial,
+    sfe.pct_residencial_plus     AS sf_pct_residencial_plus,
+    sfe.periodo                  AS sf_periodo
+`.trim();
+
+/**
  * Marshal a row from a cnbv_panorama LEFT JOIN into the
  * `inclusion_financiera` nested category. Fields populated per grain are
  * documented at the InclusionFinancieraResult type definition.
@@ -4473,11 +4503,13 @@ SELECT json_agg(row_to_json(t)) FROM (
     bl.padrones        AS bl_padrones,
     bl.programas       AS bl_programas,
     ${CNBV_ESTADO_COLS},
-    ${SICT_ESTADO_COLS}
+    ${SICT_ESTADO_COLS},
+    ${SEDATU_ESTADO_COLS}
   FROM censo_entidades ce
   LEFT JOIN bienestar_estatal_latest bl ON bl.cve_ent = ce.cve_ent
   LEFT JOIN cnbv_panorama_estatal cp ON cp.cve_ent = ce.cve_ent
   LEFT JOIN sict_traffic_by_estado se ON se.cve_ent = ce.cve_ent
+  LEFT JOIN sedatu_financing_by_estado sfe ON sfe.cve_ent = ce.cve_ent
   WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
@@ -4593,6 +4625,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     },
     inclusion_financiera: inclusionFinancieraFromRow(r, "estado"),
     datos_viales: datosVialesFromRow(r),
+    vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

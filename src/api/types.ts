@@ -1729,6 +1729,40 @@ export interface EntidadDetailResult {
    * upstream. See `DatosVialesResult` for field-level docs.
    */
   datos_viales: DatosVialesResult | null;
+  /**
+   * Housing finance flows (SEDATU SNIIV Financiamientos 2025, v0.2.16).
+   * Sourced from `sedatu_financing_by_estado` materialized view, grouped
+   * by cve_ent over the `sedatu_financiamientos_estado_grain_2025` base
+   * view (which intentionally INCLUDES the 384 state-level "no distribuido
+   * por municipio" rows the muni-grain view excludes).
+   *
+   * **Sum invariant**: estado.acciones_total = SUM(muni.acciones_total)
+   * because the catch-all rows have 0 acciones (~all are pure-monto).
+   * estado.monto_total > SUM(muni.monto_total) by exactly the catch-all
+   * volume (~$265M MXN nationally / 0.04% of $617B). This is by design —
+   * estado-grain captures the full state-attributed picture; muni-grain
+   * captures only what was explicitly distributed.
+   *
+   * **Cross-grain semantics** (audit W1/W2 round-1):
+   * - `monto_per_accion_avg` at estado grain divides catch-all-inclusive
+   *   monto by catch-all-exclusive acciones. The "avg" is therefore a
+   *   monto-per-attributed-accion, biased upward by the catch-all share.
+   *   Nationally this is ~0.04%; at small estados with concentrated
+   *   state-level grant programs the bias may be larger. Not directly
+   *   comparable to the muni-grain field of the same name.
+   * - `top_organismo` ranks by acciones COUNT (not monto). Catch-all rows
+   *   contribute 0 acciones, so a publisher that only ships state-level
+   *   pure-monto entries does NOT influence the top_organismo ranking
+   *   even though its monto IS captured in monto_total. Same posture as
+   *   muni grain.
+   *
+   * Live coverage 2025: **32/32 estados** (every estado has ≥1 financing
+   * row). Same shape as `MunicipioDetailResult.vivienda_financiamientos` —
+   * the inner subtree is grain-agnostic; only the cve_mun → cve_ent
+   * attribution key changes upstream. See `ViviendaFinanciamientosResult`
+   * for field-level docs.
+   */
+  vivienda_financiamientos: ViviendaFinanciamientosResult | null;
 }
 
 // ---------------------------------------------------------------------------
