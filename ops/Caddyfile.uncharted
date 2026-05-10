@@ -19,6 +19,23 @@
 # Vite dev still runs on :5173 for local HMR; not exposed publicly.
 uncharted.eurekamd.cloud {
 	encode zstd gzip
+	# Audit W2-sec round-1 closure 2026-05-10: defense-in-depth headers.
+	# X-Frame-Options DENY      — block clickjacking embed in another origin
+	# X-Content-Type-Options    — block MIME-sniffing of dist/ assets
+	# Referrer-Policy           — minimal cross-origin leakage
+	# Permissions-Policy        — opt out of unused browser features
+	# Strict-Transport-Security — force HTTPS for 1y (LE TLS already on)
+	# CSP intentionally NOT set — MapLibre + Vite-built bundles use inline
+	# styles + workers; needs targeted testing before enabling.
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=()"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Hide upstream tooling fingerprint
+		-Server
+	}
 	handle_path /api/* {
 		reverse_proxy localhost:3030
 	}

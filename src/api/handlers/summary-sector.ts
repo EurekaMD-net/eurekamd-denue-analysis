@@ -24,6 +24,7 @@ import {
   type ApiServerConfig,
   type SectorSummaryResult,
 } from "../types.js";
+import { assertSafeContainer } from "./_safe-container.js";
 
 const TOP_ENTIDADES_LIMIT = 10;
 
@@ -58,6 +59,7 @@ async function fetchPerEntidadCounts(
   config: ApiServerConfig,
   scian: string,
 ): Promise<Array<{ entidad: string; count: number }>> {
+  assertSafeContainer(config.dbContainer);
   // scian is regex-validated (^[0-9]{2}$) BEFORE reaching here, so the
   // single-quote interpolation cannot escape into SQL.
   // Uses sector_actividad_id (backfilled from CLEE chars 6-7) to hit the
@@ -88,7 +90,12 @@ async function fetchPerEntidadCounts(
         "-c",
         sql,
       ],
-      { encoding: "utf-8", timeout: 30_000 },
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        // Audit C3-perf round-1 closure 2026-05-10.
+        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
+      },
     ).trim();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

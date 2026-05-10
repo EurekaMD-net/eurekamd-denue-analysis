@@ -25,6 +25,7 @@ import {
   type SectorEntry,
   type SectorsResult,
 } from "../types.js";
+import { assertSafeContainer } from "./_safe-container.js";
 
 interface ScianNamesFile {
   _verified_at?: string;
@@ -80,6 +81,7 @@ export async function sectorsHandler(
 async function fetchSectorCounts(
   config: ApiServerConfig,
 ): Promise<Array<[string, number]>> {
+  assertSafeContainer(config.dbContainer);
   // sector_actividad_id is backfilled from CLEE chars 6-7 (see
   // src/db/loader.ts:deriveScian). The btree idx_estab_sector index makes
   // this GROUP BY fast — no SUBSTR scan needed.
@@ -109,7 +111,14 @@ async function fetchSectorCounts(
         "-c",
         sql,
       ],
-      { encoding: "utf-8", timeout: 30_000 },
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        // Audit C3-perf round-1 closure 2026-05-10: parity with analytics.ts
+        // — postgres backend stops the query at 25s; the 30s spawn timeout
+        // then surfaces as a clean kill instead of a stuck backend.
+        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
+      },
     ).trim();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

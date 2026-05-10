@@ -14,8 +14,14 @@
  * so even though we shell-quote them, there's no injection surface.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { AnalysisConfig } from "./types.js";
+
+// Audit C1-sec round-1 closure 2026-05-10: parity with the rest of the
+// shell-out surface (sectors.ts, summary-sector.ts, search.ts, tiles.ts,
+// loaders). Container name is server-set from env, but enforce the regex
+// at the boundary anyway — defense in depth.
+const SAFE_CONTAINER_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
 export interface ClusterCentroid {
   cluster_id: number;
@@ -59,6 +65,13 @@ export async function clusterBySector(
   }
 
   const container = config.dbContainer ?? "supabase-db";
+  // Audit C1-sec round-1 closure 2026-05-10: defense-in-depth guard
+  // (parity with loader surface). Container is server-set today but
+  // regex-gating it at the boundary ensures shell-injection-by-env is
+  // closed even if a future change ships an operator-controllable path.
+  if (!SAFE_CONTAINER_RE.test(container)) {
+    throw new Error(`clusterBySector: unsafe container name "${container}".`);
+  }
   // ST_ClusterKMeans returns cluster_id over the window of records matching the WHERE.
   // Outer aggregate computes centroid + member list per cluster.
   // Output as JSON so we don't have to parse a psql table format.
@@ -96,8 +109,33 @@ export async function clusterBySector(
   // timeout: 60_000 ms — clustering on a large bank+sector can take a while
   // but must be bounded so the API handler that wraps this can't be hung
   // indefinitely (audit C2 from Phase 5: never shell-out without a timeout).
-  const cmd = `docker exec ${container} psql -U postgres -d postgres -t -A -c "${sql}"`;
-  const output = execSync(cmd, { encoding: "utf-8", timeout: 60_000 }).trim();
+  //
+  // Audit C1-sec round-1 closure 2026-05-10: rewrote from `execSync` with
+  // a shell-interpolated string to `execFileSync` array-arg form. No shell
+  // layer means metacharacters in container/sql cannot escape; matches the
+  // posture of every other shell-out site in the codebase. PGOPTIONS env
+  // bounds the postgres backend at 50s (parity with C3-perf fix).
+  const output = execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-t",
+      "-A",
+      "-c",
+      sql,
+    ],
+    {
+      encoding: "utf-8",
+      timeout: 60_000,
+      env: { ...process.env, PGOPTIONS: "-c statement_timeout=50000" },
+    },
+  ).trim();
 
   if (!output || output === "" || output === "null") {
     return [];

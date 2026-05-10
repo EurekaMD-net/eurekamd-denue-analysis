@@ -27,7 +27,11 @@ Requires=docker.service
 Type=oneshot
 WorkingDirectory=/root/claude/projects/data-intelligence/denue-data-analysis
 ExecStart=/root/claude/projects/data-intelligence/denue-data-analysis/scripts/refresh-matviews.sh
-TimeoutStartSec=300
+# Audit C1 round-1 closure 2026-05-10: bumped 300→1800. Live run on
+# 2026-05-09 took 194s; 2026-05-10 timed out at 300s (mv_sector_grade_matrix
+# alone took 294s — right on the edge). 1800s = 30min headroom for ~8×
+# growth without re-tuning.
+TimeoutStartSec=1800
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=denue-matview-refresh

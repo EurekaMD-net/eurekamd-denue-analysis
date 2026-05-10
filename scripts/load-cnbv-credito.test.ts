@@ -480,7 +480,9 @@ describe("refresh-matviews.sh integration (regression guard)", () => {
     const path = await vi.importActual<typeof import("node:path")>("node:path");
     const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
     const script = fs.readFileSync(scriptPath, "utf-8");
-    expect(script).toMatch(/REFRESH MATERIALIZED VIEW cnbv_credito_by_estado/);
+    expect(script).toMatch(
+      /REFRESH MATERIALIZED VIEW (CONCURRENTLY )?cnbv_credito_by_estado/,
+    );
   });
 
   it("references cnbv_credito_by_municipio in REFRESH list", async () => {
@@ -489,7 +491,7 @@ describe("refresh-matviews.sh integration (regression guard)", () => {
     const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
     const script = fs.readFileSync(scriptPath, "utf-8");
     expect(script).toMatch(
-      /REFRESH MATERIALIZED VIEW cnbv_credito_by_municipio/,
+      /REFRESH MATERIALIZED VIEW (CONCURRENTLY )?cnbv_credito_by_municipio/,
     );
   });
 });

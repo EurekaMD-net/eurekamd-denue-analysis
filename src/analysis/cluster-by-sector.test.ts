@@ -13,7 +13,12 @@ let mockExec: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   mockExec = vi.fn();
-  vi.doMock("node:child_process", () => ({ execSync: mockExec }));
+  // Audit C1-sec round-1 closure 2026-05-10: cluster-by-sector.ts switched
+  // from execSync (raw shell) to execFileSync (array-arg form).
+  vi.doMock("node:child_process", () => ({
+    execSync: vi.fn(),
+    execFileSync: mockExec,
+  }));
 });
 
 afterEach(() => {
@@ -81,12 +86,19 @@ describe("clusterBySector — psql interaction", () => {
     });
 
     expect(mockExec).toHaveBeenCalledOnce();
-    const cmd = mockExec.mock.calls[0]?.[0] as string;
-    expect(cmd).toContain("docker exec test-supabase-db psql");
-    expect(cmd).toContain("ST_ClusterKMeans");
-    expect(cmd).toContain("entidad = '09'");
-    expect(cmd).toContain("sector_actividad_id = '46'");
-    expect(cmd).not.toContain("SUBSTR(clee");
+    // execFileSync(file, args, opts): file is "docker", args[1] is the
+    // container, args[-1] is the SQL string.
+    const file = mockExec.mock.calls[0]?.[0] as string;
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    expect(file).toBe("docker");
+    expect(args[0]).toBe("exec");
+    expect(args[1]).toBe("test-supabase-db");
+    expect(args).toContain("psql");
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain("ST_ClusterKMeans");
+    expect(sql).toContain("entidad = '09'");
+    expect(sql).toContain("sector_actividad_id = '46'");
+    expect(sql).not.toContain("SUBSTR(clee");
 
     expect(result).toHaveLength(1);
     expect(result[0]?.member_count).toBe(12);
@@ -113,8 +125,8 @@ describe("clusterBySector — psql interaction", () => {
       { supabaseUrl: "http://localhost:8100", serviceRoleKey: "k" },
       { entidad: "06", scianPrefix: "62", k: 3 },
     );
-    const cmd = mockExec.mock.calls[0]?.[0] as string;
-    expect(cmd).toContain("docker exec supabase-db psql");
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    expect(args[1]).toBe("supabase-db");
   });
 });
 

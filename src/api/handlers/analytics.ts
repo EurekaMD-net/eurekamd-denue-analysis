@@ -768,11 +768,18 @@ WITH cur AS (
          patrimoniales, violentos, total_delitos
   FROM mv_delitos_municipal_yearly
   WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+    -- Audit C1-coherence round-1 closure 2026-05-10: SESNSP publishes
+    -- catch-all rows where MUN3 = '998' (federal-grain) or '999'
+    -- (state-grain "no especificado"). They have no censo_municipios
+    -- match and surface as ghost rows with municipio=null but non-null
+    -- delito counts. Filter them out at the CTE.
+    AND cve_mun !~ '99[89]$'
 ),
 baseline AS (
   SELECT cve_mun, total_delitos AS total_baseline
   FROM mv_delitos_municipal_yearly
   WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+    AND cve_mun !~ '99[89]$'
 )
 SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
   SELECT
@@ -828,12 +835,16 @@ WITH cur AS (
     SUM(count)::bigint AS total_delitos
   FROM sesnsp_delitos_municipal
   WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+    -- Audit C1-coherence round-1 closure 2026-05-10: same catch-all
+    -- filter as the MV path. See riskSummaryMvSql for details.
+    AND cve_mun !~ '99[89]$'
   GROUP BY cve_mun
 ),
 baseline AS (
   SELECT cve_mun, SUM(count)::bigint AS total_baseline
   FROM sesnsp_delitos_municipal
   WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+    AND cve_mun !~ '99[89]$'
   GROUP BY cve_mun
 )
 SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (

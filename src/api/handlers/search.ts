@@ -24,6 +24,7 @@ import {
   type ApiServerConfig,
   type SearchResult,
 } from "../types.js";
+import { assertSafeContainer } from "./_safe-container.js";
 
 const FROM_RE = /^-?\d{1,3}(?:\.\d+)?,-?\d{1,3}(?:\.\d+)?$/;
 const RADIUS_RE = /^\d+(?:\.\d+)?$/; // numeric only, no trailing garbage
@@ -198,6 +199,7 @@ async function searchWithRadius(
   config: ApiServerConfig,
   p: RadiusParams,
 ): Promise<Array<Record<string, unknown>>> {
+  assertSafeContainer(config.dbContainer);
   const [latStr, lonStr] = p.from.split(",");
   const lat = parseFloat(latStr!);
   const lon = parseFloat(lonStr!);
@@ -254,6 +256,10 @@ async function searchWithRadius(
     {
       encoding: "utf-8",
       timeout: 30_000, // hard cap; today's lesson: never shell-out without timeout
+      // Audit C3-perf round-1 closure 2026-05-10: bound the postgres
+      // backend separately from the spawn — radius/full-text search can
+      // monopolize a connection past the 30s wall-clock kill.
+      env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
     },
   ).trim();
 

@@ -36,6 +36,7 @@ import {
   TILE_FEATURE_CAP,
   type ApiServerConfig,
 } from "../types.js";
+import { assertSafeContainer } from "./_safe-container.js";
 
 const TILE_CACHE_SECONDS = 3600;
 
@@ -123,6 +124,7 @@ async function buildTile(
   config: ApiServerConfig,
   p: TileParams,
 ): Promise<ArrayBuffer> {
+  assertSafeContainer(config.dbContainer);
   // Compose the WHERE additively so the SQL stays simple. All interpolations
   // are pre-validated integers or regex-bounded 2-char strings.
   const filters: string[] = [];
@@ -188,7 +190,16 @@ async function buildTile(
         "-c",
         sql,
       ],
-      { encoding: "utf-8", timeout: 30_000, maxBuffer: 50 * 1024 * 1024 },
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        maxBuffer: 50 * 1024 * 1024,
+        // Audit C3-perf round-1 closure 2026-05-10: tile generation runs
+        // ST_AsMVT on PostGIS-indexed geometry — typically <500ms but can
+        // spike under high-density urban tiles. 25s backend timeout is
+        // conservative; spawn timeout (30s) catches the kill cleanly.
+        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
+      },
     );
     stdout = result.stdout.trim();
   } catch (err) {

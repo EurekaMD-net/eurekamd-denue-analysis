@@ -461,7 +461,7 @@ describe("refresh-matviews.sh integration (regression guard)", () => {
     const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
     const script = fs.readFileSync(scriptPath, "utf-8");
     expect(script).toMatch(
-      /REFRESH MATERIALIZED VIEW sedatu_financing_by_estado/,
+      /REFRESH MATERIALIZED VIEW (CONCURRENTLY )?sedatu_financing_by_estado/,
     );
   });
 
@@ -471,7 +471,7 @@ describe("refresh-matviews.sh integration (regression guard)", () => {
     const scriptPath = path.resolve(__dirname, "refresh-matviews.sh");
     const script = fs.readFileSync(scriptPath, "utf-8");
     expect(script).toMatch(
-      /REFRESH MATERIALIZED VIEW sedatu_financing_by_municipio/,
+      /REFRESH MATERIALIZED VIEW (CONCURRENTLY )?sedatu_financing_by_municipio/,
     );
   });
 });

@@ -2,10 +2,14 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 
 // vi.mock is hoisted above all imports, including the const declaration.
 // Use vi.hoisted to define the mock before the hoisted vi.mock factory runs.
+//
+// Audit C1-sec round-1 closure 2026-05-10: cluster-by-sector.ts switched
+// from execSync (raw shell) to execFileSync (array-arg form). Mock now
+// targets execFileSync to match.
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
 vi.mock("node:child_process", () => ({
-  execSync: mockExec,
-  execFileSync: vi.fn(),
+  execSync: vi.fn(),
+  execFileSync: mockExec,
   execFile: vi.fn(),
 }));
 
@@ -64,9 +68,11 @@ describe("GET /clusters", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const cmd = mockExec.mock.calls[0]?.[0] as string;
-    // The runner interpolates k as a number directly into the SQL
-    expect(cmd).toContain("ST_ClusterKMeans(geom, 5)");
+    // Audit C1-sec round-1 closure 2026-05-10: SQL is now passed as the
+    // last array element to execFileSync, not as a shell-string.
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain("ST_ClusterKMeans(geom, 5)");
   });
 
   it("returns 400 on missing entidad", async () => {

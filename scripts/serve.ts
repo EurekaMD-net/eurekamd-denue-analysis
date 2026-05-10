@@ -84,8 +84,16 @@ if (resolvedMortality.source === "fallback") {
 
 const app = createServer(config);
 
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`✅ DENUE API escuchando en http://0.0.0.0:${info.port}`);
+// Audit W3-sec round-1 closure 2026-05-10: bind to 127.0.0.1 explicitly.
+// Caddy reverse-proxies on the same host; no need to expose :3030 on the
+// LAN. UFW would also block external hits today (no public allow rule),
+// but defense in depth: bind locally so a future UFW rule change can't
+// silently expose the API. Override with API_HOST=0.0.0.0 only if the
+// service ever needs LAN exposure.
+const hostname = process.env["API_HOST"] ?? "127.0.0.1";
+
+serve({ fetch: app.fetch, port, hostname }, (info) => {
+  console.log(`✅ DENUE API escuchando en http://${hostname}:${info.port}`);
   console.log(`   Endpoints (todos requieren X-Api-Key):`);
   console.log(`     GET /health`);
   console.log(

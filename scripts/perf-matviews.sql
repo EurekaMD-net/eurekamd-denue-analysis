@@ -45,6 +45,14 @@ LEFT JOIN coneval_irs_municipal i ON i.cve_mun = e.area_geo
 WHERE e.sector_actividad_id IS NOT NULL
 GROUP BY 1, 2;
 
+-- Audit W1-perf round-1 closure 2026-05-10: UNIQUE INDEX required for
+-- REFRESH MATERIALIZED VIEW CONCURRENTLY. Without it, REFRESH takes an
+-- AccessExclusiveLock on the MV and blocks all readers for the duration
+-- (mv_sector_grade_matrix is the slowest MV at ~5min). With CONCURRENTLY
+-- + a unique key, readers stay live throughout. Verified empirically:
+-- 137 rows / 137 unique (scian, irs_grado) pairs / 0 NULL keys.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sgm_scian_irs
+  ON mv_sector_grade_matrix(scian, irs_grado);
 CREATE INDEX idx_mv_sgm_scian ON mv_sector_grade_matrix(scian);
 CREATE INDEX idx_mv_sgm_irs ON mv_sector_grade_matrix(irs_grado);
 
@@ -95,7 +103,11 @@ LEFT JOIN entidad_irs ei
 LEFT JOIN entidad_pobreza ep
   ON ep.entidad = ec.entidad;
 
-CREATE INDEX idx_mv_treemap_entidad ON mv_national_treemap(entidad);
+-- Audit W1-perf round-1 closure 2026-05-10: same posture as
+-- mv_sector_grade_matrix above — UNIQUE INDEX enables REFRESH
+-- CONCURRENTLY. Verified: 33 rows / 33 unique entidades / 0 NULL.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_treemap_entidad_unique
+  ON mv_national_treemap(entidad);
 
 -- =============================================================================
 -- mv_delitos_municipal_yearly — per-municipality, per-year SESNSP rollup
@@ -140,7 +152,9 @@ GROUP BY cve_mun, ano;
 
 CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
-CREATE INDEX idx_mv_dmy_cve_mun_ano ON mv_delitos_municipal_yearly(cve_mun, ano);
+-- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
+-- previous non-unique idx_mv_dmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_dmy_unique ON mv_delitos_municipal_yearly(cve_mun, ano);
 
 
 -- =============================================================================
@@ -200,4 +214,6 @@ GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
 
 CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
-CREATE INDEX idx_mv_mmy_cve_mun_ano ON mv_mortalidad_municipal_yearly(cve_mun, ano);
+-- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
+-- previous non-unique idx_mv_mmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_yearly(cve_mun, ano);
