@@ -92,6 +92,7 @@ import {
   type LicensedPharmaciesByMunicipioResult,
   type ColoniasByAgebResult,
   type EntidadDetailResult,
+  type InclusionFinancieraResult,
   type LocalitiesByMunicipioResult,
   type LocalitiesOrderBy,
   type LocalityDetailResult,
@@ -3672,6 +3673,375 @@ SELECT json_agg(row_to_json(t)) FROM (
   return c.json(result);
 }
 
+// ---------------------------------------------------------------------------
+// CNBV Panorama 2025 (v0.2.12) — shared SQL fragments + marshallers
+// ---------------------------------------------------------------------------
+
+/**
+ * SELECT column list for the LEFT JOIN against `cnbv_panorama_municipal`.
+ * All 76 view cols aliased with a `cp_` prefix to avoid collisions with the
+ * censo_municipios cols in the same SELECT list.
+ *
+ * Grouped by family (matches view order). Defined as a string template
+ * fragment so it composes into the existing `SELECT ... FROM censo_municipios
+ * LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = ...` pattern.
+ */
+const CNBV_MUNI_COLS = `
+    cp.poblacion_total       AS cp_poblacion_total,
+    cp.poblacion_adulta      AS cp_poblacion_adulta,
+    cp.rezago_social         AS cp_rezago_social,
+    cp.sucursales_bm         AS cp_sucursales_bm,
+    cp.sucursales_bd         AS cp_sucursales_bd,
+    cp.sucursales_socap      AS cp_sucursales_socap,
+    cp.sucursales_sofipo     AS cp_sucursales_sofipo,
+    cp.sucursales_total      AS cp_sucursales_total,
+    cp.corresponsales_max    AS cp_corresponsales_max,
+    cp.cajeros_bm            AS cp_cajeros_bm,
+    cp.cajeros_bd            AS cp_cajeros_bd,
+    cp.cajeros_socap         AS cp_cajeros_socap,
+    cp.cajeros_sofipo        AS cp_cajeros_sofipo,
+    cp.cajeros_total         AS cp_cajeros_total,
+    cp.tpv_bm                AS cp_tpv_bm,
+    cp.tpv_bd                AS cp_tpv_bd,
+    cp.tpv_socap             AS cp_tpv_socap,
+    cp.tpv_sofipo            AS cp_tpv_sofipo,
+    cp.tpv_total_eacp        AS cp_tpv_total_eacp,
+    cp.tpv_agregadores       AS cp_tpv_agregadores,
+    cp.tpv_adq_no_banc       AS cp_tpv_adq_no_banc,
+    cp.tpv_total_ag_adq      AS cp_tpv_total_ag_adq,
+    cp.tpv_total             AS cp_tpv_total,
+    cp.puntos_acceso_sca     AS cp_puntos_acceso_sca,
+    cp.cuentas_bm            AS cp_cuentas_bm,
+    cp.cuentas_bd            AS cp_cuentas_bd,
+    cp.cuentas_socap         AS cp_cuentas_socap,
+    cp.cuentas_sofipo        AS cp_cuentas_sofipo,
+    cp.cuentas_total         AS cp_cuentas_total,
+    cp.creditos_bm           AS cp_creditos_bm,
+    cp.creditos_bd           AS cp_creditos_bd,
+    cp.creditos_socap        AS cp_creditos_socap,
+    cp.creditos_sofipo       AS cp_creditos_sofipo,
+    cp.creditos_total        AS cp_creditos_total,
+    cp.tx_tpv_bm             AS cp_tx_tpv_bm,
+    cp.tx_tpv_bd             AS cp_tx_tpv_bd,
+    cp.tx_tpv_socap          AS cp_tx_tpv_socap,
+    cp.tx_tpv_sofipo         AS cp_tx_tpv_sofipo,
+    cp.tx_tpv_total          AS cp_tx_tpv_total,
+    cp.remesas_mdd           AS cp_remesas_mdd,
+    cp.remesas_per_capita    AS cp_remesas_per_capita,
+    cp.g_cuentas_bm_m        AS cp_g_cuentas_bm_m,
+    cp.g_cuentas_bm_h        AS cp_g_cuentas_bm_h,
+    cp.g_cuentas_bm_b        AS cp_g_cuentas_bm_b,
+    cp.g_cuentas_bd_m        AS cp_g_cuentas_bd_m,
+    cp.g_cuentas_bd_h        AS cp_g_cuentas_bd_h,
+    cp.g_cuentas_bd_b        AS cp_g_cuentas_bd_b,
+    cp.g_cuentas_socap_m     AS cp_g_cuentas_socap_m,
+    cp.g_cuentas_socap_h     AS cp_g_cuentas_socap_h,
+    cp.g_cuentas_socap_b     AS cp_g_cuentas_socap_b,
+    cp.g_cuentas_sofipo_m    AS cp_g_cuentas_sofipo_m,
+    cp.g_cuentas_sofipo_h    AS cp_g_cuentas_sofipo_h,
+    cp.g_cuentas_sofipo_b    AS cp_g_cuentas_sofipo_b,
+    cp.g_cuentas_total_m     AS cp_g_cuentas_total_m,
+    cp.g_cuentas_total_h     AS cp_g_cuentas_total_h,
+    cp.g_cuentas_total_b     AS cp_g_cuentas_total_b,
+    cp.g_creditos_bm_m       AS cp_g_creditos_bm_m,
+    cp.g_creditos_bm_h       AS cp_g_creditos_bm_h,
+    cp.g_creditos_bm_b       AS cp_g_creditos_bm_b,
+    cp.g_creditos_bd_m       AS cp_g_creditos_bd_m,
+    cp.g_creditos_bd_h       AS cp_g_creditos_bd_h,
+    cp.g_creditos_bd_b       AS cp_g_creditos_bd_b,
+    cp.g_creditos_socap_m    AS cp_g_creditos_socap_m,
+    cp.g_creditos_socap_h    AS cp_g_creditos_socap_h,
+    cp.g_creditos_socap_b    AS cp_g_creditos_socap_b,
+    cp.g_creditos_sofipo_m   AS cp_g_creditos_sofipo_m,
+    cp.g_creditos_sofipo_h   AS cp_g_creditos_sofipo_h,
+    cp.g_creditos_sofipo_b   AS cp_g_creditos_sofipo_b,
+    cp.g_creditos_total_m    AS cp_g_creditos_total_m,
+    cp.g_creditos_total_h    AS cp_g_creditos_total_h,
+    cp.g_creditos_total_b    AS cp_g_creditos_total_b,
+    cp.periodo               AS cp_periodo`;
+
+/**
+ * SELECT column list for the LEFT JOIN against `cnbv_panorama_estatal`.
+ * 72 view cols aliased with `cp_` (parallel to the muni list).
+ */
+const CNBV_ESTADO_COLS = `
+    cp.poblacion_total       AS cp_poblacion_total,
+    cp.poblacion_adulta      AS cp_poblacion_adulta,
+    cp.sucursales_bm         AS cp_sucursales_bm,
+    cp.sucursales_bd         AS cp_sucursales_bd,
+    cp.sucursales_socap      AS cp_sucursales_socap,
+    cp.sucursales_sofipo     AS cp_sucursales_sofipo,
+    cp.sucursales_total      AS cp_sucursales_total,
+    cp.corresponsales_max    AS cp_corresponsales_max,
+    cp.cajeros_bm            AS cp_cajeros_bm,
+    cp.cajeros_bd            AS cp_cajeros_bd,
+    cp.cajeros_socap         AS cp_cajeros_socap,
+    cp.cajeros_sofipo        AS cp_cajeros_sofipo,
+    cp.cajeros_total         AS cp_cajeros_total,
+    cp.tpv_bm                AS cp_tpv_bm,
+    cp.tpv_bd                AS cp_tpv_bd,
+    cp.tpv_socap             AS cp_tpv_socap,
+    cp.tpv_sofipo            AS cp_tpv_sofipo,
+    cp.tpv_total_eacp        AS cp_tpv_total_eacp,
+    cp.tpv_agregadores       AS cp_tpv_agregadores,
+    cp.tpv_adq_no_banc       AS cp_tpv_adq_no_banc,
+    cp.tpv_total_ag_adq      AS cp_tpv_total_ag_adq,
+    cp.tpv_total             AS cp_tpv_total,
+    cp.cuentas_bm            AS cp_cuentas_bm,
+    cp.cuentas_bd            AS cp_cuentas_bd,
+    cp.cuentas_socap         AS cp_cuentas_socap,
+    cp.cuentas_sofipo        AS cp_cuentas_sofipo,
+    cp.cuentas_total         AS cp_cuentas_total,
+    cp.creditos_bm           AS cp_creditos_bm,
+    cp.creditos_bd           AS cp_creditos_bd,
+    cp.creditos_socap        AS cp_creditos_socap,
+    cp.creditos_sofipo       AS cp_creditos_sofipo,
+    cp.creditos_total        AS cp_creditos_total,
+    cp.sar_asignado          AS cp_sar_asignado,
+    cp.sar_registrado        AS cp_sar_registrado,
+    cp.sar_total             AS cp_sar_total,
+    cp.seg_vida              AS cp_seg_vida,
+    cp.seg_pensiones         AS cp_seg_pensiones,
+    cp.seg_accidentes        AS cp_seg_accidentes,
+    cp.seg_danos_sin_autos   AS cp_seg_danos_sin_autos,
+    cp.seg_automoviles       AS cp_seg_automoviles,
+    cp.seg_total             AS cp_seg_total,
+    cp.tx_tpv_bm             AS cp_tx_tpv_bm,
+    cp.tx_tpv_bd             AS cp_tx_tpv_bd,
+    cp.tx_tpv_socap          AS cp_tx_tpv_socap,
+    cp.tx_tpv_sofipo         AS cp_tx_tpv_sofipo,
+    cp.tx_tpv_total          AS cp_tx_tpv_total,
+    cp.remesas_mdd           AS cp_remesas_mdd,
+    cp.condusef_ubicacion    AS cp_condusef_ubicacion,
+    cp.condusef_reclamaciones AS cp_condusef_reclamaciones,
+    cp.ac_inf_sucursales     AS cp_ac_inf_sucursales,
+    cp.ac_inf_corresponsales AS cp_ac_inf_corresponsales,
+    cp.ac_inf_cajeros        AS cp_ac_inf_cajeros,
+    cp.ac_inf_tpv            AS cp_ac_inf_tpv,
+    cp.ac_inf_total_ag_adq   AS cp_ac_inf_total_ag_adq,
+    cp.ac_pf_captacion       AS cp_ac_pf_captacion,
+    cp.ac_pf_credito         AS cp_ac_pf_credito,
+    cp.ac_pf_afore           AS cp_ac_pf_afore,
+    cp.ac_pf_vida            AS cp_ac_pf_vida,
+    cp.ac_pf_pensiones       AS cp_ac_pf_pensiones,
+    cp.ac_pf_accidentes      AS cp_ac_pf_accidentes,
+    cp.ac_pf_danos_sin_autos AS cp_ac_pf_danos_sin_autos,
+    cp.ac_pf_automoviles     AS cp_ac_pf_automoviles,
+    cp.ac_mp_tx_tpv          AS cp_ac_mp_tx_tpv,
+    cp.ac_mp_remesas         AS cp_ac_mp_remesas,
+    cp.ac_mp_ubicacion       AS cp_ac_mp_ubicacion,
+    cp.ac_mp_reclamaciones   AS cp_ac_mp_reclamaciones,
+    cp.periodo               AS cp_periodo`;
+
+/**
+ * Marshal a row from a cnbv_panorama LEFT JOIN into the
+ * `inclusion_financiera` nested category. Fields populated per grain are
+ * documented at the InclusionFinancieraResult type definition.
+ *
+ * `r` is the wide flat row with cp_-prefixed columns.
+ * `grain` selects which subtree is populated vs returned as null:
+ *   - 'muni'   → genero populated, sar/seguros/condusef/acomodo = null
+ *   - 'estado' → sar/seguros/condusef/acomodo populated, genero = null
+ *
+ * Defensive: when the LEFT JOIN misses (no row in panorama), every cp_ field
+ * is null; this returns the type-shape with all leaves null. The `periodo`
+ * field falls back to 'panorama-2025' so consumers always have a label.
+ */
+function inclusionFinancieraFromRow(
+  r: Record<string, unknown>,
+  grain: "muni" | "estado",
+): InclusionFinancieraResult {
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const str = (v: unknown): string | null =>
+    v === null || v === undefined ? null : String(v);
+  const breakdown = (
+    m: unknown,
+    h: unknown,
+    b: unknown,
+  ): { m: number | null; h: number | null; brecha: number | null } => ({
+    m: num(m),
+    h: num(h),
+    brecha: num(b),
+  });
+
+  return {
+    poblacion_total: num(r.cp_poblacion_total),
+    poblacion_adulta: num(r.cp_poblacion_adulta),
+    rezago_social: grain === "muni" ? str(r.cp_rezago_social) : null,
+    infraestructura: {
+      sucursales: {
+        bm: num(r.cp_sucursales_bm),
+        bd: num(r.cp_sucursales_bd),
+        socap: num(r.cp_sucursales_socap),
+        sofipo: num(r.cp_sucursales_sofipo),
+        total: num(r.cp_sucursales_total),
+      },
+      corresponsales_max: num(r.cp_corresponsales_max),
+      cajeros: {
+        bm: num(r.cp_cajeros_bm),
+        bd: num(r.cp_cajeros_bd),
+        socap: num(r.cp_cajeros_socap),
+        sofipo: num(r.cp_cajeros_sofipo),
+        total: num(r.cp_cajeros_total),
+      },
+      tpv: {
+        bm: num(r.cp_tpv_bm),
+        bd: num(r.cp_tpv_bd),
+        socap: num(r.cp_tpv_socap),
+        sofipo: num(r.cp_tpv_sofipo),
+        total_eacp: num(r.cp_tpv_total_eacp),
+        agregadores: num(r.cp_tpv_agregadores),
+        adq_no_banc: num(r.cp_tpv_adq_no_banc),
+        total_ag_adq: num(r.cp_tpv_total_ag_adq),
+        total: num(r.cp_tpv_total),
+      },
+      puntos_acceso_sca: grain === "muni" ? num(r.cp_puntos_acceso_sca) : null,
+    },
+    productos: {
+      cuentas: {
+        bm: num(r.cp_cuentas_bm),
+        bd: num(r.cp_cuentas_bd),
+        socap: num(r.cp_cuentas_socap),
+        sofipo: num(r.cp_cuentas_sofipo),
+        total: num(r.cp_cuentas_total),
+      },
+      creditos: {
+        bm: num(r.cp_creditos_bm),
+        bd: num(r.cp_creditos_bd),
+        socap: num(r.cp_creditos_socap),
+        sofipo: num(r.cp_creditos_sofipo),
+        total: num(r.cp_creditos_total),
+      },
+      tx_tpv: {
+        bm: num(r.cp_tx_tpv_bm),
+        bd: num(r.cp_tx_tpv_bd),
+        socap: num(r.cp_tx_tpv_socap),
+        sofipo: num(r.cp_tx_tpv_sofipo),
+        total: num(r.cp_tx_tpv_total),
+      },
+      sar:
+        grain === "estado"
+          ? {
+              asignado: num(r.cp_sar_asignado),
+              registrado: num(r.cp_sar_registrado),
+              total: num(r.cp_sar_total),
+            }
+          : null,
+      seguros:
+        grain === "estado"
+          ? {
+              vida: num(r.cp_seg_vida),
+              pensiones: num(r.cp_seg_pensiones),
+              accidentes: num(r.cp_seg_accidentes),
+              danos_sin_autos: num(r.cp_seg_danos_sin_autos),
+              automoviles: num(r.cp_seg_automoviles),
+              total: num(r.cp_seg_total),
+            }
+          : null,
+    },
+    remesas: {
+      mdd: num(r.cp_remesas_mdd),
+      per_capita: grain === "muni" ? num(r.cp_remesas_per_capita) : null,
+    },
+    genero:
+      grain === "muni"
+        ? {
+            cuentas: {
+              bm: breakdown(
+                r.cp_g_cuentas_bm_m,
+                r.cp_g_cuentas_bm_h,
+                r.cp_g_cuentas_bm_b,
+              ),
+              bd: breakdown(
+                r.cp_g_cuentas_bd_m,
+                r.cp_g_cuentas_bd_h,
+                r.cp_g_cuentas_bd_b,
+              ),
+              socap: breakdown(
+                r.cp_g_cuentas_socap_m,
+                r.cp_g_cuentas_socap_h,
+                r.cp_g_cuentas_socap_b,
+              ),
+              sofipo: breakdown(
+                r.cp_g_cuentas_sofipo_m,
+                r.cp_g_cuentas_sofipo_h,
+                r.cp_g_cuentas_sofipo_b,
+              ),
+              total: breakdown(
+                r.cp_g_cuentas_total_m,
+                r.cp_g_cuentas_total_h,
+                r.cp_g_cuentas_total_b,
+              ),
+            },
+            creditos: {
+              bm: breakdown(
+                r.cp_g_creditos_bm_m,
+                r.cp_g_creditos_bm_h,
+                r.cp_g_creditos_bm_b,
+              ),
+              bd: breakdown(
+                r.cp_g_creditos_bd_m,
+                r.cp_g_creditos_bd_h,
+                r.cp_g_creditos_bd_b,
+              ),
+              socap: breakdown(
+                r.cp_g_creditos_socap_m,
+                r.cp_g_creditos_socap_h,
+                r.cp_g_creditos_socap_b,
+              ),
+              sofipo: breakdown(
+                r.cp_g_creditos_sofipo_m,
+                r.cp_g_creditos_sofipo_h,
+                r.cp_g_creditos_sofipo_b,
+              ),
+              total: breakdown(
+                r.cp_g_creditos_total_m,
+                r.cp_g_creditos_total_h,
+                r.cp_g_creditos_total_b,
+              ),
+            },
+          }
+        : null,
+    condusef:
+      grain === "estado"
+        ? {
+            ubicacion: num(r.cp_condusef_ubicacion),
+            reclamaciones: num(r.cp_condusef_reclamaciones),
+          }
+        : null,
+    acomodo:
+      grain === "estado"
+        ? {
+            infraestructura: {
+              sucursales: num(r.cp_ac_inf_sucursales),
+              corresponsales: num(r.cp_ac_inf_corresponsales),
+              cajeros: num(r.cp_ac_inf_cajeros),
+              tpv: num(r.cp_ac_inf_tpv),
+              total_ag_adq: num(r.cp_ac_inf_total_ag_adq),
+            },
+            productos: {
+              captacion: num(r.cp_ac_pf_captacion),
+              credito: num(r.cp_ac_pf_credito),
+              afore: num(r.cp_ac_pf_afore),
+              vida: num(r.cp_ac_pf_vida),
+              pensiones: num(r.cp_ac_pf_pensiones),
+              accidentes: num(r.cp_ac_pf_accidentes),
+              danos_sin_autos: num(r.cp_ac_pf_danos_sin_autos),
+              automoviles: num(r.cp_ac_pf_automoviles),
+            },
+            medios_pago: {
+              tx_tpv: num(r.cp_ac_mp_tx_tpv),
+              remesas: num(r.cp_ac_mp_remesas),
+              ubicacion: num(r.cp_ac_mp_ubicacion),
+              reclamaciones: num(r.cp_ac_mp_reclamaciones),
+            },
+          }
+        : null,
+    periodo: str(r.cp_periodo) ?? "panorama-2025",
+  };
+}
+
 /**
  * GET /analytics/municipio-detail?cve_mun=NNNNN
  *
@@ -3708,21 +4078,23 @@ export async function municipioDetailHandler(
   const sql = `
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT
-    cve_mun, entidad, mun, nom_mun, nom_ent,
-    pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas,
-    pea, pocupada, graproes, tvivhab, tvivpar,
-    pcatolica, pro_crieva, potras_rel, psin_relig,
-    p3ym_hli, p3hlinhe, p3hli_he, phog_ind, pob_afro,
-    pnacent, pnacoe, pres2015, presoe15,
-    p15ym_an, p15ym_se, p15pri_in, p15pri_co, p15sec_in, p15sec_co, p18ym_pb,
-    p12ym_solt, p12ym_casa, p12ym_sepa,
-    pcon_disc, pcon_limi, psind_lim,
-    psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
-    vph_inter, vph_autom, vph_refri, vph_lavad, vph_hmicro,
-    vph_moto, vph_bici, vph_radio, vph_tv, vph_pc, vph_telef, vph_cel,
-    vph_stvp, vph_spmvpi, vph_cvj, vph_snbien
-  FROM censo_municipios
-  WHERE cve_mun = '${cveMun}'
+    cm.cve_mun, cm.entidad, cm.mun, cm.nom_mun, cm.nom_ent,
+    cm.pobtot, cm.pobfem, cm.pobmas, cm.p_60ymas, cm.p_15ymas, cm.p_18ymas,
+    cm.pea, cm.pocupada, cm.graproes, cm.tvivhab, cm.tvivpar,
+    cm.pcatolica, cm.pro_crieva, cm.potras_rel, cm.psin_relig,
+    cm.p3ym_hli, cm.p3hlinhe, cm.p3hli_he, cm.phog_ind, cm.pob_afro,
+    cm.pnacent, cm.pnacoe, cm.pres2015, cm.presoe15,
+    cm.p15ym_an, cm.p15ym_se, cm.p15pri_in, cm.p15pri_co, cm.p15sec_in, cm.p15sec_co, cm.p18ym_pb,
+    cm.p12ym_solt, cm.p12ym_casa, cm.p12ym_sepa,
+    cm.pcon_disc, cm.pcon_limi, cm.psind_lim,
+    cm.psinder, cm.pder_ss, cm.pder_imss, cm.pder_iste, cm.pder_segp, cm.pder_imssb, cm.pafil_ipriv,
+    cm.vph_inter, cm.vph_autom, cm.vph_refri, cm.vph_lavad, cm.vph_hmicro,
+    cm.vph_moto, cm.vph_bici, cm.vph_radio, cm.vph_tv, cm.vph_pc, cm.vph_telef, cm.vph_cel,
+    cm.vph_stvp, cm.vph_spmvpi, cm.vph_cvj, cm.vph_snbien,
+    ${CNBV_MUNI_COLS}
+  FROM censo_municipios cm
+  LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
+  WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
   const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
@@ -3824,6 +4196,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       vph_cvj: num(r.vph_cvj),
       vph_snbien: num(r.vph_snbien),
     },
+    inclusion_financiera: inclusionFinancieraFromRow(r, "muni"),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");
@@ -3887,9 +4260,11 @@ SELECT json_agg(row_to_json(t)) FROM (
     bl.intervenciones  AS bl_intervenciones,
     bl.dependencias    AS bl_dependencias,
     bl.padrones        AS bl_padrones,
-    bl.programas       AS bl_programas
+    bl.programas       AS bl_programas,
+    ${CNBV_ESTADO_COLS}
   FROM censo_entidades ce
   LEFT JOIN bienestar_estatal_latest bl ON bl.cve_ent = ce.cve_ent
+  LEFT JOIN cnbv_panorama_estatal cp ON cp.cve_ent = ce.cve_ent
   WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
@@ -4003,6 +4378,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       padrones: num(r.bl_padrones),
       programas: num(r.bl_programas),
     },
+    inclusion_financiera: inclusionFinancieraFromRow(r, "estado"),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "X-Api-Key");

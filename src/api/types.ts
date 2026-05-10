@@ -1277,6 +1277,163 @@ export interface MunicipioDetailResult {
     vph_cvj: number | null;
     vph_snbien: number | null;
   };
+  /**
+   * Financial inclusion (CNBV Panorama Anual 2025, v0.2.12). Sourced from
+   * `cnbv_panorama_municipal` view (76 cols × 2,469 munis after filtering
+   * the 99999 catch-all). LEFT JOIN — munis missing from CNBV's catalog
+   * surface as all-null rather than 404.
+   *
+   * Estado-grain-only fields are present in the response but always null
+   * here (sar / seguros / condusef / acomodo). Type symmetry preserved
+   * with EntidadDetailResult to keep one shared `inclusion_financiera`
+   * shape across endpoints; consumers can rely on the presence of the keys
+   * without grain-specific branching.
+   *
+   * Suppression: CNBV's brecha sentinel `-999` (n<100 statistical-validity
+   * floor) is mapped to NULL on load. Consumers cannot distinguish
+   * "missing" from "n<100 suppressed" — both surface as null.
+   */
+  inclusion_financiera: InclusionFinancieraResult;
+}
+
+/**
+ * Shared `inclusion_financiera` shape used by both MunicipioDetailResult and
+ * EntidadDetailResult. Fields populated per grain are documented at each key.
+ * Source: CNBV Panorama Anual de Inclusión Financiera 2025 (v0.2.12).
+ */
+export interface InclusionFinancieraResult {
+  /** muni grain: Censo 2020 freeze (CNBV's `Población*` column).
+   *  estado grain: CONAPO 2024 projection. */
+  poblacion_total: number | null;
+  poblacion_adulta: number | null;
+  /** muni grain only — CONEVAL Grado de Rezago Social ordinal label.
+   *  estado grain: always null. */
+  rezago_social: string | null;
+  infraestructura: {
+    sucursales: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total: number | null;
+    };
+    corresponsales_max: number | null;
+    cajeros: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total: number | null;
+    };
+    tpv: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total_eacp: number | null;
+      agregadores: number | null;
+      adq_no_banc: number | null;
+      total_ag_adq: number | null;
+      total: number | null;
+    };
+    /** muni grain only — count of (sucursales + corresponsales + cajeros)
+     *  for the headline "cobertura municipal" metric. estado grain: null. */
+    puntos_acceso_sca: number | null;
+  };
+  productos: {
+    cuentas: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total: number | null;
+    };
+    creditos: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total: number | null;
+    };
+    tx_tpv: {
+      bm: number | null;
+      bd: number | null;
+      socap: number | null;
+      sofipo: number | null;
+      total: number | null;
+    };
+    /** estado grain only — Cuentas de Ahorro para el Retiro (SAR) administradas. */
+    sar: {
+      asignado: number | null;
+      registrado: number | null;
+      total: number | null;
+    } | null;
+    /** estado grain only — Prima directa anual (millones de pesos). */
+    seguros: {
+      vida: number | null;
+      pensiones: number | null;
+      accidentes: number | null;
+      danos_sin_autos: number | null;
+      automoviles: number | null;
+      total: number | null;
+    } | null;
+  };
+  remesas: {
+    mdd: number | null;
+    /** muni grain only — USD/persona. estado grain: null. */
+    per_capita: number | null;
+  };
+  /** muni grain only — gender brechas. estado grain: null. */
+  genero: {
+    cuentas: GeneroBreakdown;
+    creditos: GeneroBreakdown;
+  } | null;
+  /** estado grain only — CONDUSEF actions and reclamaciones. */
+  condusef: {
+    ubicacion: number | null;
+    reclamaciones: number | null;
+  } | null;
+  /** estado grain only — rankings (1 = highest position). */
+  acomodo: {
+    infraestructura: {
+      sucursales: number | null;
+      corresponsales: number | null;
+      cajeros: number | null;
+      tpv: number | null;
+      total_ag_adq: number | null;
+    };
+    productos: {
+      captacion: number | null;
+      credito: number | null;
+      afore: number | null;
+      vida: number | null;
+      pensiones: number | null;
+      accidentes: number | null;
+      danos_sin_autos: number | null;
+      automoviles: number | null;
+    };
+    medios_pago: {
+      tx_tpv: number | null;
+      remesas: number | null;
+      ubicacion: number | null;
+      reclamaciones: number | null;
+    };
+  } | null;
+  periodo: string;
+}
+
+/**
+ * Per-institution gender breakdown for cuentas or créditos. Each institution
+ * carries (mujeres, hombres, brecha). Brecha = mujeres - hombres in CNBV's
+ * convention (negative = male-skewed, positive = female-skewed). Suppressed
+ * to NULL when the underlying n<100 statistical-validity floor fires.
+ */
+export interface GeneroBreakdown {
+  bm: { m: number | null; h: number | null; brecha: number | null };
+  bd: { m: number | null; h: number | null; brecha: number | null };
+  socap: { m: number | null; h: number | null; brecha: number | null };
+  sofipo: { m: number | null; h: number | null; brecha: number | null };
+  total: { m: number | null; h: number | null; brecha: number | null };
 }
 
 /**
@@ -1407,6 +1564,16 @@ export interface EntidadDetailResult {
     padrones: number | null;
     programas: number | null;
   };
+  /**
+   * Financial inclusion (CNBV Panorama Anual 2025, v0.2.12). Sourced from
+   * `cnbv_panorama_estatal` view (72 cols × 32 estados; CVEENT=99 catch-all
+   * filtered). LEFT JOIN — no entidad in CNBV catalog → all-null.
+   *
+   * Estado-grain populates: sar, seguros, condusef, acomodo (rankings).
+   * Muni-only fields surface as null: rezago_social, puntos_acceso_sca,
+   * remesas.per_capita, genero. See InclusionFinancieraResult JSDoc.
+   */
+  inclusion_financiera: InclusionFinancieraResult;
 }
 
 // ---------------------------------------------------------------------------

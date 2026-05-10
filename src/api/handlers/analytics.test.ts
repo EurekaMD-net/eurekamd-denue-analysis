@@ -4677,8 +4677,8 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
     expect(res.status).toBe(404);
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
-    expect(sql).toContain("FROM censo_municipios");
-    expect(sql).toContain("WHERE cve_mun = '20067'");
+    expect(sql).toContain("FROM censo_municipios cm");
+    expect(sql).toContain("WHERE cm.cve_mun = '20067'");
     // Pin that the muni-only education detail cols are SELECTed (drift
     // guard: a future SELECT-list cleanup must not silently drop them).
     expect(sql).toContain("p15pri_in");
@@ -5356,5 +5356,724 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
     ]) {
       expect(sql).toContain(col);
     }
+  });
+});
+
+// ===========================================================================
+// v0.2.12: CNBV Panorama 2025 — inclusion_financiera nested category
+// ===========================================================================
+
+describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
+  /**
+   * Build a muni-detail mock row with all censo fields null + the cp_-prefixed
+   * CNBV cols filled to a CDMX Cuauhtémoc-shaped fingerprint. Mirrors the
+   * `bienestarMockRow` helper from the entidad block above.
+   */
+  function cnbvMuniMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const censoNullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ];
+    const base: Record<string, unknown> = {
+      cve_mun: "09015",
+      entidad: "09",
+      mun: "015",
+      nom_mun: "Cuauhtémoc",
+      nom_ent: "Ciudad de México",
+    };
+    for (const f of censoNullFields) base[f] = null;
+    // CNBV cp_-prefixed fields (CDMX Cuauhtémoc-shaped sample). Strings to
+    // mirror json_agg behavior for numeric cols.
+    base.cp_poblacion_total = "545884";
+    base.cp_poblacion_adulta = "420000";
+    base.cp_rezago_social = "Muy bajo";
+    // Sucursales
+    base.cp_sucursales_bm = "320";
+    base.cp_sucursales_bd = "12";
+    base.cp_sucursales_socap = "8";
+    base.cp_sucursales_sofipo = "5";
+    base.cp_sucursales_total = "345";
+    base.cp_corresponsales_max = "210";
+    // Cajeros
+    base.cp_cajeros_bm = "1450";
+    base.cp_cajeros_bd = "30";
+    base.cp_cajeros_socap = "12";
+    base.cp_cajeros_sofipo = "3";
+    base.cp_cajeros_total = "1495";
+    // TPV
+    base.cp_tpv_bm = "85000";
+    base.cp_tpv_bd = "0";
+    base.cp_tpv_socap = "200";
+    base.cp_tpv_sofipo = "100";
+    base.cp_tpv_total_eacp = "85300";
+    base.cp_tpv_agregadores = "120000";
+    base.cp_tpv_adq_no_banc = "5000";
+    base.cp_tpv_total_ag_adq = "125000";
+    base.cp_tpv_total = "210300";
+    base.cp_puntos_acceso_sca = "2050";
+    // Cuentas
+    base.cp_cuentas_bm = "1900000";
+    base.cp_cuentas_bd = "120000";
+    base.cp_cuentas_socap = "30000";
+    base.cp_cuentas_sofipo = "10000";
+    base.cp_cuentas_total = "2060000";
+    // Créditos
+    base.cp_creditos_bm = "850000";
+    base.cp_creditos_bd = "8000";
+    base.cp_creditos_socap = "9000";
+    base.cp_creditos_sofipo = "7000";
+    base.cp_creditos_total = "874000";
+    // Tx TPV
+    base.cp_tx_tpv_bm = "180000000";
+    base.cp_tx_tpv_bd = "0";
+    base.cp_tx_tpv_socap = "100000";
+    base.cp_tx_tpv_sofipo = "50000";
+    base.cp_tx_tpv_total = "180150000";
+    // Remesas
+    base.cp_remesas_mdd = "150.5";
+    base.cp_remesas_per_capita = "275.6";
+    // Brechas Cuentas (M, H, B for 5 institutions)
+    base.cp_g_cuentas_bm_m = "950000";
+    base.cp_g_cuentas_bm_h = "950000";
+    base.cp_g_cuentas_bm_b = "0";
+    base.cp_g_cuentas_bd_m = "60000";
+    base.cp_g_cuentas_bd_h = "60000";
+    base.cp_g_cuentas_bd_b = "0";
+    base.cp_g_cuentas_socap_m = "15000";
+    base.cp_g_cuentas_socap_h = "15000";
+    base.cp_g_cuentas_socap_b = "0";
+    base.cp_g_cuentas_sofipo_m = "5500";
+    base.cp_g_cuentas_sofipo_h = "4500";
+    base.cp_g_cuentas_sofipo_b = "0.10";
+    base.cp_g_cuentas_total_m = "1030500";
+    base.cp_g_cuentas_total_h = "1029500";
+    base.cp_g_cuentas_total_b = "0.001";
+    // Brechas Créditos
+    base.cp_g_creditos_bm_m = "420000";
+    base.cp_g_creditos_bm_h = "430000";
+    base.cp_g_creditos_bm_b = "-0.012";
+    base.cp_g_creditos_bd_m = "4000";
+    base.cp_g_creditos_bd_h = "4000";
+    base.cp_g_creditos_bd_b = "0";
+    base.cp_g_creditos_socap_m = "4500";
+    base.cp_g_creditos_socap_h = "4500";
+    base.cp_g_creditos_socap_b = "0";
+    base.cp_g_creditos_sofipo_m = "3500";
+    base.cp_g_creditos_sofipo_h = "3500";
+    base.cp_g_creditos_sofipo_b = "0";
+    base.cp_g_creditos_total_m = "432000";
+    base.cp_g_creditos_total_h = "442000";
+    base.cp_g_creditos_total_b = "-0.011";
+    base.cp_periodo = "panorama-2025";
+    return { ...base, ...overrides };
+  }
+
+  it("returns inclusion_financiera with full muni shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    const i = body.inclusion_financiera;
+    expect(i.poblacion_total).toBe(545884);
+    expect(i.poblacion_adulta).toBe(420000);
+    expect(i.rezago_social).toBe("Muy bajo");
+    expect(i.infraestructura.sucursales.total).toBe(345);
+    expect(i.infraestructura.corresponsales_max).toBe(210);
+    expect(i.infraestructura.cajeros.total).toBe(1495);
+    expect(i.infraestructura.tpv.total).toBe(210300);
+    expect(i.infraestructura.tpv.total_eacp).toBe(85300);
+    expect(i.infraestructura.tpv.agregadores).toBe(120000);
+    expect(i.infraestructura.puntos_acceso_sca).toBe(2050);
+    expect(i.productos.cuentas.total).toBe(2060000);
+    expect(i.productos.creditos.total).toBe(874000);
+    expect(i.productos.tx_tpv.total).toBe(180150000);
+    expect(i.remesas.mdd).toBe(150.5);
+    expect(i.remesas.per_capita).toBe(275.6);
+    // muni grain → estado-only fields are null
+    expect(i.productos.sar).toBeNull();
+    expect(i.productos.seguros).toBeNull();
+    expect(i.condusef).toBeNull();
+    expect(i.acomodo).toBeNull();
+    expect(i.periodo).toBe("panorama-2025");
+  });
+
+  it("populates genero brechas with M/H/B for all 5 institution slices x 2 product categories", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvMuniMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.inclusion_financiera.genero).not.toBeNull();
+    const g = body.inclusion_financiera.genero!;
+    // Cuentas
+    expect(g.cuentas.bm.m).toBe(950000);
+    expect(g.cuentas.bm.h).toBe(950000);
+    expect(g.cuentas.bm.brecha).toBe(0);
+    expect(g.cuentas.sofipo.brecha).toBeCloseTo(0.1);
+    expect(g.cuentas.total.m).toBe(1030500);
+    expect(g.cuentas.total.h).toBe(1029500);
+    // Créditos — verify negative brecha sign preserved (male-skewed)
+    expect(g.creditos.bm.brecha).toBeCloseTo(-0.012);
+    expect(g.creditos.total.brecha).toBeCloseTo(-0.011);
+  });
+
+  it("preserves NULLs across all inclusion_financiera leaves when LEFT JOIN misses", async () => {
+    // Synthesize the all-null cp_ surface — every cnbv col absent. Mirrors
+    // a muni present in censo but not in CNBV's catalog (e.g. recently
+    // decretado post-Panorama-2025 cutoff).
+    const overrides: Record<string, unknown> = {};
+    const cpFields = [
+      "cp_poblacion_total",
+      "cp_poblacion_adulta",
+      "cp_rezago_social",
+      "cp_sucursales_bm",
+      "cp_sucursales_bd",
+      "cp_sucursales_socap",
+      "cp_sucursales_sofipo",
+      "cp_sucursales_total",
+      "cp_corresponsales_max",
+      "cp_cajeros_bm",
+      "cp_cajeros_bd",
+      "cp_cajeros_socap",
+      "cp_cajeros_sofipo",
+      "cp_cajeros_total",
+      "cp_tpv_bm",
+      "cp_tpv_bd",
+      "cp_tpv_socap",
+      "cp_tpv_sofipo",
+      "cp_tpv_total_eacp",
+      "cp_tpv_agregadores",
+      "cp_tpv_adq_no_banc",
+      "cp_tpv_total_ag_adq",
+      "cp_tpv_total",
+      "cp_puntos_acceso_sca",
+      "cp_cuentas_bm",
+      "cp_cuentas_bd",
+      "cp_cuentas_socap",
+      "cp_cuentas_sofipo",
+      "cp_cuentas_total",
+      "cp_creditos_bm",
+      "cp_creditos_bd",
+      "cp_creditos_socap",
+      "cp_creditos_sofipo",
+      "cp_creditos_total",
+      "cp_tx_tpv_bm",
+      "cp_tx_tpv_bd",
+      "cp_tx_tpv_socap",
+      "cp_tx_tpv_sofipo",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_remesas_per_capita",
+      "cp_g_cuentas_bm_m",
+      "cp_g_cuentas_bm_h",
+      "cp_g_cuentas_bm_b",
+      "cp_g_cuentas_total_m",
+      "cp_g_cuentas_total_h",
+      "cp_g_cuentas_total_b",
+      "cp_g_creditos_total_m",
+      "cp_g_creditos_total_h",
+      "cp_g_creditos_total_b",
+      "cp_periodo",
+    ];
+    for (const f of cpFields) overrides[f] = null;
+    mockExec.mockReturnValue(JSON.stringify([cnbvMuniMockRow(overrides)]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    const i = body.inclusion_financiera;
+    expect(i.poblacion_total).toBeNull();
+    expect(i.rezago_social).toBeNull();
+    expect(i.infraestructura.sucursales.total).toBeNull();
+    expect(i.infraestructura.cajeros.total).toBeNull();
+    expect(i.infraestructura.tpv.total).toBeNull();
+    expect(i.productos.cuentas.total).toBeNull();
+    expect(i.productos.creditos.total).toBeNull();
+    expect(i.remesas.mdd).toBeNull();
+    expect(i.genero!.cuentas.bm.m).toBeNull();
+    expect(i.genero!.creditos.total.brecha).toBeNull();
+    // periodo falls back to default sentinel even on JOIN miss
+    expect(i.periodo).toBe("panorama-2025");
+  });
+
+  it("emits LEFT JOIN cnbv_panorama_municipal in SQL (regression guard)", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=20067", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun",
+    );
+    // Pin a representative cp_ alias from each family so a future SELECT-list
+    // refactor doesn't silently drop a section of the surface.
+    for (const col of [
+      "cp_sucursales_total",
+      "cp_corresponsales_max",
+      "cp_cajeros_total",
+      "cp_tpv_total",
+      "cp_puntos_acceso_sca",
+      "cp_cuentas_total",
+      "cp_creditos_total",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_remesas_per_capita",
+      "cp_g_cuentas_total_b",
+      "cp_g_creditos_total_b",
+      "cp_periodo",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
+describe("/analytics/entidad-detail (v0.2.12 inclusion_financiera)", () => {
+  /**
+   * Build an entidad-detail mock row with all censo + bienestar fields null
+   * and cp_-prefixed CNBV estado cols filled to a CDMX-shape fingerprint.
+   */
+  function cnbvEstadoMockRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const nullFields = [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+      "bl_periodo_cve",
+      "bl_anio",
+      "bl_trimestre",
+      "bl_fecha",
+      "bl_beneficiarios",
+      "bl_intervenciones",
+      "bl_dependencias",
+      "bl_padrones",
+      "bl_programas",
+    ];
+    const base: Record<string, unknown> = {
+      cve_ent: "09",
+      entidad: "09",
+      nom_ent: "Ciudad de México",
+    };
+    for (const f of nullFields) base[f] = null;
+    // Estado-grain CNBV fields (CDMX-shape).
+    base.cp_poblacion_total = "9213395";
+    base.cp_poblacion_adulta = "7400000";
+    base.cp_sucursales_bm = "2480";
+    base.cp_sucursales_bd = "85";
+    base.cp_sucursales_socap = "60";
+    base.cp_sucursales_sofipo = "30";
+    base.cp_sucursales_total = "2655";
+    base.cp_corresponsales_max = "9500";
+    base.cp_cajeros_bm = "12000";
+    base.cp_cajeros_bd = "120";
+    base.cp_cajeros_socap = "70";
+    base.cp_cajeros_sofipo = "10";
+    base.cp_cajeros_total = "12200";
+    base.cp_tpv_bm = "350000";
+    base.cp_tpv_bd = "0";
+    base.cp_tpv_socap = "1500";
+    base.cp_tpv_sofipo = "500";
+    base.cp_tpv_total_eacp = "352000";
+    base.cp_tpv_agregadores = "850000";
+    base.cp_tpv_adq_no_banc = "20000";
+    base.cp_tpv_total_ag_adq = "870000";
+    base.cp_tpv_total = "1222000";
+    base.cp_cuentas_bm = "20000000";
+    base.cp_cuentas_bd = "1000000";
+    base.cp_cuentas_socap = "200000";
+    base.cp_cuentas_sofipo = "100000";
+    base.cp_cuentas_total = "21300000";
+    base.cp_creditos_bm = "9500000";
+    base.cp_creditos_bd = "60000";
+    base.cp_creditos_socap = "60000";
+    base.cp_creditos_sofipo = "40000";
+    base.cp_creditos_total = "9660000";
+    base.cp_sar_asignado = "2500000";
+    base.cp_sar_registrado = "5400000";
+    base.cp_sar_total = "7900000";
+    base.cp_seg_vida = "44000";
+    base.cp_seg_pensiones = "23000";
+    base.cp_seg_accidentes = "29000";
+    base.cp_seg_danos_sin_autos = "60000";
+    base.cp_seg_automoviles = "31000";
+    base.cp_seg_total = "187000";
+    base.cp_tx_tpv_bm = "1500000000";
+    base.cp_tx_tpv_bd = "0";
+    base.cp_tx_tpv_socap = "1000000";
+    base.cp_tx_tpv_sofipo = "500000";
+    base.cp_tx_tpv_total = "1501500000";
+    base.cp_remesas_mdd = "1850.0";
+    base.cp_condusef_ubicacion = "150000";
+    base.cp_condusef_reclamaciones = "60000";
+    base.cp_ac_inf_sucursales = "1";
+    base.cp_ac_inf_corresponsales = "1";
+    base.cp_ac_inf_cajeros = "1";
+    base.cp_ac_inf_tpv = "1";
+    base.cp_ac_inf_total_ag_adq = "1";
+    base.cp_ac_pf_captacion = "1";
+    base.cp_ac_pf_credito = "1";
+    base.cp_ac_pf_afore = "1";
+    base.cp_ac_pf_vida = "1";
+    base.cp_ac_pf_pensiones = "1";
+    base.cp_ac_pf_accidentes = "1";
+    base.cp_ac_pf_danos_sin_autos = "1";
+    base.cp_ac_pf_automoviles = "1";
+    base.cp_ac_mp_tx_tpv = "1";
+    base.cp_ac_mp_remesas = "8";
+    base.cp_ac_mp_ubicacion = "1";
+    base.cp_ac_mp_reclamaciones = "1";
+    base.cp_periodo = "panorama-2025";
+    return { ...base, ...overrides };
+  }
+
+  it("returns inclusion_financiera with full estado shape populated", async () => {
+    mockExec.mockReturnValue(JSON.stringify([cnbvEstadoMockRow()]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    const i = body.inclusion_financiera;
+    expect(i.poblacion_total).toBe(9213395);
+    expect(i.poblacion_adulta).toBe(7400000);
+    // estado grain → muni-only fields are null
+    expect(i.rezago_social).toBeNull();
+    expect(i.infraestructura.puntos_acceso_sca).toBeNull();
+    expect(i.remesas.per_capita).toBeNull();
+    expect(i.genero).toBeNull();
+    // estado-only populated
+    expect(i.productos.sar).not.toBeNull();
+    expect(i.productos.sar!.total).toBe(7900000);
+    expect(i.productos.seguros).not.toBeNull();
+    expect(i.productos.seguros!.total).toBe(187000);
+    expect(i.productos.seguros!.vida).toBe(44000);
+    expect(i.condusef).not.toBeNull();
+    expect(i.condusef!.reclamaciones).toBe(60000);
+    expect(i.acomodo).not.toBeNull();
+    expect(i.acomodo!.infraestructura.sucursales).toBe(1);
+    expect(i.acomodo!.medios_pago.remesas).toBe(8);
+    expect(i.periodo).toBe("panorama-2025");
+  });
+
+  it("preserves NULLs across all inclusion_financiera leaves when LEFT JOIN misses", async () => {
+    const cpFields = [
+      "cp_poblacion_total",
+      "cp_poblacion_adulta",
+      "cp_sucursales_bm",
+      "cp_sucursales_total",
+      "cp_corresponsales_max",
+      "cp_cajeros_total",
+      "cp_tpv_total",
+      "cp_cuentas_total",
+      "cp_creditos_total",
+      "cp_sar_asignado",
+      "cp_sar_registrado",
+      "cp_sar_total",
+      "cp_seg_vida",
+      "cp_seg_total",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_condusef_ubicacion",
+      "cp_condusef_reclamaciones",
+      "cp_ac_inf_sucursales",
+      "cp_ac_pf_captacion",
+      "cp_ac_mp_tx_tpv",
+      "cp_periodo",
+    ];
+    const overrides: Record<string, unknown> = {};
+    for (const f of cpFields) overrides[f] = null;
+    mockExec.mockReturnValue(JSON.stringify([cnbvEstadoMockRow(overrides)]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EntidadDetailResult;
+    const i = body.inclusion_financiera;
+    expect(i.poblacion_total).toBeNull();
+    expect(i.infraestructura.sucursales.total).toBeNull();
+    // sar/seguros/condusef/acomodo SUBTREES still constructed for shape
+    // symmetry but their leaves are null
+    expect(i.productos.sar).not.toBeNull();
+    expect(i.productos.sar!.total).toBeNull();
+    expect(i.productos.seguros!.total).toBeNull();
+    expect(i.condusef!.reclamaciones).toBeNull();
+    expect(i.acomodo!.infraestructura.sucursales).toBeNull();
+    // periodo defaults even on JOIN miss
+    expect(i.periodo).toBe("panorama-2025");
+  });
+
+  it("emits LEFT JOIN cnbv_panorama_estatal in SQL (regression guard)", async () => {
+    mockExec.mockReturnValue(JSON.stringify(null));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/entidad-detail?cve_ent=15", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "LEFT JOIN cnbv_panorama_estatal cp ON cp.cve_ent = ce.cve_ent",
+    );
+    for (const col of [
+      "cp_sucursales_total",
+      "cp_cajeros_total",
+      "cp_tpv_total",
+      "cp_cuentas_total",
+      "cp_creditos_total",
+      "cp_sar_total",
+      "cp_seg_total",
+      "cp_tx_tpv_total",
+      "cp_remesas_mdd",
+      "cp_condusef_reclamaciones",
+      "cp_ac_inf_sucursales",
+      "cp_ac_pf_captacion",
+      "cp_ac_mp_remesas",
+      "cp_periodo",
+    ]) {
+      expect(sql).toContain(col);
+    }
+  });
+});
+
+describe("InclusionFinancieraResult shape symmetry (v0.2.12)", () => {
+  /**
+   * Both /analytics/municipio-detail and /analytics/entidad-detail expose
+   * `inclusion_financiera` with the SAME nested-key shape. This pins that
+   * symmetry: any future grain-specific addition must surface as null in the
+   * other grain rather than diverge the type.
+   */
+  it("muni response includes the full key set with grain-specific nulls", async () => {
+    // Build a minimal-but-complete muni mock row by reusing the helper from
+    // the muni describe block. Since helpers are scoped to their describe()
+    // we build a fresh minimal mock here to keep this independent.
+    const row: Record<string, unknown> = {
+      cve_mun: "09015",
+      entidad: "09",
+      mun: "015",
+      nom_mun: "Cuauhtémoc",
+      nom_ent: "Ciudad de México",
+    };
+    // null all non-cp fields
+    for (const f of [
+      "pobtot",
+      "pobfem",
+      "pobmas",
+      "p_60ymas",
+      "p_15ymas",
+      "p_18ymas",
+      "pea",
+      "pocupada",
+      "graproes",
+      "tvivhab",
+      "tvivpar",
+      "pcatolica",
+      "pro_crieva",
+      "potras_rel",
+      "psin_relig",
+      "p3ym_hli",
+      "p3hlinhe",
+      "p3hli_he",
+      "phog_ind",
+      "pob_afro",
+      "pnacent",
+      "pnacoe",
+      "pres2015",
+      "presoe15",
+      "p15ym_an",
+      "p15ym_se",
+      "p15pri_in",
+      "p15pri_co",
+      "p15sec_in",
+      "p15sec_co",
+      "p18ym_pb",
+      "p12ym_solt",
+      "p12ym_casa",
+      "p12ym_sepa",
+      "pcon_disc",
+      "pcon_limi",
+      "psind_lim",
+      "psinder",
+      "pder_ss",
+      "pder_imss",
+      "pder_iste",
+      "pder_segp",
+      "pder_imssb",
+      "pafil_ipriv",
+      "vph_inter",
+      "vph_autom",
+      "vph_refri",
+      "vph_lavad",
+      "vph_hmicro",
+      "vph_moto",
+      "vph_bici",
+      "vph_radio",
+      "vph_tv",
+      "vph_pc",
+      "vph_telef",
+      "vph_cel",
+      "vph_stvp",
+      "vph_spmvpi",
+      "vph_cvj",
+      "vph_snbien",
+    ]) {
+      row[f] = null;
+    }
+    mockExec.mockReturnValue(JSON.stringify([row]));
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    const i = body.inclusion_financiera;
+    // Top-level keys
+    expect(Object.keys(i).sort()).toEqual(
+      [
+        "acomodo",
+        "condusef",
+        "genero",
+        "infraestructura",
+        "periodo",
+        "poblacion_adulta",
+        "poblacion_total",
+        "productos",
+        "remesas",
+        "rezago_social",
+      ].sort(),
+    );
+    // muni grain → these should be present-keys-with-null
+    expect(i.condusef).toBeNull();
+    expect(i.acomodo).toBeNull();
+    expect(i.productos.sar).toBeNull();
+    expect(i.productos.seguros).toBeNull();
+    // muni grain → these should be present-keys-with-non-null subtree
+    expect(i.genero).not.toBeNull();
+    expect(i.genero!.cuentas).toBeDefined();
+    expect(i.genero!.creditos).toBeDefined();
   });
 });
