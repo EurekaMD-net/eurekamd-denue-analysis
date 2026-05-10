@@ -48,14 +48,11 @@ export function buildSageProvider(env: SageProviderEnv): SageProvider {
     env.SAGE_MODEL_NARRATIVE ?? defaultNarrativeModel(which);
 
   if (which === "anthropic") {
-    const apiKey = env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "SAGE_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty.",
-      );
-    }
+    // Auth via ~/.claude/.credentials.json (Claude Agent SDK OAuth
+    // session). No ANTHROPIC_API_KEY required — billing flows through
+    // the host's Max Plan + Extra Usage subscription. If the credentials
+    // file is missing the SDK throws at first query(), not here.
     return new AnthropicProvider({
-      apiKey,
       routerModel,
       narrativeModel,
     });

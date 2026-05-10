@@ -7,9 +7,10 @@ describe("buildSageProvider — factory", () => {
   });
 
   it("returns AnthropicProvider when SAGE_PROVIDER=anthropic", () => {
+    // Anthropic provider authenticates via ~/.claude/.credentials.json
+    // (Claude Agent SDK OAuth) — no API key needed in env.
     const p = buildSageProvider({
       SAGE_PROVIDER: "anthropic",
-      ANTHROPIC_API_KEY: "sk-test",
       SAGE_MODEL_ROUTER: "claude-sonnet-4-6",
       SAGE_MODEL_NARRATIVE: "claude-sonnet-4-6",
     });
@@ -18,18 +19,14 @@ describe("buildSageProvider — factory", () => {
   });
 
   it("defaults router/narrative models to Sonnet 4.6 for anthropic", () => {
-    const p = buildSageProvider({
-      SAGE_PROVIDER: "anthropic",
-      ANTHROPIC_API_KEY: "sk-test",
-    });
+    const p = buildSageProvider({ SAGE_PROVIDER: "anthropic" });
     expect(p.routerModel).toBe("claude-sonnet-4-6");
     expect(p.narrativeModel).toBe("claude-sonnet-4-6");
   });
 
-  it("throws if anthropic key is missing", () => {
-    expect(() => buildSageProvider({ SAGE_PROVIDER: "anthropic" })).toThrow(
-      /ANTHROPIC_API_KEY/,
-    );
+  it("Anthropic provider is the default when SAGE_PROVIDER is unset", () => {
+    const p = buildSageProvider({});
+    expect(p.name).toBe("anthropic");
   });
 
   it("returns OpenAICompatibleProvider for openai-compatible", () => {
