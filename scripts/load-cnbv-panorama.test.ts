@@ -19,6 +19,9 @@ vi.mock("node:fs", () => ({
 import {
   loadCnbvPanorama,
   POST_LOAD_SQL_FOR_TEST,
+  MUNI_RAW_DDL,
+  ESTADO_RAW_DDL,
+  tableLeadingCols,
 } from "./load-cnbv-panorama.js";
 
 beforeEach(() => {
@@ -72,6 +75,7 @@ function stubHappyPath(
     .mockReturnValueOnce("") // rm estado
     .mockReturnValueOnce("DROP VIEW\nCREATE VIEW\n") // muni view
     .mockReturnValueOnce("DROP VIEW\nCREATE VIEW\n") // estado view
+    .mockReturnValueOnce("CREATE INDEX\nCREATE INDEX\n") // index DDL (SV1)
     .mockReturnValueOnce(`${muniRows}\n`) // muni count
     .mockReturnValueOnce(`${estadoRows}\n`) // estado count
     .mockReturnValueOnce(`${muniDups}\n`) // muni dup guard
@@ -189,6 +193,7 @@ describe("loadCnbvPanorama (orchestration)", () => {
       .mockReturnValueOnce("") // rm estado
       .mockReturnValueOnce("") // muni view
       .mockReturnValueOnce("") // estado view
+      .mockReturnValueOnce("") // index DDL (SV1)
       .mockReturnValueOnce("not-a-number\n"); // muni count → garbage
     await expect(
       loadCnbvPanorama({
@@ -349,5 +354,85 @@ describe("POST_LOAD_SQL_FOR_TEST (view contract)", () => {
     )[1]!;
     expect(muniViewBlock).toContain("periodo");
     expect(estadoViewBlock).toContain("periodo");
+  });
+});
+
+/**
+ * R10 (round-2 audit follow-up) — drift guard for the cross-source column-list
+ * invariant. The same set of columns must be encoded in:
+ *   1. The Python converter HEADER list (lives in cnbv-panorama-xlsx-to-csv.py)
+ *   2. The CREATE TABLE DDL (MUNI_RAW_DDL / ESTADO_RAW_DDL)
+ *   3. The \copy column list (tableLeadingCols)
+ *   4. The view's NUMERIC_*_COLS NULLIF projections
+ *
+ * #2 ↔ #3 are TS-side and the most likely to drift between commits (an
+ * operator adding a col to the DDL must remember to add it to tableLeadingCols
+ * in the same patch). This test parses the DDL string, extracts the column
+ * names, and asserts equality with tableLeadingCols() minus the two DEFAULT
+ * cols (periodo, ingested_at) which are not loaded via \copy.
+ *
+ * If a future Panorama-2026 ingest adds a column to ONE side without the
+ * other, this test fires before commit. Cheap insurance.
+ */
+describe("R10 drift guard — DDL columns vs tableLeadingCols", () => {
+  /** Extract column names from a CREATE TABLE DDL block (TEXT or TIMESTAMPTZ). */
+  function extractDdlCols(ddl: string): string[] {
+    const lines = ddl.split("\n");
+    const cols: string[] = [];
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith("CREATE")) continue;
+      if (line.startsWith("DROP")) continue;
+      if (line.startsWith(")")) continue;
+      // Match `colname TEXT` or `colname TIMESTAMPTZ`, optionally with
+      // DEFAULT clause and trailing comma. Anchored to start-of-line for
+      // identifier safety (skips inline column-list usage).
+      const m = /^([a-z_][a-z0-9_]*)\s+(TEXT|TIMESTAMPTZ)\b/.exec(line);
+      if (m) cols.push(m[1]!);
+    }
+    return cols;
+  }
+
+  it("muni DDL columns match tableLeadingCols + (periodo, ingested_at)", () => {
+    const ddlCols = extractDdlCols(MUNI_RAW_DDL);
+    const leading = tableLeadingCols("cnbv_panorama_municipal_raw");
+    // tableLeadingCols excludes the two DEFAULT cols; the DDL has them at the end
+    expect(ddlCols).toEqual([...leading, "periodo", "ingested_at"]);
+    // 76 data cols + 2 DEFAULT = 78 total in DDL
+    expect(ddlCols.length).toBe(78);
+  });
+
+  it("estado DDL columns match tableLeadingCols + (periodo, ingested_at)", () => {
+    const ddlCols = extractDdlCols(ESTADO_RAW_DDL);
+    const leading = tableLeadingCols("cnbv_panorama_estatal_raw");
+    expect(ddlCols).toEqual([...leading, "periodo", "ingested_at"]);
+    // 72 data cols + 2 DEFAULT = 74 total in DDL
+    expect(ddlCols.length).toBe(74);
+  });
+
+  it("tableLeadingCols throws on unknown table", () => {
+    expect(() => tableLeadingCols("not_a_real_table")).toThrow(/unknown table/);
+  });
+
+  it("muni leading cols start with the 5 ID cols in canonical order", () => {
+    const leading = tableLeadingCols("cnbv_panorama_municipal_raw");
+    expect(leading.slice(0, 5)).toEqual([
+      "clave_municipio_num",
+      "cve_mun",
+      "nom_ent",
+      "nom_mun",
+      "nom_ent_mun",
+    ]);
+  });
+
+  it("estado leading cols start with the 4 ID cols in canonical order", () => {
+    const leading = tableLeadingCols("cnbv_panorama_estatal_raw");
+    expect(leading.slice(0, 4)).toEqual([
+      "cve_estado_num",
+      "nom_ent",
+      "poblacion_total",
+      "poblacion_adulta",
+    ]);
   });
 });

@@ -5492,7 +5492,11 @@ describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
     // Remesas
     base.cp_remesas_mdd = "150.5";
     base.cp_remesas_per_capita = "275.6";
-    // Brechas Cuentas (M, H, B for 5 institutions)
+    // Brechas Cuentas (M, H, B for 5 institutions). Brecha is a percentage-
+    // point delta computed as (h - m) / (h + m) * 100, range approx [-100, +100]:
+    // positive = men-favored (more men than women), negative = women-favored.
+    // Round-2 audit (2026-05-10) caught that earlier values used [-1, +1] fractions
+    // by mistake; the live data range is -88..+93 percentage points.
     base.cp_g_cuentas_bm_m = "950000";
     base.cp_g_cuentas_bm_h = "950000";
     base.cp_g_cuentas_bm_b = "0";
@@ -5504,14 +5508,14 @@ describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
     base.cp_g_cuentas_socap_b = "0";
     base.cp_g_cuentas_sofipo_m = "5500";
     base.cp_g_cuentas_sofipo_h = "4500";
-    base.cp_g_cuentas_sofipo_b = "0.10";
+    base.cp_g_cuentas_sofipo_b = "-10.0"; // (4500-5500)/(4500+5500)*100 = -10
     base.cp_g_cuentas_total_m = "1030500";
     base.cp_g_cuentas_total_h = "1029500";
-    base.cp_g_cuentas_total_b = "0.001";
+    base.cp_g_cuentas_total_b = "-0.0485"; // (1029500-1030500)/2060000*100
     // Brechas Créditos
     base.cp_g_creditos_bm_m = "420000";
     base.cp_g_creditos_bm_h = "430000";
-    base.cp_g_creditos_bm_b = "-0.012";
+    base.cp_g_creditos_bm_b = "1.1765"; // (430000-420000)/850000*100 — men-favored
     base.cp_g_creditos_bd_m = "4000";
     base.cp_g_creditos_bd_h = "4000";
     base.cp_g_creditos_bd_b = "0";
@@ -5523,7 +5527,7 @@ describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
     base.cp_g_creditos_sofipo_b = "0";
     base.cp_g_creditos_total_m = "432000";
     base.cp_g_creditos_total_h = "442000";
-    base.cp_g_creditos_total_b = "-0.011";
+    base.cp_g_creditos_total_b = "1.1442"; // (442000-432000)/874000*100
     base.cp_periodo = "panorama-2025";
     return { ...base, ...overrides };
   }
@@ -5572,13 +5576,13 @@ describe("/analytics/municipio-detail (v0.2.12 inclusion_financiera)", () => {
     // Cuentas
     expect(g.cuentas.bm.m).toBe(950000);
     expect(g.cuentas.bm.h).toBe(950000);
-    expect(g.cuentas.bm.brecha).toBe(0);
-    expect(g.cuentas.sofipo.brecha).toBeCloseTo(0.1);
+    expect(g.cuentas.bm.brecha).toBe(0); // parity
+    expect(g.cuentas.sofipo.brecha).toBeCloseTo(-10.0); // women-favored
     expect(g.cuentas.total.m).toBe(1030500);
     expect(g.cuentas.total.h).toBe(1029500);
-    // Créditos — verify negative brecha sign preserved (male-skewed)
-    expect(g.creditos.bm.brecha).toBeCloseTo(-0.012);
-    expect(g.creditos.total.brecha).toBeCloseTo(-0.011);
+    // Créditos — positive brecha sign means men-favored (more men than women)
+    expect(g.creditos.bm.brecha).toBeCloseTo(1.1765);
+    expect(g.creditos.total.brecha).toBeCloseTo(1.1442);
   });
 
   it("preserves NULLs across all inclusion_financiera leaves when LEFT JOIN misses", async () => {

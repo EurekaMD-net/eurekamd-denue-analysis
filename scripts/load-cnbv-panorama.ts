@@ -66,7 +66,7 @@ function assertSafePath(label: string, p: string): void {
 // DDL — raw tables (all TEXT, mirrors converter HEADER lists exactly).
 // ---------------------------------------------------------------------------
 
-const MUNI_RAW_DDL = `
+export const MUNI_RAW_DDL = `
 DROP TABLE IF EXISTS cnbv_panorama_municipal_raw CASCADE;
 CREATE TABLE cnbv_panorama_municipal_raw (
   clave_municipio_num   TEXT,
@@ -150,7 +150,7 @@ CREATE TABLE cnbv_panorama_municipal_raw (
 );
 `;
 
-const ESTADO_RAW_DDL = `
+export const ESTADO_RAW_DDL = `
 DROP TABLE IF EXISTS cnbv_panorama_estatal_raw CASCADE;
 CREATE TABLE cnbv_panorama_estatal_raw (
   cve_estado_num        TEXT,
@@ -427,6 +427,22 @@ WHERE cve_estado_num ~ '^[0-9]+$'
 `;
 }
 
+/**
+ * Btree indexes on the join keys for the LEFT JOINs in
+ * /analytics/municipio-detail and /analytics/entidad-detail. Round-2 audit
+ * (SV1) flagged that sibling raw tables (cofepris/coneval/ce2024) all
+ * carry an index on cve_mun-equivalent and CNBV's were missing. n=2,469
+ * is small enough that a seq-scan is fine today (~57ms full); adding the
+ * index protects against the pattern violation and makes EXPLAIN read
+ * cleaner (Index Scan instead of Seq Scan + Filter).
+ */
+const INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_cnbv_panorama_muni_cve_mun
+  ON cnbv_panorama_municipal_raw(cve_mun);
+CREATE INDEX IF NOT EXISTS idx_cnbv_panorama_estatal_cve_estado
+  ON cnbv_panorama_estatal_raw(cve_estado_num);
+`;
+
 // ---------------------------------------------------------------------------
 // Public entry — exported for tests.
 // ---------------------------------------------------------------------------
@@ -491,6 +507,9 @@ export async function loadCnbvPanorama(
     // 4. Create views
     psql(config.dbContainer, buildMuniViewSql());
     psql(config.dbContainer, buildEstadoViewSql());
+
+    // 4b. Btree indexes on join keys (SV1 round-2 audit)
+    psql(config.dbContainer, INDEX_DDL);
 
     // 5. Verify counts + dup guards
     const muniRows = countRows(
@@ -605,7 +624,7 @@ function copyCsv(container: string, csvPath: string, table: string): void {
  * lists exactly. Defined here rather than imported so the loader is the
  * single source of truth for the load contract.
  */
-function tableLeadingCols(table: string): string[] {
+export function tableLeadingCols(table: string): string[] {
   if (table === "cnbv_panorama_municipal_raw") {
     return [
       "clave_municipio_num",

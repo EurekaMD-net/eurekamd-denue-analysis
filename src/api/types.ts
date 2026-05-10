@@ -1424,9 +1424,26 @@ export interface InclusionFinancieraResult {
 
 /**
  * Per-institution gender breakdown for cuentas or créditos. Each institution
- * carries (mujeres, hombres, brecha). Brecha = mujeres - hombres in CNBV's
- * convention (negative = male-skewed, positive = female-skewed). Suppressed
- * to NULL when the underlying n<100 statistical-validity floor fires.
+ * carries (mujeres, hombres, brecha).
+ *
+ * **Brecha formula** (verified empirically against the live data, not stated
+ * in CNBV's note row): `brecha = (hombres - mujeres) / (hombres + mujeres) × 100`
+ * — a percentage-point delta in the symmetric-difference convention, range
+ * approximately [-100, +100]:
+ *   - **Positive brecha** = more men than women (men-favored).
+ *   - **Negative brecha** = more women than men (women-favored).
+ *   - Zero ≈ parity.
+ *
+ * Live observation 2026-05-10: cuentas_total brecha ranges -88.13 to +92.75
+ * across 2,469 munis (mean -19.18, mostly women-favored). Créditos_total
+ * brecha ranges -44.87 to +60.20 (mean -6.47).
+ *
+ * `m` and `h` are absolute counts in their own scale (cuentas: typically
+ * thousands to millions; créditos: typically tens to millions).
+ *
+ * Suppression: when (m + h) < 100, CNBV's statistical-validity floor fires
+ * and `brecha` ships as -999, which the loader maps to NULL. m and h still
+ * surface as their absolute counts in that case.
  */
 export interface GeneroBreakdown {
   bm: { m: number | null; h: number | null; brecha: number | null };
