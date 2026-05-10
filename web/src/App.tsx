@@ -23,12 +23,24 @@ const MapMode = lazy(() =>
   import("./modes/MapMode").then((m) => ({ default: m.MapMode })),
 );
 
+const SageMode = lazy(() =>
+  import("./modes/SageMode").then((m) => ({ default: m.SageMode })),
+);
+
 function MapModeFallback() {
   return (
     <div className="flex h-full items-center justify-center bg-slate-950">
       <div className="font-mono text-xs text-slate-500">
         cargando MapLibre + deck.gl…
       </div>
+    </div>
+  );
+}
+
+function SageModeFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-slate-950">
+      <div className="font-mono text-xs text-slate-500">cargando Sage…</div>
     </div>
   );
 }
@@ -45,6 +57,14 @@ const router = createBrowserRouter([
         element: (
           <Suspense fallback={<MapModeFallback />}>
             <MapMode />
+          </Suspense>
+        ),
+      },
+      {
+        path: "sage",
+        element: (
+          <Suspense fallback={<SageModeFallback />}>
+            <SageMode />
           </Suspense>
         ),
       },

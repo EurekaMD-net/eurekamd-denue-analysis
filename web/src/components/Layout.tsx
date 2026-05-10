@@ -1,8 +1,12 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useUiStore } from "../store";
+import { useUrlSync } from "../useUrlSync";
 
 export function Layout() {
   const clearApiKey = useUiStore((s) => s.clearApiKey);
+  // Single URL ⇄ Zustand binding for the whole app so deep-link
+  // hydration works on every route (R2 audit W1).
+  useUrlSync();
   return (
     <div className="flex h-full flex-col bg-slate-900 text-slate-100">
       <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950 px-4 py-2">
@@ -13,6 +17,7 @@ export function Layout() {
           <nav className="flex items-center gap-1 text-xs">
             <ModeLink to="/locust" label="Locust" />
             <ModeLink to="/map" label="Map" />
+            <ModeLink to="/sage" label="Sage" />
           </nav>
         </div>
         <button
