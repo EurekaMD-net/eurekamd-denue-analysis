@@ -14,8 +14,10 @@
 # answers with no upper bound on staleness — this script makes refreshing
 # a one-line habit.
 #
-# Idempotent. Per-MV refresh times: ~6s (delitos_yearly), ~14s (sector_grade),
-# ~1.4s (national_treemap). Total ~22s on the current dataset.
+# Idempotent. Total ~34s on current dataset (5 MVs benched 2026-05-10):
+# mv_sector_grade_matrix dominates; sict_traffic_by_municipio is sub-second
+# (only 1,153 muni rows aggregated from 6,827-station view). Re-bench after
+# any major loader pass.
 
 set -euo pipefail
 

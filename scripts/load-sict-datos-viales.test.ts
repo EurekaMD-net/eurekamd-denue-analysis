@@ -159,9 +159,29 @@ describe("loadSictDatosViales (orchestration)", () => {
     const statIdx = VIEWS_DDL_TRANSACTION.indexOf(STATIONS_VIEW_DDL);
     const mvIdx = VIEWS_DDL_TRANSACTION.indexOf(TRAFFIC_BY_MUNI_DDL);
     expect(statIdx).toBeLessThan(mvIdx);
+    // Round-3 audit R1: pin the BEGIN ... DROP ... COMMIT shape so a future
+    // refactor that inserts foreign statements (e.g. `\connect`) between
+    // the markers and the DDL is caught. Allows `\echo` between them
+    // (W2: per-step audit markers for ON_ERROR_STOP debugging).
+    expect(VIEWS_DDL_TRANSACTION).toMatch(
+      /^BEGIN;\s+(\\echo[^\n]*\n\s*)?DROP MATERIALIZED VIEW IF EXISTS sict_traffic_by_municipio;[\s\S]*COMMIT;$/,
+    );
+    // Both \echo markers present for operator-facing failure localization.
+    expect(VIEWS_DDL_TRANSACTION).toContain(
+      "\\echo [load-sict] building stations view",
+    );
+    expect(VIEWS_DDL_TRANSACTION).toContain(
+      "\\echo [load-sict] building traffic-by-municipio MV",
+    );
   });
 
-  it("cleans up tempdir even on DDL failure (audit follow-up)", async () => {
+  it("cleans up tempdir even on docker-exec failure during DDL step", async () => {
+    // Round-3 audit C1: this test exercises the FINALLY-block tempdir
+    // cleanup path when the Node-side `docker exec` invocation throws.
+    // Postgres ROLLBACK semantics for the BEGIN/COMMIT block are NOT
+    // exercised here — those rely on `ON_ERROR_STOP=1` at the psql layer
+    // and are a Postgres responsibility, not the loader's. The mock
+    // throws BEFORE psql receives SQL.
     mockReadFile
       .mockReturnValueOnce(SAMPLE_CSV)
       .mockReturnValueOnce(Buffer.from(SAMPLE_CSV));
@@ -171,8 +191,8 @@ describe("loadSictDatosViales (orchestration)", () => {
       .mockReturnValueOnce("TRUNCATE\n") // TRUNCATE ok
       .mockReturnValueOnce("COPY 1\n") // \copy ok
       .mockImplementationOnce(() => {
-        // VIEWS_DDL_TRANSACTION fails — postgres ROLLBACK kicks in,
-        // tempdir still gets cleaned up.
+        // Simulate `docker exec` itself failing (container died, network
+        // partition, etc.) at the VIEWS_DDL_TRANSACTION step.
         throw new Error("syntax error");
       });
     await expect(

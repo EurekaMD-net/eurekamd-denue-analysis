@@ -284,10 +284,19 @@ CREATE INDEX idx_sict_tbm_tdpa_total
 // which would 500 every `municipio-detail` request via the LEFT JOIN.
 // `BEGIN ... COMMIT` makes the two creates atomic; rollback restores the
 // prior state (no view, no MV).
+//
+// Round-3 audit W2: `\echo` markers between the two DDL blocks so a partial
+// psql failure (under `ON_ERROR_STOP=1`) emits an unambiguous "we got past
+// X, failed at Y" trail in stderr. Otherwise the merged log line in the
+// loader hides which DDL block failed.
 export const VIEWS_DDL_TRANSACTION = `
 BEGIN;
 
+\\echo [load-sict] building stations view (DISTINCT ON dedupe + spatial join)...
+
 ${STATIONS_VIEW_DDL}
+
+\\echo [load-sict] building traffic-by-municipio MV + indexes...
 
 ${TRAFFIC_BY_MUNI_DDL}
 
