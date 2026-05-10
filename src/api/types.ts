@@ -5,6 +5,8 @@
  * Public surface for any caller building dashboards / BI / scripts.
  */
 
+import type { SageProvider } from "./sage/providers/provider.js";
+
 export interface ApiServerConfig {
   /** Supabase Kong URL (e.g. http://localhost:8100) */
   supabaseUrl: string;
@@ -29,6 +31,11 @@ export interface ApiServerConfig {
    * boot), handlers fall back to `MORTALITY_DEFAULT_CURRENT_ANO`. v0.2.3-A.
    */
   currentMortalityAno?: number;
+  /**
+   * Optional Sage provider. When unset, /sage/* routes return 503.
+   * Built once at server boot by buildSageProvider(process.env).
+   */
+  sageProvider?: SageProvider;
 }
 
 // Shared validation regexes — same bounds as src/analysis/cluster-by-sector.ts

@@ -45,6 +45,13 @@ import { clustersHandler } from "./handlers/clusters.js";
 import { entidadesHandler } from "./handlers/entidades.js";
 import { sectorsHandler } from "./handlers/sectors.js";
 import { tilesHandler } from "./handlers/tiles.js";
+import { layersValuesHandler } from "./handlers/layers-values.js";
+import {
+  makeSageQueryHandler,
+  makeGetThreadHandler,
+  makeDeleteThreadHandler,
+  sageHealthHandler,
+} from "./sage/sage-handler.js";
 import {
   agebDetailHandler,
   agebFarmaciaOpportunityHandler,
@@ -106,6 +113,14 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/sectors", auth);
   app.use("/tiles/*", auth);
   app.use("/analytics/*", auth);
+  app.use("/sage/query", auth);
+  app.use("/sage/thread/*", auth);
+
+  // /sage/query is metered: each request fires 2 LLM calls (router +
+  // narrative). 6/min/IP keeps a per-API-key compromise from draining
+  // the Anthropic budget at thousands of dollars/hour, while leaving
+  // generous headroom for an interactive analyst. Closure audit C1-sec.
+  app.use("/sage/query", makeRateLimitMiddleware({ max: 6, windowMs: 60_000 }));
 
   // /tiles also gets a per-IP rate limit on top of auth. Sized for
   // MapLibre's burst pattern: a single viewport at zoom 5 covering
@@ -188,6 +203,15 @@ export function createServer(config: ApiServerConfig): Hono {
     municipioDetailHandler(c, config),
   );
   app.get("/analytics/entidad-detail", (c) => entidadDetailHandler(c, config));
+  app.get("/analytics/layers/values", (c) => layersValuesHandler(c, config));
+
+  // Sage (LLM gateway). The handlers self-check for config.sageProvider
+  // and return 503 if Sage is not configured — server still boots
+  // without an Anthropic key for environments that don't need Sage.
+  app.get("/sage/health", sageHealthHandler(config));
+  app.post("/sage/query", makeSageQueryHandler(app, config));
+  app.get("/sage/thread/:id", makeGetThreadHandler(config));
+  app.delete("/sage/thread/:id", makeDeleteThreadHandler(config));
 
   return app;
 }
