@@ -1,13 +1,21 @@
 import { create } from "zustand";
-
-const API_KEY_STORAGE = "denue-analyzer.api-key";
+import type { Session } from "@supabase/supabase-js";
 
 export type Mode = "map" | "locust";
 
 export interface UiState {
-  apiKey: string | null;
-  setApiKey: (key: string) => void;
-  clearApiKey: () => void;
+  /**
+   * Supabase auth session (access_token + refresh_token + user). When
+   * non-null, the app is signed in. supabase-js owns the source of
+   * truth in localStorage; LoginGate mirrors it into this store so
+   * components can read synchronously without awaiting getSession().
+   */
+  session: Session | null;
+  setSession: (s: Session | null) => void;
+  /** Convenience accessor for the access_token header. */
+  accessToken: () => string | null;
+  /** Sign out via Supabase + clear session locally. */
+  signOut: () => Promise<void>;
 
   entidad: string | null;
   setEntidad: (clave: string | null) => void;
@@ -16,18 +24,16 @@ export interface UiState {
   setSector: (scian: string | null) => void;
 }
 
-export const useUiStore = create<UiState>((set) => ({
-  apiKey:
-    typeof window !== "undefined"
-      ? window.localStorage.getItem(API_KEY_STORAGE)
-      : null,
-  setApiKey: (key) => {
-    window.localStorage.setItem(API_KEY_STORAGE, key);
-    set({ apiKey: key });
-  },
-  clearApiKey: () => {
-    window.localStorage.removeItem(API_KEY_STORAGE);
-    set({ apiKey: null });
+export const useUiStore = create<UiState>((set, get) => ({
+  session: null,
+  setSession: (s) => set({ session: s }),
+  accessToken: () => get().session?.access_token ?? null,
+  signOut: async () => {
+    // Lazy import to avoid a circular dependency: supabase client
+    // depends on env, which Vite resolves before the store mounts.
+    const { supabase } = await import("./lib/supabase");
+    await supabase.auth.signOut();
+    set({ session: null });
   },
 
   entidad: null,

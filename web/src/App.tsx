@@ -5,7 +5,7 @@ import {
   RouterProvider,
 } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ApiKeyGate } from "./components/ApiKeyGate";
+import { LoginGate } from "./components/LoginGate";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
 import { LocustMode } from "./modes/LocustMode";
@@ -89,9 +89,9 @@ export function App() {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <ApiKeyGate>
+        <LoginGate>
           <RouterProvider router={router} />
-        </ApiKeyGate>
+        </LoginGate>
       </QueryClientProvider>
     </ErrorBoundary>
   );

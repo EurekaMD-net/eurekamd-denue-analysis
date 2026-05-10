@@ -29,7 +29,7 @@ const INITIAL_AXIS: AxisState = {
  * starter configurations.
  */
 export function LocustMode() {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const [xAxis, setXAxis] = useState<AxisState>(INITIAL_AXIS);
   const [yAxis, setYAxis] = useState<AxisState>(INITIAL_AXIS);
   const [zAxis, setZAxis] = useState<AxisState>(INITIAL_AXIS);

@@ -36,6 +36,13 @@ export interface ApiServerConfig {
    * Built once at server boot by buildSageProvider(process.env).
    */
   sageProvider?: SageProvider;
+  /**
+   * Supabase JWT signing secret (HS256). When set, Bearer Authorization
+   * headers are accepted alongside X-Api-Key. Loaded from
+   * SUPABASE_JWT_SECRET env. Server still boots without it; bearer auth
+   * just returns 503 if a browser tries.
+   */
+  supabaseJwtSecret?: string;
 }
 
 // Shared validation regexes — same bounds as src/analysis/cluster-by-sector.ts

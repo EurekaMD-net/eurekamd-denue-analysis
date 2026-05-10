@@ -43,6 +43,10 @@ const config: ApiServerConfig = {
   serviceRoleKey: requireEnv("SUPABASE_SERVICE_KEY"),
   apiKey: requireEnv("API_KEY"),
   dbContainer: process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db",
+  // Optional. When present, browser users authenticate via Supabase
+  // Auth and the API accepts Authorization: Bearer <jwt>. Absent =
+  // X-Api-Key only.
+  supabaseJwtSecret: process.env["SUPABASE_JWT_SECRET"],
 };
 
 const port = parseInt(process.env["API_PORT"] ?? "3030", 10);

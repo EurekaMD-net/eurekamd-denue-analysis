@@ -19,7 +19,7 @@ interface Props {
  * useful fields. Unknown fields are listed verbatim at the bottom.
  */
 export function EstablishmentCard({ clee, onClose }: Props) {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const enabled = clee !== null && apiKey !== null;
 
   const { data, isLoading, isError, error } = useQuery({

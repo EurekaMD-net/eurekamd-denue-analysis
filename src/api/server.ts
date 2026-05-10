@@ -103,8 +103,14 @@ export function createServer(config: ApiServerConfig): Hono {
     }),
   );
 
-  // Authenticated routes
-  const auth = makeAuthMiddleware(config.apiKey);
+  // Authenticated routes. Middleware accepts EITHER a Supabase JWT
+  // Bearer token (browser users) OR the shared X-Api-Key (machine
+  // clients). When SUPABASE_JWT_SECRET is unset, the Bearer path
+  // returns 503 — X-Api-Key keeps working.
+  const auth = makeAuthMiddleware({
+    apiKey: config.apiKey,
+    supabaseJwtSecret: config.supabaseJwtSecret,
+  });
   app.use("/search", auth);
   app.use("/establishment/*", auth);
   app.use("/summary/*", auth);

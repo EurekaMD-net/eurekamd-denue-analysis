@@ -26,7 +26,7 @@ interface ChatTurn {
  * "load thread" UI is out of scope for the demo).
  */
 export function SageMode() {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);

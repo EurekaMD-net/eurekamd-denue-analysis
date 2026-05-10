@@ -37,7 +37,7 @@ const CLUSTERS_RESULT = z.object({
 type ClusterCentroid = z.infer<typeof CLUSTER_CENTROID>;
 
 export function ClusterOverlay({ map }: Props) {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
   const overlayRef = useRef<MapboxOverlay | null>(null);

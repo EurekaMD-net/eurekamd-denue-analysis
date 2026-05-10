@@ -37,7 +37,7 @@ async function fetchJson<S extends z.ZodTypeAny>(
 
 /** Loads 32-entry dropdown source. Cached 5 minutes by TanStack default. */
 export function useEntidades(): UseQueryResult<EntidadesResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["entidades"],
     queryFn: () => fetchJson("/entidades", ENTIDADES_RESULT, apiKey),
@@ -46,7 +46,7 @@ export function useEntidades(): UseQueryResult<EntidadesResult> {
 }
 
 export function useSectors(): UseQueryResult<SectorsResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["sectors"],
     queryFn: () => fetchJson("/sectors", SECTORS_RESULT, apiKey),
@@ -55,7 +55,7 @@ export function useSectors(): UseQueryResult<SectorsResult> {
 }
 
 export function useNationalTreemap(): UseQueryResult<NationalTreemapResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["analytics", "national-treemap"],
     queryFn: () =>
@@ -65,7 +65,7 @@ export function useNationalTreemap(): UseQueryResult<NationalTreemapResult> {
 }
 
 export function useSectorGradeMatrix(): UseQueryResult<SectorGradeMatrixResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["analytics", "sector-grade-matrix"],
     queryFn: () =>
@@ -81,7 +81,7 @@ export function useSectorGradeMatrix(): UseQueryResult<SectorGradeMatrixResult> 
 export function useMunicipiosAnalytics(
   entidad: string | null,
 ): UseQueryResult<MunicipiosAnalyticsResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["analytics", "municipios", entidad],
     queryFn: () =>
@@ -98,7 +98,7 @@ export function useTopSectorsByEntidad(
   entidad: string | null,
   limit = 10,
 ): UseQueryResult<TopSectorsResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   return useQuery({
     queryKey: ["analytics", "top-sectors", entidad, limit],
     queryFn: () =>
@@ -118,7 +118,7 @@ export function useTopSectorsByEntidad(
  * Caller is responsible for debounce upstream (we just gate on length).
  */
 export function useSearch(q: string): UseQueryResult<SearchResult> {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const enabled = apiKey !== null && q.trim().length >= 3;
   return useQuery({
     queryKey: ["search", q],

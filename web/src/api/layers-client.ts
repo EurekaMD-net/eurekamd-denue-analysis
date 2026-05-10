@@ -21,7 +21,7 @@ export function useLayerValues(
   layers: string[],
   entidad: string | null,
 ) {
-  const apiKey = useUiStore((s) => s.apiKey);
+  const apiKey = useUiStore((s) => s.accessToken());
   const layersKey = [...layers].sort().join(",");
   return useQuery({
     queryKey: ["layers-values", grain, layersKey, entidad],
