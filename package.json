@@ -24,6 +24,7 @@
   "homepage": "https://github.com/EurekaMD-net/eurekamd-denue-analysis#readme",
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "jsdom": "^29.1.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"

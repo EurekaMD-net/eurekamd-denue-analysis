@@ -61,6 +61,51 @@ export async function fetchSageHealth(
   return (await res.json()) as SageHealth;
 }
 
+/**
+ * Persisted-turn shape returned by `GET /sage/thread/:id`. Mirrors the
+ * JSONB column shape produced by `appendTurn()` in `thread-store.ts`:
+ *
+ *   - digest holds at most 5 rows under `first_5_rows` (truncated server-
+ *     side; see `sage-handler.ts:345`). NOT `first_n_rows` — that's the
+ *     in-memory shape on the dispatcher path. Audit C1.
+ *   - chart and error are NOT persisted today, so restored threads always
+ *     render narrative + (5-row) table only.
+ */
+export interface SageStoredTurn {
+  turn_id: string;
+  created_at: string;
+  question: string;
+  route: SageRoute | null;
+  digest: {
+    columns: string[];
+    first_5_rows: unknown[];
+    row_count: number;
+    numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+  } | null;
+  narrative: string;
+}
+
+export interface SageThreadFetch {
+  thread_id: string;
+  turns: SageStoredTurn[];
+}
+
+export async function fetchSageThread(
+  threadId: string,
+  tokenOverride: string | null,
+): Promise<SageThreadFetch> {
+  // threadId must be a UUID — server-side regex is `^[0-9a-f-]{36}$`.
+  // We re-validate client-side to avoid burning a round-trip on a typo
+  // and to keep the validateApiPath check happy (dashes are allowed in
+  // the path-only regex via `_` substitute — actually `-` is in the
+  // path alphabet, so this passes without extra encoding).
+  if (!/^[0-9a-f-]{36}$/i.test(threadId)) {
+    throw new Error(`Invalid threadId: ${threadId}`);
+  }
+  const res = await apiFetch(`/sage/thread/${threadId}`, {}, tokenOverride);
+  return (await res.json()) as SageThreadFetch;
+}
+
 export async function* sageQueryStream(
   question: string,
   threadId: string | null,

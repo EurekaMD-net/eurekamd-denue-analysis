@@ -230,7 +230,10 @@ export function MapMode() {
 
         {activePickedLayers.length > 0 && (
           <div className="border-t border-slate-800 px-3 py-2">
-            <BivariateLegend layers={activePickedLayers} />
+            <BivariateLegend
+              layers={activePickedLayers}
+              values={layerValues.data?.values}
+            />
           </div>
         )}
 

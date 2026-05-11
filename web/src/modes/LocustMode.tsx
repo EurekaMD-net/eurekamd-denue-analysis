@@ -51,8 +51,20 @@ export function LocustMode() {
   };
 
   const setAxis = (slot: AxisSlot, next: AxisState) => {
-    if (slot === "x") setXAxis(next);
-    else if (slot === "y") setYAxis(next);
+    if (slot === "x") {
+      // RH-1 audit W2: clearing or changing the X-axis field invalidates
+      // all pinned values (the chips reference x-category labels). Same
+      // for drilling X (the category set changes). Auto-clear so the
+      // user doesn't end up with stale chips that match nothing.
+      const fieldChanged = next.field?.id !== xAxis.field?.id;
+      const drillChanged =
+        next.geoLevel !== xAxis.geoLevel ||
+        next.scianLevel !== xAxis.scianLevel;
+      if (fieldChanged || drillChanged) {
+        setFilterPins([]);
+      }
+      setXAxis(next);
+    } else if (slot === "y") setYAxis(next);
     else setZAxis(next);
   };
   const getAxis = (slot: AxisSlot): AxisState =>
@@ -115,19 +127,29 @@ export function LocustMode() {
               clic en una celda para fijar un filtro
             </span>
           ) : (
-            filterPins.map((p, i) => (
+            <>
+              {filterPins.map((p, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() =>
+                    setFilterPins(filterPins.filter((_, j) => j !== i))
+                  }
+                  className="rounded bg-cyan-900 px-2 py-0.5 font-mono text-[10px] text-cyan-100 hover:bg-cyan-800"
+                  title="clic para quitar"
+                >
+                  {p.label}: {p.value} ×
+                </button>
+              ))}
               <button
-                key={i}
                 type="button"
-                onClick={() =>
-                  setFilterPins(filterPins.filter((_, j) => j !== i))
-                }
-                className="rounded bg-cyan-900 px-2 py-0.5 font-mono text-[10px] text-cyan-100 hover:bg-cyan-800"
-                title="clic para quitar"
+                onClick={() => setFilterPins([])}
+                className="rounded border border-slate-700 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
+                title="quitar todos los filtros"
               >
-                {p.label}: {p.value} ×
+                limpiar
               </button>
-            ))
+            </>
           )}
         </div>
         <div className="flex-1" />
@@ -148,6 +170,16 @@ export function LocustMode() {
               ? `${yAxis.field.label} por ${xAxis.field.label}`
               : "Configura X y Y para empezar"}
           </span>
+          {filterPins.length > 0 && (
+            <span
+              className="rounded bg-cyan-900/60 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200"
+              title="Filtros activos sobre el eje X — clic en chips para quitar"
+            >
+              {filterPins.length}{" "}
+              {filterPins.length === 1 ? "filtro" : "filtros"} activo
+              {filterPins.length === 1 ? "" : "s"}
+            </span>
+          )}
           <span className="h-4 w-px bg-slate-800" />
           <FilterControls />
           <div className="flex-1" />
@@ -168,9 +200,13 @@ export function LocustMode() {
               yAxis={yAxis}
               zAxis={zAxis}
               dataset={dataset}
-              onCellPin={(label, value) =>
-                setFilterPins([...filterPins, { axis: "x", label, value }])
-              }
+              filterPins={filterPins}
+              onCellPin={(label, value) => {
+                // Dedupe by value: clicking the same cell twice should
+                // not stack duplicate chips.
+                if (filterPins.some((p) => p.value === value)) return;
+                setFilterPins([...filterPins, { axis: "x", label, value }]);
+              }}
             />
           </div>
         )}
@@ -360,12 +396,19 @@ function useLocustDataset(
   });
 }
 
+interface FilterPin {
+  axis: AxisSlot;
+  label: string;
+  value: string;
+}
+
 interface ChartProps {
   chartType: string;
   xAxis: AxisState;
   yAxis: AxisState;
   zAxis: AxisState;
   dataset: ReturnType<typeof useLocustDataset>;
+  filterPins: FilterPin[];
   onCellPin: (label: string, value: string) => void;
 }
 
@@ -375,6 +418,7 @@ function LocustChart({
   yAxis,
   zAxis,
   dataset,
+  filterPins,
   onCellPin,
 }: ChartProps) {
   if (dataset.isLoading) {
@@ -391,11 +435,28 @@ function LocustChart({
       </div>
     );
   }
-  const rows = extractRows(dataset.data, xAxis, yAxis, zAxis);
-  if (rows.length === 0) {
+  const allRows = extractRows(dataset.data, xAxis, yAxis, zAxis);
+  if (allRows.length === 0) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-slate-500">
         Sin datos para esta combinación. Prueba otra fuente o cambia el grano.
+      </div>
+    );
+  }
+  // RH-1: filter pins on the x-axis act as an inclusion set — show only
+  // the rows whose x value matches one of the pinned values. With no
+  // pins, all rows pass through unchanged.
+  const rows = applyFilterPins(allRows, filterPins);
+  if (rows.length === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 font-mono text-xs text-slate-500">
+        <span>
+          {filterPins.length} {filterPins.length === 1 ? "filtro" : "filtros"}{" "}
+          activo{filterPins.length === 1 ? "" : "s"} — ninguna fila coincide.
+        </span>
+        <span className="text-[10px] text-slate-600">
+          Quita un chip arriba o haz clic en otra celda.
+        </span>
       </div>
     );
   }
@@ -414,6 +475,22 @@ function LocustChart({
       }}
     />
   );
+}
+
+/**
+ * Apply x-axis filter pins as an inclusion set. With no pins, returns
+ * the input unchanged. With pins, returns only rows whose `x` value
+ * matches one of the pinned values (compared as strings to bridge the
+ * numeric/categorical mismatch from echarts click events).
+ * Exported for unit tests.
+ */
+export function applyFilterPins(
+  rows: DataPoint[],
+  pins: ReadonlyArray<FilterPin>,
+): DataPoint[] {
+  if (pins.length === 0) return rows;
+  const include = new Set(pins.map((p) => String(p.value)));
+  return rows.filter((r) => include.has(String(r.x)));
 }
 
 interface DataPoint {

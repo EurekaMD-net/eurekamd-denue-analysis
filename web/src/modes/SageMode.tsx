@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useUiStore } from "../store";
+import { ApiError } from "../api/client";
 import {
   fetchSageHealth,
+  fetchSageThread,
   sageQueryStream,
   type SageRoute,
+  type SageStoredTurn,
 } from "../api/sage-client";
 import { useQuery } from "@tanstack/react-query";
+import {
+  listSavedThreads,
+  removeThread,
+  upsertThread,
+  type SavedThreadIndexEntry,
+} from "../lib/sage-threads-store";
 
 interface ChatTurn {
   question: string;
@@ -27,12 +36,31 @@ interface ChatTurn {
  */
 export function SageMode() {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
+  const userId = useUiStore((s) => s.session?.user.id ?? null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  // RH-4: per-user saved-thread sidebar, fed by localStorage. Hydrated
+  // once on mount and after every turn so the user sees their threads
+  // appear in real time.
+  const [savedThreads, setSavedThreads] = useState<SavedThreadIndexEntry[]>(
+    () => listSavedThreads(userId),
+  );
+  const [loadingThreadId, setLoadingThreadId] = useState<string | null>(null);
+  // Transient error surfaced under the sidebar when a `loadThread` call
+  // fails. Pruning vs. retainment of the local index is decided in
+  // `loadThread` itself; this state only drives the human-facing copy.
+  const [loadErrorMsg, setLoadErrorMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Re-hydrate the sidebar when the signed-in user changes (sign-out /
+  // sign-in cycle in the same tab). Without this, User B would briefly
+  // see User A's thread index until they refreshed.
+  useEffect(() => {
+    setSavedThreads(listSavedThreads(userId));
+  }, [userId]);
 
   const health = useQuery({
     queryKey: ["sage", "health"],
@@ -173,85 +201,277 @@ export function SageMode() {
     [accessToken, threadId, turns.length, streaming],
   );
 
+  // Whenever the conversation state settles (streaming finished AND we
+  // have a thread_id + at least one turn), upsert into the per-user
+  // saved-threads index. Using the latest `turns` value here is fine —
+  // it reflects the final shape because the SSE stream has drained.
+  useEffect(() => {
+    if (streaming) return;
+    if (!threadId) return;
+    if (turns.length === 0) return;
+    const firstQ = turns[0]?.question ?? "";
+    const lastQ = turns[turns.length - 1]?.question ?? firstQ;
+    const next = upsertThread(userId, {
+      thread_id: threadId,
+      first_question: firstQ,
+      last_question: lastQ,
+      turn_count: turns.length,
+      updated_at: Date.now(),
+    });
+    setSavedThreads(next);
+  }, [streaming, threadId, turns, userId]);
+
   const newThread = useCallback(() => {
     abortRef.current?.abort();
     setThreadId(null);
     setTurns([]);
   }, []);
 
+  const loadThread = useCallback(
+    async (id: string) => {
+      // Don't trample a streaming turn — the user must end it first.
+      if (streaming) return;
+      if (id === threadId) return; // already loaded
+      abortRef.current?.abort();
+      setLoadingThreadId(id);
+      setLoadErrorMsg(null);
+      try {
+        const fetched = await fetchSageThread(id, accessToken);
+        // Hydrate ChatTurn[] from the stored digest. Each saved turn
+        // carries narrative + a slim digest (columns + first_5_rows,
+        // server-truncated). We do NOT re-execute the SQL or hit the
+        // endpoint — the goal is to let the user re-read prior
+        // conversation, not re-run it. `chart` and `error` are not
+        // persisted by the backend today, so they always restore as
+        // null (audit C1 / W5).
+        const hydrated: ChatTurn[] = fetched.turns.map((t: SageStoredTurn) => ({
+          question: t.question,
+          route: t.route,
+          columns: t.digest?.columns ?? [],
+          rows: t.digest?.first_5_rows ?? [],
+          rowCount: t.digest?.row_count ?? 0,
+          chart: null,
+          narrative: t.narrative,
+          error: null,
+          done: true,
+        }));
+        setTurns(hydrated);
+        setThreadId(fetched.thread_id);
+      } catch (err) {
+        // Audit W1: only treat 404 as "thread was deleted server-side"
+        // and prune the local index. Transient 5xx / network / timeout
+        // / 401-during-refresh must leave the entry alone — pruning on
+        // every error would silently erase the user's history at the
+        // first network blip.
+        const status = err instanceof ApiError ? err.status : null;
+        if (status === 404) {
+          const next = removeThread(userId, id);
+          setSavedThreads(next);
+          setLoadErrorMsg("Este hilo ya no existe en el servidor.");
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          // eslint-disable-next-line no-console
+          console.warn("[sage] failed to load thread", id, status, msg);
+          setLoadErrorMsg(
+            "No se pudo cargar el hilo. Reintenta en unos segundos.",
+          );
+        }
+      } finally {
+        setLoadingThreadId(null);
+      }
+    },
+    [accessToken, streaming, threadId, userId],
+  );
+
+  const forgetThread = useCallback(
+    (id: string) => {
+      // localStorage-only — does NOT call DELETE /sage/thread/:id. The
+      // user is "forgetting" this thread from their personal list, not
+      // erasing it from the audit log.
+      const next = removeThread(userId, id);
+      setSavedThreads(next);
+      if (id === threadId) {
+        setThreadId(null);
+        setTurns([]);
+      }
+    },
+    [threadId, userId],
+  );
+
   return (
-    <div className="flex h-full flex-col bg-slate-950">
-      {/* Header */}
-      <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-2">
-        <span className="font-mono text-xs uppercase tracking-[0.2em] text-cyan-500">
-          Sage
-        </span>
-        {health.data && (
-          <span className="font-mono text-[10px] text-slate-500">
-            {health.data.configured ? (
-              <>
-                {health.data.provider} · {health.data.router_model}
-              </>
-            ) : (
-              <span className="text-amber-400">provider no configurado</span>
-            )}
+    <div className="flex h-full bg-slate-950">
+      {/* RH-4: saved-thread sidebar (localStorage-backed, per-user). */}
+      <aside className="flex w-56 shrink-0 flex-col border-r border-slate-800 bg-slate-900">
+        <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-cyan-500">
+            Hilos
           </span>
-        )}
-        <div className="flex-1" />
-        {threadId && (
           <button
             type="button"
             onClick={newThread}
-            className="rounded border border-slate-700 px-2 py-0.5 font-mono text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
+            disabled={streaming}
+            className="rounded border border-slate-700 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 hover:border-cyan-700 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Inicia un hilo nuevo"
           >
-            Nuevo hilo
-          </button>
-        )}
-      </div>
-
-      {/* Conversation */}
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-3 [scrollbar-color:#334155_transparent]"
-      >
-        {turns.length === 0 && <EmptyState onPick={(q) => sendQuery(q)} />}
-        {turns.map((t, i) => (
-          <TurnCard key={i} turn={t} />
-        ))}
-      </div>
-
-      {/* Input */}
-      <form
-        className="border-t border-slate-800 bg-slate-900 px-4 py-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          sendQuery(input);
-        }}
-      >
-        <div className="flex gap-2">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                sendQuery(input);
-              }
-            }}
-            placeholder="Pregunta sobre municipios mexicanos, sectores, demografía, riesgo, salud, crédito…  (⌘+↵ para enviar)"
-            disabled={streaming || !health.data?.configured}
-            rows={2}
-            className="flex-1 resize-none rounded border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
-          />
-          <button
-            type="submit"
-            disabled={streaming || !input.trim() || !health.data?.configured}
-            className="rounded bg-cyan-700 px-4 font-mono text-xs text-slate-50 hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {streaming ? "…" : "Enviar"}
+            +
           </button>
         </div>
-      </form>
+        <div className="flex-1 overflow-y-auto py-1">
+          {savedThreads.length === 0 ? (
+            <p className="px-3 py-2 font-mono text-[10px] text-slate-600">
+              Aún sin hilos guardados. Cada conversación se guarda en este
+              navegador.
+            </p>
+          ) : (
+            savedThreads.map((t) => (
+              <ThreadRow
+                key={t.thread_id}
+                entry={t}
+                active={t.thread_id === threadId}
+                loading={t.thread_id === loadingThreadId}
+                disabled={streaming}
+                onPick={() => void loadThread(t.thread_id)}
+                onForget={() => forgetThread(t.thread_id)}
+              />
+            ))
+          )}
+        </div>
+        {loadErrorMsg && (
+          <div
+            className="border-t border-amber-900/50 bg-amber-950/40 px-3 py-1 font-mono text-[10px] text-amber-300"
+            role="status"
+          >
+            {loadErrorMsg}
+          </div>
+        )}
+        <div className="border-t border-slate-800 px-3 py-1 font-mono text-[9px] text-slate-600">
+          máx. 20 hilos guardados
+        </div>
+      </aside>
+
+      <div className="flex flex-1 flex-col">
+        {/* Header */}
+        <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-2">
+          <span className="font-mono text-xs uppercase tracking-[0.2em] text-cyan-500">
+            Sage
+          </span>
+          {health.data && (
+            <span className="font-mono text-[10px] text-slate-500">
+              {health.data.configured ? (
+                <>
+                  {health.data.provider} · {health.data.router_model}
+                </>
+              ) : (
+                <span className="text-amber-400">provider no configurado</span>
+              )}
+            </span>
+          )}
+          <div className="flex-1" />
+          {threadId && (
+            <button
+              type="button"
+              onClick={newThread}
+              className="rounded border border-slate-700 px-2 py-0.5 font-mono text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
+            >
+              Nuevo hilo
+            </button>
+          )}
+        </div>
+
+        {/* Conversation */}
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto px-4 py-3 [scrollbar-color:#334155_transparent]"
+        >
+          {turns.length === 0 && <EmptyState onPick={(q) => sendQuery(q)} />}
+          {turns.map((t, i) => (
+            <TurnCard key={i} turn={t} />
+          ))}
+        </div>
+
+        {/* Input */}
+        <form
+          className="border-t border-slate-800 bg-slate-900 px-4 py-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendQuery(input);
+          }}
+        >
+          <div className="flex gap-2">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  sendQuery(input);
+                }
+              }}
+              placeholder="Pregunta sobre municipios mexicanos, sectores, demografía, riesgo, salud, crédito…  (⌘+↵ para enviar)"
+              disabled={streaming || !health.data?.configured}
+              rows={2}
+              className="flex-1 resize-none rounded border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={streaming || !input.trim() || !health.data?.configured}
+              className="rounded bg-cyan-700 px-4 font-mono text-xs text-slate-50 hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {streaming ? "…" : "Enviar"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+interface ThreadRowProps {
+  entry: SavedThreadIndexEntry;
+  active: boolean;
+  loading: boolean;
+  disabled: boolean;
+  onPick: () => void;
+  onForget: () => void;
+}
+
+function ThreadRow({
+  entry,
+  active,
+  loading,
+  disabled,
+  onPick,
+  onForget,
+}: ThreadRowProps) {
+  return (
+    <div
+      className={`group flex items-center gap-1 px-2 py-1 ${
+        active ? "bg-cyan-950/50" : "hover:bg-slate-800/60"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onPick}
+        disabled={disabled || loading}
+        className={`flex-1 truncate text-left font-mono text-[10px] ${
+          active ? "text-cyan-200" : "text-slate-300"
+        } disabled:cursor-not-allowed disabled:opacity-50`}
+        title={`${entry.first_question}\n${entry.turn_count} turno${entry.turn_count === 1 ? "" : "s"} · ${new Date(entry.updated_at).toLocaleString("es-MX")}`}
+      >
+        {loading ? "cargando…" : entry.first_question.slice(0, 60)}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onForget();
+        }}
+        disabled={disabled || loading}
+        className="rounded px-1 font-mono text-[10px] text-slate-600 opacity-0 hover:text-rose-400 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
+        title="Quitar de este navegador (no borra el servidor)"
+      >
+        ×
+      </button>
     </div>
   );
 }
