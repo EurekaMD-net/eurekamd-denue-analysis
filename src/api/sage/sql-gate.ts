@@ -90,8 +90,9 @@ const FORBIDDEN_KEYWORDS = [
   "MERGE",
 ];
 
-// Large or sensitive relations that must never appear in user SQL even
-// if denue_sage privilege happened to leak. Defense in depth.
+// Sensitive relations that must never appear in user-authored SQL text.
+// The preCheckSql regex rejects any query that *names* one of these.
+// Defense in depth on top of the denue_sage role GRANTs.
 const FORBIDDEN_RELATIONS = [
   "establecimientos",
   "sesnsp_delitos_municipal_raw",
@@ -118,6 +119,21 @@ const FORBIDDEN_RELATIONS = [
   "ent_polygons",
   "mun_polygons",
   "loc_polygons",
+];
+
+// Relations the EXPLAIN planner must never Seq-Scan. Strictly the
+// largest tables — Seq Scan over 16M+ rows would burn the
+// statement_timeout (and the operator's wallet) even if the role GRANT
+// happened to be loose. Smaller base tables (e.g. cofepris_farmacias =
+// 2,381 rows) are intentionally absent; the planner inlines allowlisted
+// views to those base tables, which the EXPLAIN plan reflects, and
+// blocking the Seq Scan there would refuse legitimate queries through
+// the allowlisted view. Live-finding 2026-05-10.
+const FORBIDDEN_SEQ_SCAN_RELATIONS = [
+  "establecimientos",
+  "sesnsp_delitos_municipal_raw",
+  "censo_ageb_raw",
+  "censo_iter",
 ];
 
 // Strip string literals (single-quoted) and line/block comments before
@@ -239,7 +255,7 @@ export function checkExplainPlan(
     if (
       nodeType === "Seq Scan" &&
       rel &&
-      FORBIDDEN_RELATIONS.includes(rel.toLowerCase())
+      FORBIDDEN_SEQ_SCAN_RELATIONS.includes(rel.toLowerCase())
     ) {
       err = {
         code: "SQL_PLAN_SEQ_SCAN_BIG",
@@ -298,6 +314,10 @@ COMMIT;
   // analytics.ts 5s discipline).
   let explainRaw: string;
   try {
+    // -tA: tuples-only + unaligned. -q: quiet (suppresses the BEGIN /
+    // SET / COMMIT command tags that would otherwise prefix the JSON
+    // output and corrupt JSON.parse. Without -q the parse fails on
+    // multi-statement scripts (R-audit-live finding 2026-05-10).
     explainRaw = execFileSync(
       "docker",
       [
@@ -307,7 +327,7 @@ COMMIT;
         "psql",
         "-U",
         "postgres",
-        "-tA",
+        "-tAq",
         "-c",
         explainScript,
       ],
@@ -358,9 +378,24 @@ COMMIT;
 
   let csvRaw: string;
   try {
+    // -q suppresses the BEGIN / SET / COMMIT command-tag lines that
+    // would otherwise interleave with the COPY-emitted CSV (same
+    // root cause as the EXPLAIN parse fix). Without -q the CSV
+    // parser sees "BEGIN\nSET\nSET\n<rows>\nCOMMIT" and treats the
+    // first three as header + data rows.
     csvRaw = execFileSync(
       "docker",
-      ["exec", "-i", dbContainer, "psql", "-U", "postgres", "-c", execScript],
+      [
+        "exec",
+        "-i",
+        dbContainer,
+        "psql",
+        "-U",
+        "postgres",
+        "-q",
+        "-c",
+        execScript,
+      ],
       {
         encoding: "utf-8",
         timeout: timeoutMs + 5000,
