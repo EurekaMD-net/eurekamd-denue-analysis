@@ -66,6 +66,19 @@ describe("map/style", () => {
       expect(url).toMatch(/[?&]sector=46(&|$)/);
     });
 
+    // RH-5: bundle picks may set `sector` to a comma-separated list
+    // of 2-6 digit SCIAN codes (the backend tolerates this shape via
+    // parseSectorParam + buildSectorFilter). URLSearchParams percent-
+    // encodes the comma to %2C; the backend's SAFE_QUERY in
+    // api/client.ts allows `,` literal too but we don't depend on it.
+    it("accepts comma-separated multi-SCIAN sector (RH-5)", () => {
+      const url = tileSourceUrl({
+        entidad: null,
+        sector: "4641,46451,46411",
+      });
+      expect(url).toMatch(/sector=4641%2C46451%2C46411(&|$)/);
+    });
+
     it("omits filters that are null or empty string", () => {
       const url = tileSourceUrl({ entidad: null, sector: "" });
       expect(url).toMatch(

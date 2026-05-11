@@ -16,6 +16,16 @@ interface Props {
   onMapLoad?: (map: MapInstance) => void;
   /** Must be a referentially stable callback. See onMapLoad. */
   onPointClick?: (clee: string) => void;
+  /**
+   * RH-5: when non-null, overrides the Zustand `sector` for the tile
+   * URL only. Used by MapMode when a SCIAN bundle is selected — the
+   * bundle's full code list (`b.codes.join(",")` of 2–6 digit codes)
+   * can't go into Zustand `sector` because other consumers (/clusters,
+   * /analytics) still expect a single 2-digit code there. The backend
+   * `/tiles` endpoint accepts comma-separated multi-depth codes (Phase
+   * 5 of v0.3.1 hardening).
+   */
+  sectorOverride?: string | null;
 }
 
 const SOURCE_ID = "denue-mvt";
@@ -54,7 +64,12 @@ export function extractCleeFromFeature(feature: unknown): string | null {
  * because re-applying setStyle without preserving data layers is fragile
  * across MapLibre versions.
  */
-export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
+export function MapShell({
+  basemap,
+  onMapLoad,
+  onPointClick,
+  sectorOverride = null,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapInstance | null>(null);
   // Audit C N1: this is a JWT access_token now, not an API key.
@@ -74,10 +89,14 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
   // re-runs because deps haven't changed since its last (bailed) attempt.
   // Result before this fix: dots never appear after a hard refresh on
   // /map?sector=NN, even though Zustand has the right value.
+  // Effective tile-URL sector: bundle override (multi-SCIAN) takes
+  // precedence over the Zustand 2-digit `sector`. Both refs stay live
+  // for the async map.on("load") callback.
+  const effectiveSector = sectorOverride ?? sector;
   const entidadRef = useRef(entidad);
-  const sectorRef = useRef(sector);
+  const sectorRef = useRef(effectiveSector);
   entidadRef.current = entidad;
-  sectorRef.current = sector;
+  sectorRef.current = effectiveSector;
 
   // (Re)create the map whenever the basemap toggles. Cleanup on unmount.
   useEffect(() => {
@@ -195,7 +214,7 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
     const map = mapRef.current;
     if (!map) return;
     if (!map.getSource(SOURCE_ID)) return;
-    const url = tileSourceUrl({ entidad, sector });
+    const url = tileSourceUrl({ entidad, sector: effectiveSector });
     const src = map.getSource(SOURCE_ID) as unknown as {
       setTiles?: (tiles: string[]) => void;
     };
@@ -206,11 +225,11 @@ export function MapShell({ basemap, onMapLoad, onPointClick }: Props) {
       if (map.getLayer(CIRCLE_LAYER_ID)) map.removeLayer(CIRCLE_LAYER_ID);
       if (map.getLayer(HEATMAP_LAYER_ID)) map.removeLayer(HEATMAP_LAYER_ID);
       map.removeSource(SOURCE_ID);
-      addDataLayers(map, { entidad, sector });
+      addDataLayers(map, { entidad, sector: effectiveSector });
       return;
     }
-    applyFilterZoomRanges(map, { entidad, sector });
-  }, [entidad, sector]);
+    applyFilterZoomRanges(map, { entidad, sector: effectiveSector });
+  }, [entidad, effectiveSector]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

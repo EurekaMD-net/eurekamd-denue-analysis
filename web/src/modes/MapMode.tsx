@@ -52,10 +52,19 @@ export function MapMode() {
     [bundleId],
   );
 
-  // Bundle → tile filter. The current /tiles endpoint accepts a single
-  // 2-digit SCIAN; map each bundle to the broadest shared prefix so the
-  // canvas at least narrows to a coherent universe. Full multi-SCIAN
-  // bundle filtering on tiles is a v0.3.1 backend extension (R2 audit C1).
+  // Bundle → tile filter. RH-5: `/tiles` now accepts comma-separated
+  // SCIAN codes at any depth (2–6 digits), dispatched to the indexed
+  // column for each grain. We pass the bundle's full `b.codes` list
+  // through to MapShell as a sector override.
+  //
+  // Phase 5 audit W2: also write the broadest shared 2-digit prefix
+  // into Zustand `sector` IFF every code in the bundle shares the
+  // same 2-digit root. Every current bundle is prefix-coherent (e.g.
+  // `salud_minorista`'s 4641 / 46451 / 46411 all share `46`), so this
+  // restores the cluster overlay for bundle picks without polluting
+  // /analytics consumers. Bundles with mixed 2-digit roots leave
+  // Zustand untouched — the user can pick a sector manually if they
+  // want clusters.
   const handleBundlePick = (b: ScianBundle | null) => {
     if (!b) {
       setBundleId(null);
@@ -64,10 +73,17 @@ export function MapMode() {
     }
     setBundleId(b.id);
     const prefixes = new Set(b.codes.map((c) => c.slice(0, 2)));
-    const broadestSector =
-      prefixes.size === 1 ? Array.from(prefixes)[0]! : null;
-    if (broadestSector) setSector(broadestSector);
+    if (prefixes.size === 1) {
+      setSector(Array.from(prefixes)[0]!);
+    } else {
+      setSector(null);
+    }
   };
+
+  // String form for the tile URL — null when no bundle selected.
+  const bundleSectorOverride = selectedBundle
+    ? selectedBundle.codes.join(",")
+    : null;
 
   // Up to 3 layers, filtered by grain. When grain toggles, drop incompatible
   // picks (RH-8: count the dropped ones so we can surface a hint instead
@@ -148,8 +164,11 @@ export function MapMode() {
         </div>
         {selectedBundle && (
           <div className="border-b border-slate-800 px-3 pb-2 font-mono text-[9px] text-amber-400">
-            filtro vigente sector {sector ?? "—"} (v0.3.1 extenderá a SCIAN 4–6
-            dígitos)
+            filtro SCIAN: {selectedBundle.codes.join(", ")}
+            <span className="ml-1 text-slate-500">
+              ({selectedBundle.codes.length}{" "}
+              {selectedBundle.codes.length === 1 ? "código" : "códigos"})
+            </span>
           </div>
         )}
 
@@ -276,6 +295,7 @@ export function MapMode() {
             basemap={basemap}
             onMapLoad={setMap}
             onPointClick={setSelectedClee}
+            sectorOverride={bundleSectorOverride}
           />
           <ClusterOverlay map={map} />
           <EstablishmentCard

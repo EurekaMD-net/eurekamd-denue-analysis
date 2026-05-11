@@ -96,6 +96,17 @@ CREATE INDEX IF NOT EXISTS idx_estab_clase_actividad
 CREATE INDEX IF NOT EXISTS idx_estab_sector
   ON establecimientos(sector_actividad_id);
 
+-- v0.3.1 RH-5: índices por nivel intermedio SCIAN para que /tiles con
+-- bundles multi-SCIAN (códigos 3/4/5 dígitos) use index scan en vez de
+-- seq scan sobre 16M filas. Migración en vivo aplicada CONCURRENTLY el
+-- 2026-05-11 — este archivo es la fuente canónica para nuevos despliegues.
+CREATE INDEX IF NOT EXISTS idx_estab_subsector
+  ON establecimientos(subsector_actividad_id);
+CREATE INDEX IF NOT EXISTS idx_estab_rama
+  ON establecimientos(rama_actividad_id);
+CREATE INDEX IF NOT EXISTS idx_estab_subrama
+  ON establecimientos(subrama_actividad_id);
+
 -- Índice espacial GIST para consultas geográficas
 CREATE INDEX IF NOT EXISTS idx_estab_geom
   ON establecimientos USING GIST(geom);

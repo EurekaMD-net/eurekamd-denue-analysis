@@ -6,7 +6,13 @@
  *
  * Optional query filters:
  *  - entidad — 2-digit clave (01-32)
- *  - sector  — 2-digit SCIAN, filters on indexed `sector_actividad_id`
+ *  - sector  — SCIAN filter. Either a single 2-digit code (legacy) or
+ *    a comma-separated list of 2–6 digit codes at any depth (RH-5).
+ *    Each code dispatches to its grain-matching indexed column on
+ *    `establecimientos`: 2→sector_actividad_id, 3→subsector_actividad_id,
+ *    4→rama_actividad_id, 5→subrama_actividad_id, 6→clase_actividad_id.
+ *    Multi-code requests are combined as OR across the matched columns.
+ *    Hard cap: MAX_SCIAN_CODES per request.
  *
  * Hard cap: TILE_FEATURE_CAP features per tile. Above that we sample
  * deterministically by ORDER BY clee LIMIT cap (clee has unique index,
@@ -19,8 +25,9 @@
  * abuse defense.
  *
  * SQL composition is safe: every interpolated value is either a number
- * (parsed + bounded by Number.isInteger checks) or a 2-char regex-validated
- * string. There is no path for user input to reach SQL unparsed.
+ * (parsed + bounded by Number.isInteger checks) or a 2–6 char numeric-
+ * regex-validated string. There is no path for user input to reach SQL
+ * unparsed.
  */
 
 import { execFile } from "node:child_process";
@@ -32,13 +39,79 @@ import { HttpError } from "../middleware/error.js";
 import {
   ENTIDAD_RE,
   MAX_TILE_ZOOM,
-  SCIAN_RE,
   TILE_FEATURE_CAP,
   type ApiServerConfig,
 } from "../types.js";
 import { assertSafeContainer } from "./_safe-container.js";
 
 const TILE_CACHE_SECONDS = 3600;
+
+/** Single SCIAN code at any of the 5 indexed depths. */
+const SCIAN_MULTI_CODE_RE = /^[0-9]{2,6}$/;
+/**
+ * Defensive cap. Current bundle library tops out at 6 codes
+ * (`educacion_particular`); 16 leaves ample headroom for ad-hoc
+ * multi-bundle pickers and rejects accidental URL stuffing.
+ */
+const MAX_SCIAN_CODES = 16;
+
+/**
+ * Parse `sector` querystring into a list of validated SCIAN codes.
+ * Accepts:
+ *  - undefined / "" → no filter
+ *  - single code: "46" or "4641"
+ *  - comma-list:  "4641,46451,46411"
+ * Whitespace around each token is trimmed; empty tokens are an error.
+ */
+export function parseSectorParam(raw: string | undefined): string[] | null {
+  if (raw === undefined || raw === "") return null;
+  const codes = raw.split(",").map((s) => s.trim());
+  if (codes.length === 0 || codes.length > MAX_SCIAN_CODES) return null;
+  for (const code of codes) {
+    if (!SCIAN_MULTI_CODE_RE.test(code)) return null;
+  }
+  return codes;
+}
+
+/**
+ * SCIAN depth → indexed column on `establecimientos`. Mirrors the
+ * dispatch in `analytics.ts:2480-2502`.
+ */
+const SCIAN_COLUMN_BY_LENGTH: Record<number, string> = {
+  2: "sector_actividad_id",
+  3: "subsector_actividad_id",
+  4: "rama_actividad_id",
+  5: "subrama_actividad_id",
+  6: "clase_actividad_id",
+};
+
+/**
+ * Build the SQL filter clause for a validated SCIAN code list. Groups
+ * codes by length so each group hits its grain-matching index, then
+ * ORs the groups. Returns "" when no codes (caller treats as no-op).
+ *
+ * Exported for unit tests.
+ */
+export function buildSectorFilter(codes: string[]): string {
+  if (codes.length === 0) return "";
+  const byLen = new Map<number, string[]>();
+  for (const code of codes) {
+    const arr = byLen.get(code.length) ?? [];
+    arr.push(code);
+    byLen.set(code.length, arr);
+  }
+  const groups: string[] = [];
+  for (const [len, list] of byLen.entries()) {
+    const column = SCIAN_COLUMN_BY_LENGTH[len];
+    if (!column) continue; // unreachable; length is regex-bounded 2..6
+    const quoted = list.map((c) => `'${c}'`).join(", ");
+    groups.push(`${column} IN (${quoted})`);
+  }
+  // Single group needs no outer parens; multi-group OR gets wrapped.
+  return groups.length === 1
+    ? `AND ${groups[0]}`
+    : `AND (${groups.join(" OR ")})`;
+}
 
 export async function tilesHandler(
   c: Context,
@@ -56,13 +129,17 @@ export async function tilesHandler(
       "validation.entidad",
     );
   }
-  const sector = c.req.query("sector");
-  if (sector !== undefined && !SCIAN_RE.test(sector)) {
-    throw new HttpError(
-      `sector inválido "${sector}"`,
-      400,
-      "validation.sector",
-    );
+  const sectorRaw = c.req.query("sector");
+  let sectorCodes: string[] | null = null;
+  if (sectorRaw !== undefined && sectorRaw !== "") {
+    sectorCodes = parseSectorParam(sectorRaw);
+    if (sectorCodes === null) {
+      throw new HttpError(
+        `sector inválido "${sectorRaw}" — debe ser hasta ${MAX_SCIAN_CODES} códigos SCIAN (2–6 dígitos), separados por coma`,
+        400,
+        "validation.sector",
+      );
+    }
   }
 
   const mvt = await buildTile(config, {
@@ -70,7 +147,7 @@ export async function tilesHandler(
     x,
     y,
     ...(entidad !== undefined ? { entidad } : {}),
-    ...(sector !== undefined ? { sector } : {}),
+    ...(sectorCodes !== null ? { sectorCodes } : {}),
   });
 
   return new Response(mvt, {
@@ -78,9 +155,11 @@ export async function tilesHandler(
     headers: {
       "content-type": "application/x-protobuf",
       "cache-control": `public, max-age=${TILE_CACHE_SECONDS}`,
-      // Vary on the auth header so a downstream shared cache never serves
-      // a tile from one API key to another.
-      vary: "X-Api-Key",
+      // Vary on the auth headers so a downstream shared cache never serves
+      // a tile from one principal to another. Lists both auth paths the
+      // gateway accepts: Authorization (Bearer JWT, post-Phase-2 default)
+      // and X-Api-Key (legacy/server-to-server). Phase 5 audit W3.
+      vary: "Authorization, X-Api-Key",
       "x-tile-bytes": String(mvt.byteLength),
     },
   });
@@ -117,7 +196,7 @@ interface TileParams {
   x: number;
   y: number;
   entidad?: string;
-  sector?: string;
+  sectorCodes?: string[];
 }
 
 async function buildTile(
@@ -125,12 +204,14 @@ async function buildTile(
   p: TileParams,
 ): Promise<ArrayBuffer> {
   assertSafeContainer(config.dbContainer);
-  // Compose the WHERE additively so the SQL stays simple. All interpolations
-  // are pre-validated integers or regex-bounded 2-char strings.
+  // Compose the WHERE additively so the SQL stays simple. All
+  // interpolations are pre-validated integers or regex-bounded numeric
+  // strings (2–6 digits).
   const filters: string[] = [];
   if (p.entidad) filters.push(`AND entidad = '${p.entidad}'`);
-  // sector_actividad_id is the backfilled, indexed copy of CLEE chars 6-7.
-  if (p.sector) filters.push(`AND sector_actividad_id = '${p.sector}'`);
+  if (p.sectorCodes && p.sectorCodes.length > 0) {
+    filters.push(buildSectorFilter(p.sectorCodes));
+  }
   const filterClause = filters.join(" ");
 
   // Tile envelope inlined as a literal expression on BOTH sides of the
