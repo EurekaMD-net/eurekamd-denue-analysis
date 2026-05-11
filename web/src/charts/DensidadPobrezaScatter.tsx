@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useMunicipiosAnalytics } from "../api/queries";
 import type { IrsGrado, MunicipioAnalyticsRow } from "../api/types";
 import { ChartCard } from "./ChartCard";

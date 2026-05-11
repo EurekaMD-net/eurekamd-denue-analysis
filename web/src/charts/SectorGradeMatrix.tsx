@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useSectorGradeMatrix, useSectors } from "../api/queries";
 import type { IrsGrado } from "../api/types";
 import { ChartCard } from "./ChartCard";

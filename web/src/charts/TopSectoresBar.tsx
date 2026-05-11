@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useTopSectorsByEntidad } from "../api/queries";
 import { ChartCard } from "./ChartCard";
 import { COLOR, ECHARTS_BASE, ECHARTS_AXIS_DARK } from "./theme";

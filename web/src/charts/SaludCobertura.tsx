@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useMunicipiosAnalytics } from "../api/queries";
 import { ChartCard } from "./ChartCard";
 import { COLOR, ECHARTS_AXIS_DARK, ECHARTS_BASE } from "./theme";

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../api/client";
 import { useUiStore } from "../store";

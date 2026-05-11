@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts-core";
 import { useNationalTreemap } from "../api/queries";
 import { useUiStore } from "../store";
 import { ChartCard } from "./ChartCard";
