@@ -29,9 +29,9 @@ import { useLayerValues } from "../api/layers-client";
  * unfiltered thanks to LIMIT-without-ORDER-BY in the SQL.
  *
  * Data path: /tiles/:z/:x/:y.mvt (PostGIS ST_AsMVT, rate-limited 60/s/IP),
- * filters via querystring entidad/sector. X-Api-Key injected in
- * MapShell's transformRequest. /clusters and /establishment fetched via
- * the standard apiFetch wrapper through TanStack Query.
+ * filters via querystring entidad/sector. Authorization: Bearer <jwt>
+ * injected in MapShell's transformRequest. /clusters and /establishment
+ * fetched via the standard apiFetch wrapper through TanStack Query.
  */
 export function MapMode() {
   // useUrlSync now lives in Layout.tsx so all routes hydrate URL state.
@@ -41,6 +41,7 @@ export function MapMode() {
   const [bundleId, setBundleId] = useState<string | null>(null);
   const [grain, setGrain] = useState<MapLayerGrain>("muni");
   const [pickedLayers, setPickedLayers] = useState<string[]>([]);
+  const [grainDroppedCount, setGrainDroppedCount] = useState<number>(0);
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
   const setSector = useUiStore((s) => s.setSector);
@@ -68,7 +69,9 @@ export function MapMode() {
     if (broadestSector) setSector(broadestSector);
   };
 
-  // Up to 3 layers, filtered by grain. When grain toggles, drop incompatible picks.
+  // Up to 3 layers, filtered by grain. When grain toggles, drop incompatible
+  // picks (RH-8: count the dropped ones so we can surface a hint instead
+  // of dropping them silently).
   const grainLayers = useMemo(() => layersForGrain(grain), [grain]);
   const activePickedLayers: MapLayerSpec[] = useMemo(
     () =>
@@ -77,6 +80,26 @@ export function MapMode() {
         .filter((l): l is MapLayerSpec => l !== undefined && l.grain === grain),
     [pickedLayers, grain],
   );
+
+  const handleGrainChange = (next: MapLayerGrain) => {
+    if (next === grain) return;
+    const dropped = pickedLayers.filter((id) => {
+      const layer = findLayer(id);
+      return layer !== undefined && layer.grain !== next;
+    });
+    if (dropped.length > 0) {
+      setPickedLayers((cur) =>
+        cur.filter((id) => {
+          const layer = findLayer(id);
+          return layer !== undefined && layer.grain === next;
+        }),
+      );
+      setGrainDroppedCount(dropped.length);
+    } else {
+      setGrainDroppedCount(0);
+    }
+    setGrain(next);
+  };
 
   // Fire the layers/values request when 1–3 layers are picked. The data
   // joins client-side onto the visible polygon set in MapShell (or, in
@@ -93,6 +116,8 @@ export function MapMode() {
       if (cur.length >= 3) return cur; // cap at 3
       return [...cur, id];
     });
+    // Clear the grain-change hint once the user manipulates layers again.
+    setGrainDroppedCount(0);
   };
 
   return (
@@ -138,7 +163,7 @@ export function MapMode() {
                 <button
                   key={g}
                   type="button"
-                  onClick={() => setGrain(g)}
+                  onClick={() => handleGrainChange(g)}
                   className={`px-2 py-0.5 ${
                     grain === g
                       ? "bg-cyan-600 text-slate-50"
@@ -150,6 +175,16 @@ export function MapMode() {
               ))}
             </div>
           </div>
+          {grainDroppedCount > 0 && (
+            <div
+              className="mt-1 font-mono text-[9px] text-amber-400"
+              role="status"
+            >
+              {grainDroppedCount}{" "}
+              {grainDroppedCount === 1 ? "capa oculta" : "capas ocultas"} por
+              cambio de grano
+            </div>
+          )}
         </div>
 
         <div className="border-b border-slate-800 px-3 py-2">
@@ -160,16 +195,28 @@ export function MapMode() {
         <div className="flex flex-col gap-0.5 px-2 py-2">
           {grainLayers.map((l) => {
             const picked = pickedLayers.includes(l.id);
+            const atCap = pickedLayers.length >= 3;
+            // RH-7: when 3 are picked, disable the unpicked rest so the
+            // 4th click doesn't silently no-op. Picked rows stay clickable
+            // (toggle to deselect).
+            const disabled = atCap && !picked;
             return (
               <button
                 key={l.id}
                 type="button"
                 onClick={() => togglePicked(l.id)}
-                title={l.description}
+                disabled={disabled}
+                title={
+                  disabled
+                    ? "Máximo 3 capas — deselecciona una antes de añadir otra"
+                    : l.description
+                }
                 className={`flex items-center justify-between rounded px-2 py-1 text-left font-mono text-[10px] ${
                   picked
                     ? "bg-cyan-900 text-cyan-100"
-                    : "text-slate-400 hover:bg-slate-800"
+                    : disabled
+                      ? "cursor-not-allowed text-slate-600"
+                      : "text-slate-400 hover:bg-slate-800"
                 }`}
               >
                 <span className="truncate">{l.label}</span>

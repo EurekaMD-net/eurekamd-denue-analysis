@@ -19,8 +19,8 @@ const SCIAN_RE = /^[0-9]{2}$/;
  *    history.replaceState (so the back button doesn't accumulate
  *    intermediate states from every dropdown change).
  *
- * Designed to be called once per route (Locust + Map). Does NOT sync
- * apiKey — that stays in localStorage only and never reaches the URL.
+ * Mounted once in Layout so every route hydrates. Auth tokens are
+ * owned by supabase-js localStorage and never reach the URL.
  */
 export function useUrlSync(): void {
   const [params, setParams] = useSearchParams();

@@ -28,6 +28,13 @@ const SageMode = lazy(() =>
   import("./modes/SageMode").then((m) => ({ default: m.SageMode })),
 );
 
+// Operator-only deep-dive route, kept reachable but unlinked.
+const LegacyDashboard = lazy(() =>
+  import("./modes/LegacyDashboard").then((m) => ({
+    default: m.LegacyDashboard,
+  })),
+);
+
 function MapModeFallback() {
   return (
     <div className="flex h-full items-center justify-center bg-slate-950">
@@ -42,6 +49,14 @@ function SageModeFallback() {
   return (
     <div className="flex h-full items-center justify-center bg-slate-950">
       <div className="font-mono text-xs text-slate-500">cargando Sage…</div>
+    </div>
+  );
+}
+
+function LazyRouteFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-slate-950">
+      <div className="font-mono text-xs text-slate-500">cargando…</div>
     </div>
   );
 }
@@ -66,6 +81,14 @@ const router = createBrowserRouter([
         element: (
           <Suspense fallback={<SageModeFallback />}>
             <SageMode />
+          </Suspense>
+        ),
+      },
+      {
+        path: "legacy/dashboard",
+        element: (
+          <Suspense fallback={<LazyRouteFallback />}>
+            <LegacyDashboard />
           </Suspense>
         ),
       },

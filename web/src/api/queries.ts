@@ -1,6 +1,7 @@
 /**
  * TanStack Query hooks for every endpoint the frontend touches. Each hook
- * runs the raw fetch through `apiFetch` (which injects X-Api-Key) and then
+ * runs the raw fetch through `apiFetch` (which injects the Supabase
+ * Authorization bearer or, in tests, the X-Api-Key fallback) and then
  * validates the body against a Zod schema — defense in depth.
  */
 
@@ -59,7 +60,11 @@ export function useNationalTreemap(): UseQueryResult<NationalTreemapResult> {
   return useQuery({
     queryKey: ["analytics", "national-treemap"],
     queryFn: () =>
-      fetchJson("/analytics/national-treemap", NATIONAL_TREEMAP_RESULT, accessToken),
+      fetchJson(
+        "/analytics/national-treemap",
+        NATIONAL_TREEMAP_RESULT,
+        accessToken,
+      ),
     enabled: accessToken !== null,
   });
 }

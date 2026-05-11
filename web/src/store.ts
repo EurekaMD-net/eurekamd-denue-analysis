@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Session } from "@supabase/supabase-js";
 import type { QueryClient } from "@tanstack/react-query";
+import { supabase } from "./lib/supabase";
 
 export type Mode = "map" | "locust";
 
@@ -74,8 +75,8 @@ export const useUiStore = create<UiState>((set, get) => ({
     }
     get().abortRegistry.clear();
     // 3. Tell Supabase to invalidate the refresh token + clear local
-    //    storage. Lazy-import to avoid a circular dep at module init.
-    const { supabase } = await import("./lib/supabase");
+    //    storage. (RH-15: static import — LoginGate already pulls
+    //    supabase eagerly, so the dynamic-import dance was redundant.)
     await supabase.auth.signOut();
     // 4. Drop the session in the store so LoginGate re-shows.
     set({ session: null });

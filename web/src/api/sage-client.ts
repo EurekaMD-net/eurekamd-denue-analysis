@@ -55,16 +55,16 @@ export interface SageHealth {
 }
 
 export async function fetchSageHealth(
-  apiKey: string | null,
+  tokenOverride: string | null,
 ): Promise<SageHealth> {
-  const res = await apiFetch("/sage/health", {}, apiKey);
+  const res = await apiFetch("/sage/health", {}, tokenOverride);
   return (await res.json()) as SageHealth;
 }
 
 export async function* sageQueryStream(
   question: string,
   threadId: string | null,
-  apiKey: string | null,
+  tokenOverride: string | null,
   signal?: AbortSignal,
 ): AsyncGenerator<SageEvent, void, void> {
   const res = await apiFetch(
@@ -78,7 +78,7 @@ export async function* sageQueryStream(
       }),
       signal,
     },
-    apiKey,
+    tokenOverride,
   );
   if (!res.ok || !res.body) {
     throw new Error(`Sage /query ${res.status}`);

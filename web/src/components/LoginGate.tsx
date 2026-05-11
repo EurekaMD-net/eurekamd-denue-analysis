@@ -1,4 +1,10 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useUiStore } from "../store";
 import { supabase } from "../lib/supabase";
 import type { Session } from "@supabase/supabase-js";
@@ -25,6 +31,18 @@ export function LoginGate({ children }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  const emailInputRef = useRef<HTMLInputElement>(null);
+  // RH-16: focus the email field exactly once, after hydration and only
+  // when there's no error to read. The prior `autoFocus` prop was
+  // mount-only; useEffect + ref lets us actually wait for the hydration
+  // signal (the form swap-in is what mounts the input).
+  const focusedOnceRef = useRef(false);
+  useEffect(() => {
+    if (focusedOnceRef.current) return;
+    if (!hydrated || session || error) return;
+    emailInputRef.current?.focus();
+    focusedOnceRef.current = true;
+  }, [hydrated, session, error]);
 
   // Hydrate from supabase-js on mount, then subscribe so token refresh
   // pushes the new access_token into the Zustand store automatically.
@@ -95,8 +113,8 @@ export function LoginGate({ children }: Props) {
           </p>
         </header>
         <input
+          ref={emailInputRef}
           type="email"
-          autoFocus
           autoComplete="username"
           required
           value={email}

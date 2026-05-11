@@ -34,11 +34,11 @@ export const MEXICO_BOUNDS: [number, number, number, number] = [
  * threw on every tile.
  *
  * Filters are encoded as query string. {z}/{x}/{y} stay as MapLibre
- * placeholders that the renderer expands per-tile. The X-Api-Key
- * header is NOT in the URL — it's injected via MapLibre's
+ * placeholders that the renderer expands per-tile. The Authorization
+ * bearer header is NOT in the URL — it's injected via MapLibre's
  * `transformRequest` callback (see MapShell). That callback fires on
  * every tile fetch and is the standard way to add auth headers without
- * leaking the key in browser history or server access logs.
+ * leaking the token in browser history or server access logs.
  *
  * Backend route: /tiles/:z/:x/:y (no .mvt suffix; response is
  * application/x-protobuf). Vite dev proxy rewrites /api/* → :3030.

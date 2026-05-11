@@ -10,8 +10,11 @@ import { FilterControls } from "../components/FilterPanel";
 import { SearchBar } from "../components/SearchBar";
 
 /**
- * Locust mode — analytics dashboard reading 4 sources (DENUE × Censo ×
- * CONEVAL × CLUES) as a single story.
+ * Legacy dashboard — the pre-v0.3 single-page story (treemap +
+ * sector×IRS matrix + state-detail trio). Superseded by Locust mode
+ * for the v0.3 demo but kept reachable at `/legacy/dashboard` (no nav
+ * entry) because the charts still consume audited backend endpoints
+ * and are useful for operator-only deep-dives.
  *
  * Layout:
  *   - Sticky toolbar: search · entidad picker · provenance tagline
