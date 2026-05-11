@@ -23,14 +23,22 @@ interface Props {
  * pre-creates accounts via Supabase Studio or
  * `POST /auth/v1/admin/users` with the service-role key.
  */
+// supabase-js v2 stores its session under a key matching `sb-<ref>-auth-token`.
+// We match the family so we don't have to hardcode the project ref (it
+// changes per Supabase instance for sell-time deployments). Exported so
+// tests can pin the exact pattern (Phase 2 audit R5).
+export const SUPABASE_TOKEN_KEY_RE = /^sb-.+-auth-token$/;
+
 export function LoginGate({ children }: Props) {
   const session = useUiStore((s) => s.session);
   const setSession = useUiStore((s) => s.setSession);
+  const hydrated = useUiStore((s) => s.hydrated);
+  const setHydrated = useUiStore((s) => s.setHydrated);
+  const cleanupLocal = useUiStore((s) => s.cleanupLocal);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
   const emailInputRef = useRef<HTMLInputElement>(null);
   // RH-16: focus the email field exactly once, after hydration and only
   // when there's no error to read. The prior `autoFocus` prop was
@@ -46,6 +54,15 @@ export function LoginGate({ children }: Props) {
 
   // Hydrate from supabase-js on mount, then subscribe so token refresh
   // pushes the new access_token into the Zustand store automatically.
+  // RH-12: SIGNED_OUT events may originate in another tab via supabase-js's
+  // built-in cross-tab broadcast (it listens on storage events itself).
+  // When that happens we must run the SAME teardown locally — cancel
+  // TanStack queries + abort Sage SSE streams — not just clear the
+  // session. cleanupLocal does that without re-calling
+  // supabase.auth.signOut (which already ran in the originating tab).
+  // RH-13: As belt-and-suspenders, we also listen for raw storage events
+  // and run cleanupLocal if the supabase-token key disappeared but our
+  // store still thinks we have a session.
   useEffect(() => {
     let canceled = false;
     void supabase.auth.getSession().then(({ data }) => {
@@ -53,14 +70,38 @@ export function LoginGate({ children }: Props) {
       setSession(data.session as Session | null);
       setHydrated(true);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "SIGNED_OUT") {
+        // Could be from another tab. Run full teardown idempotently —
+        // cleanupLocal early-returns if there's nothing to clean.
+        void cleanupLocal();
+        return;
+      }
       setSession(s as Session | null);
     });
+    const onStorage = (e: StorageEvent) => {
+      // Only react to changes touching the supabase auth-token family.
+      if (!e.key || !SUPABASE_TOKEN_KEY_RE.test(e.key)) return;
+      // Note: storage events fire on this listener every time ANOTHER
+      // tab writes the token key — that includes the hourly token
+      // refresh (autoRefreshToken: true). The getSession() round-trip
+      // below is the cost. It's a localStorage read + a Promise tick,
+      // negligible at N-tab scale. We don't dedupe; double cleanupLocal
+      // calls are idempotent. (Phase 2 audit W4.)
+      void supabase.auth.getSession().then(({ data }) => {
+        if (canceled) return;
+        if (!data.session && useUiStore.getState().session) {
+          void cleanupLocal();
+        }
+      });
+    };
+    window.addEventListener("storage", onStorage);
     return () => {
       canceled = true;
       sub.subscription.unsubscribe();
+      window.removeEventListener("storage", onStorage);
     };
-  }, [setSession]);
+  }, [setSession, setHydrated, cleanupLocal]);
 
   if (!hydrated) {
     return (
