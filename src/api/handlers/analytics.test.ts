@@ -3459,7 +3459,7 @@ describe("GET /analytics/licensed-pharmacies-by-municipio (v0.2.8)", () => {
       { headers: AUTH },
     );
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
 
@@ -3680,7 +3680,7 @@ describe("GET /analytics/manzanas-by-ageb (v0.2.9)", () => {
       { headers: AUTH },
     );
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
 
@@ -4095,7 +4095,7 @@ describe("GET /analytics/localities-by-municipio (v0.2.10)", () => {
       { headers: AUTH },
     );
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
 
@@ -4381,7 +4381,7 @@ describe("GET /analytics/locality-detail (v0.2.10)", () => {
       { headers: AUTH },
     );
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
 
@@ -4763,7 +4763,7 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
       headers: AUTH,
     });
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
   // SQL-injection contract — keeps full parity with the locality vectors
@@ -5139,7 +5139,7 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
       headers: AUTH,
     });
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
-    expect(res.headers.get("Vary")).toBe("X-Api-Key");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
   // SQL-injection contract — full parity with locality + muni vectors.

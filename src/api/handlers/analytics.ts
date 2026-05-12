@@ -508,7 +508,7 @@ export async function nationalTreemapHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -559,7 +559,7 @@ export async function sectorGradeMatrixHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -648,7 +648,7 @@ export async function municipiosAnalyticsHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=300");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -723,7 +723,7 @@ export async function topSectorsByEntidadHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=300");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -938,7 +938,7 @@ export async function riskSummaryHandler(
   // category; downstream caches still amortize but the worst-case staleness
   // window stays bounded.
   c.header("Cache-Control", "public, max-age=300");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -1051,7 +1051,7 @@ export async function riskTrendHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -1244,7 +1244,7 @@ export async function mortalitySummaryHandler(
   // Mortality data is annual + ~12-month lag — much less dynamic than risk
   // (monthly SESNSP). Match national-treemap's 1-hour cache.
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -1382,7 +1382,7 @@ export async function mortalityTrendHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -1585,7 +1585,7 @@ export async function stateCalibratorsHandler(
   const result: StateCalibratorsResult = { entidad, calibrators };
   // Calibrators change once per ENIGH wave (~biennial). 1-hour cache fits.
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -1736,7 +1736,7 @@ export async function agebsByMunicipioHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -2230,7 +2230,7 @@ export async function agebDetailHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -2391,7 +2391,7 @@ export async function agebFarmaciaOpportunityHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -2768,7 +2768,7 @@ export async function opportunityByAgebHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -2914,7 +2914,7 @@ export async function opportunityByColoniaHandler(
     colonias,
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3007,7 +3007,7 @@ export async function coloniasByMunicipioHandler(
     colonias,
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3104,7 +3104,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
         droguerias: 0,
       };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3160,7 +3160,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
         con_controlados: 0,
       };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3258,7 +3258,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
     manzanas,
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3328,7 +3328,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
     colonias,
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3426,7 +3426,7 @@ SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC N
     airports: formatted,
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3553,7 +3553,7 @@ SELECT json_build_object(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -3683,7 +3683,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     },
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -4606,7 +4606,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     vivienda_credito_comercial: creditoComercialFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -4797,6 +4797,6 @@ SELECT json_agg(row_to_json(t)) FROM (
     vivienda_credito_comercial: creditoComercialFromRow(r),
   };
   c.header("Cache-Control", "public, max-age=3600");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }

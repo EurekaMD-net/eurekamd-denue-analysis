@@ -57,7 +57,7 @@ export async function entidadesHandler(
   // 32 parallel count requests on every render. Vary on X-Api-Key so a
   // shared cache never crosses keys.
   c.header("Cache-Control", "public, max-age=60");
-  c.header("Vary", "X-Api-Key");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(payload);
 }
 

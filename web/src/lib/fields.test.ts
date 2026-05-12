@@ -2,10 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   FIELD_CATALOG,
   FIELD_SOURCES,
+  GRAIN_ENDPOINTS,
   deriveChartType,
   findField,
   isCategorical,
+  isFieldGraphableAt,
+  isFieldReachable,
   isNumeric,
+  type FieldGrain,
 } from "./fields";
 
 describe("FIELD_CATALOG", () => {
@@ -53,6 +57,115 @@ describe("deriveChartType", () => {
 
   it("nothing set → treemap (cold canvas)", () => {
     expect(deriveChartType(null, null)).toBe("treemap");
+  });
+});
+
+// Hardcoded list of currently-served analytics endpoints (paths only —
+// query strings stripped). Sourced from src/api/server.ts. If the backend
+// adds a new Locust-relevant endpoint, append it here AND in
+// GRAIN_ENDPOINTS below before wiring fields.
+const KNOWN_ANALYTICS_PATHS = new Set([
+  "/analytics/national-treemap",
+  "/analytics/municipios",
+  "/analytics/top-sectors",
+]);
+
+describe("reachability (X-key invariant)", () => {
+  it("every reachable field has at least one column", () => {
+    for (const f of FIELD_CATALOG) {
+      if (isFieldReachable(f)) {
+        expect(Object.keys(f.columns).length).toBeGreaterThan(0);
+      } else {
+        expect(Object.keys(f.columns).length).toBe(0);
+      }
+    }
+  });
+
+  it("every column-grain key is one of the FieldGrain literals", () => {
+    const validGrains: FieldGrain[] = ["muni", "ageb", "estado", "nacional"];
+    for (const f of FIELD_CATALOG) {
+      for (const grain of Object.keys(f.columns)) {
+        expect(validGrains).toContain(grain as FieldGrain);
+      }
+    }
+  });
+
+  it("every wired column-grain has an endpoint in GRAIN_ENDPOINTS", () => {
+    for (const f of FIELD_CATALOG) {
+      for (const grain of Object.keys(f.columns) as FieldGrain[]) {
+        expect(GRAIN_ENDPOINTS[grain]).toBeDefined();
+      }
+    }
+  });
+
+  it("GRAIN_ENDPOINTS only references known backend paths", () => {
+    for (const ep of Object.values(GRAIN_ENDPOINTS)) {
+      if (!ep) continue;
+      // Resolve with a sample entidad ('09' = CDMX) so paths that require
+      // it actually produce a URL.
+      const sample = ep.path("09");
+      expect(sample, `endpoint.path("09") returned null`).not.toBeNull();
+      const pathOnly = sample!.split("?")[0]!;
+      expect(KNOWN_ANALYTICS_PATHS).toContain(pathOnly);
+    }
+  });
+
+  it("every xEligible field has a column at its own grain (self-key)", () => {
+    for (const f of FIELD_CATALOG) {
+      if (f.xEligible) {
+        expect(
+          f.columns[f.grain],
+          `xEligible field "${f.id}" missing self-grain column`,
+        ).toBeDefined();
+        // S1 audit fix: also verify the grain has an endpoint registered.
+        // Otherwise users could pick the anchor and the chart would just
+        // silently render "Sin datos" without explanation.
+        expect(
+          GRAIN_ENDPOINTS[f.grain],
+          `xEligible field "${f.id}" grain "${f.grain}" has no GRAIN_ENDPOINTS entry`,
+        ).toBeDefined();
+      }
+    }
+  });
+
+  it("xEligible fields are categorical (no numeric anchors)", () => {
+    for (const f of FIELD_CATALOG) {
+      if (f.xEligible) {
+        expect(isCategorical(f.type)).toBe(true);
+      }
+    }
+  });
+
+  it("categorical_ordinal fields declare an ordinalOrder for Z-colourant", () => {
+    for (const f of FIELD_CATALOG) {
+      if (f.type === "categorical_ordinal") {
+        expect(
+          f.ordinalOrder,
+          `ordinal field "${f.id}" must declare ordinalOrder`,
+        ).toBeDefined();
+        expect(f.ordinalOrder!.length).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("isFieldGraphableAt", () => {
+  it("returns true when field has column for the given grain", () => {
+    const estab = findField("denue.total_establecimientos")!;
+    expect(isFieldGraphableAt(estab, "estado")).toBe(true);
+    expect(isFieldGraphableAt(estab, "muni")).toBe(true);
+    expect(isFieldGraphableAt(estab, "nacional")).toBe(true);
+  });
+
+  it("returns false when field has no column for that grain", () => {
+    const estab = findField("denue.total_establecimientos")!;
+    expect(isFieldGraphableAt(estab, "ageb")).toBe(false);
+  });
+
+  it("returns false for fields with empty columns map", () => {
+    const orphan = findField("sesnsp.homicidio_doloso")!;
+    expect(orphan.columns).toEqual({});
+    expect(isFieldGraphableAt(orphan, "muni")).toBe(false);
   });
 });
 

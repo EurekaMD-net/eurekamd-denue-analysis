@@ -1,11 +1,17 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactECharts from "../lib/echarts-core";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../api/client";
 import { useUiStore } from "../store";
 import { FieldPicker } from "../components/FieldPicker";
 import { FilterControls } from "../components/FilterPanel";
-import { deriveChartType, findField, type FieldDef } from "../lib/fields";
+import {
+  deriveChartType,
+  findField,
+  GRAIN_ENDPOINTS,
+  isFieldGraphableAt,
+  type FieldDef,
+} from "../lib/fields";
 import { LOCUST_PRESETS, type LocustPreset } from "../lib/presets";
 
 type AxisSlot = "x" | "y" | "z";
@@ -24,12 +30,20 @@ const INITIAL_AXIS: AxisState = {
 };
 
 /**
- * Locust mode — single configurable chart with X/Y/Z axes, auto-derived
- * chart type, drill on whichever axis is categorical, and 6 preset
- * starter configurations.
+ * Locust mode — single configurable chart.
+ *
+ * Invariant: X is the join key. The X field's `grain` selects which
+ * backend endpoint is fetched (via GRAIN_ENDPOINTS). Y and Z are values
+ * read off the same row by name — `field.columns[xField.grain]`.
+ *
+ * The picker enforces this invariant pre-pick:
+ *   - X slot accepts only fields with xEligible=true.
+ *   - Y slot (after X set) accepts only fields whose columns map has X.grain.
+ *   - Z slot is gated until X+Y both set; then constrained to Y's rule.
  */
 export function LocustMode() {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
+  const entidad = useUiStore((s) => s.entidad);
   const [xAxis, setXAxis] = useState<AxisState>(INITIAL_AXIS);
   const [yAxis, setYAxis] = useState<AxisState>(INITIAL_AXIS);
   const [zAxis, setZAxis] = useState<AxisState>(INITIAL_AXIS);
@@ -50,25 +64,88 @@ export function LocustMode() {
     setFilterPins([]);
   };
 
+  // Setting or changing X invalidates Y/Z if they're not graphable at the
+  // new X.grain. Without this, switching X from estado to muni would leave
+  // estado-only Y/Z fields in place and produce the same "Sin datos" we're
+  // trying to eliminate.
   const setAxis = (slot: AxisSlot, next: AxisState) => {
     if (slot === "x") {
-      // RH-1 audit W2: clearing or changing the X-axis field invalidates
-      // all pinned values (the chips reference x-category labels). Same
-      // for drilling X (the category set changes). Auto-clear so the
-      // user doesn't end up with stale chips that match nothing.
-      const fieldChanged = next.field?.id !== xAxis.field?.id;
+      const prevId = xAxis.field?.id;
+      const fieldChanged = next.field?.id !== prevId;
       const drillChanged =
         next.geoLevel !== xAxis.geoLevel ||
         next.scianLevel !== xAxis.scianLevel;
       if (fieldChanged || drillChanged) {
         setFilterPins([]);
       }
+      // If X grain changed, clear Y/Z that are not graphable at new grain.
+      const newGrain = next.field?.grain ?? null;
+      if (
+        newGrain &&
+        yAxis.field &&
+        !isFieldGraphableAt(yAxis.field, newGrain)
+      ) {
+        setYAxis(INITIAL_AXIS);
+      }
+      if (
+        newGrain &&
+        zAxis.field &&
+        !isFieldGraphableAt(zAxis.field, newGrain)
+      ) {
+        setZAxis(INITIAL_AXIS);
+      }
+      // Removing X entirely → clear Y/Z too (Z is meaningless without X).
+      if (!next.field) {
+        setYAxis(INITIAL_AXIS);
+        setZAxis(INITIAL_AXIS);
+      }
       setXAxis(next);
-    } else if (slot === "y") setYAxis(next);
-    else setZAxis(next);
+    } else if (slot === "y") {
+      setYAxis(next);
+      // Removing Y clears Z (Z is a colorant of Y).
+      if (!next.field) setZAxis(INITIAL_AXIS);
+    } else {
+      setZAxis(next);
+    }
   };
   const getAxis = (slot: AxisSlot): AxisState =>
     slot === "x" ? xAxis : slot === "y" ? yAxis : zAxis;
+
+  // Z slot is meaningless without X+Y both set.
+  const zSlotEnabled = xAxis.field !== null && yAxis.field !== null;
+
+  // W1 audit fix: if X is cleared while Y/Z picker is open, the picker
+  // is stale (all rows disabled, context hint references a null field).
+  // Auto-close to keep state coherent.
+  useEffect(() => {
+    if ((pickerOpen === "y" || pickerOpen === "z") && !xAxis.field) {
+      setPickerOpen(null);
+    }
+    if (pickerOpen === "z" && !yAxis.field) {
+      setPickerOpen(null);
+    }
+  }, [pickerOpen, xAxis.field, yAxis.field]);
+
+  // Picker predicate per slot. X gates by xEligible. Y/Z gate by
+  // "graphable at X's grain" plus de-dupe against already-picked slots.
+  const pickerPredicate = useMemo(() => {
+    if (pickerOpen === "x") return (f: FieldDef) => f.xEligible;
+    if (pickerOpen === "y") {
+      const xg = xAxis.field?.grain;
+      if (!xg) return () => false; // shouldn't open Y picker w/o X
+      return (f: FieldDef) =>
+        isFieldGraphableAt(f, xg) && f.id !== xAxis.field?.id;
+    }
+    if (pickerOpen === "z") {
+      const xg = xAxis.field?.grain;
+      if (!xg) return () => false;
+      return (f: FieldDef) =>
+        isFieldGraphableAt(f, xg) &&
+        f.id !== xAxis.field?.id &&
+        f.id !== yAxis.field?.id;
+    }
+    return () => true;
+  }, [pickerOpen, xAxis.field, yAxis.field]);
 
   // Default-derived chart type from axis field types, with manual override.
   const derivedChartType = useMemo(
@@ -77,13 +154,21 @@ export function LocustMode() {
   );
   const chartType = chartOverride ?? derivedChartType;
 
-  const dataset = useLocustDataset(xAxis, yAxis, zAxis, accessToken);
+  const dataset = useLocustDataset(xAxis, yAxis, zAxis, accessToken, entidad);
 
   const onFieldPicked = (field: FieldDef) => {
     if (!pickerOpen) return;
     const slot = pickerOpen;
     setAxis(slot, { ...getAxis(slot), field });
   };
+
+  // Pre-fetch UX: surface a hint when X's grain requires entidad and none
+  // is selected. Endpoint dispatcher would otherwise return early with a
+  // generic empty state — this is more actionable.
+  const grainEndpoint = xAxis.field
+    ? GRAIN_ENDPOINTS[xAxis.field.grain]
+    : undefined;
+  const needsEntidad = grainEndpoint?.needsEntidad === true && entidad === null;
 
   return (
     <div className="flex h-full bg-slate-950 text-slate-100">
@@ -104,6 +189,8 @@ export function LocustMode() {
         <AxisRow
           slot="y"
           axis={yAxis}
+          disabled={!xAxis.field}
+          disabledHint="Elige X primero"
           onOpen={() => setPickerOpen("y")}
           onDrill={(dir) => setAxis("y", drill(yAxis, dir))}
           onClear={() => setAxis("y", INITIAL_AXIS)}
@@ -111,6 +198,8 @@ export function LocustMode() {
         <AxisRow
           slot="z"
           axis={zAxis}
+          disabled={!zSlotEnabled}
+          disabledHint="Elige X e Y primero"
           onOpen={() => setPickerOpen("z")}
           onDrill={(dir) => setAxis("z", drill(zAxis, dir))}
           onClear={() => setAxis("z", INITIAL_AXIS)}
@@ -154,8 +243,7 @@ export function LocustMode() {
         </div>
         <div className="flex-1" />
         <div className="border-t border-slate-800 px-3 py-2 font-mono text-[9px] text-slate-600">
-          14 fuentes joineables · grano:{" "}
-          {xAxis.field?.grain ?? yAxis.field?.grain ?? "—"}
+          14 fuentes joineables · grano: {xAxis.field?.grain ?? "—"}
         </div>
       </aside>
 
@@ -191,7 +279,17 @@ export function LocustMode() {
         </div>
 
         {!xAxis.field || !yAxis.field ? (
-          <EmptyState onPreset={applyPreset} />
+          <EmptyState onPreset={applyPreset} entidad={entidad} />
+        ) : needsEntidad ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 font-mono text-xs text-slate-400">
+            <span>
+              Selecciona una entidad arriba para ver datos a grano{" "}
+              <span className="text-cyan-400">{xAxis.field.grain}</span>.
+            </span>
+            <span className="text-[10px] text-slate-600">
+              El X-anchor "{xAxis.field.label}" requiere entidad.
+            </span>
+          </div>
         ) : (
           <div className="flex-1 overflow-hidden">
             <LocustChart
@@ -202,8 +300,6 @@ export function LocustMode() {
               dataset={dataset}
               filterPins={filterPins}
               onCellPin={(label, value) => {
-                // Dedupe by value: clicking the same cell twice should
-                // not stack duplicate chips.
                 if (filterPins.some((p) => p.value === value)) return;
                 setFilterPins([...filterPins, { axis: "x", label, value }]);
               }}
@@ -217,16 +313,28 @@ export function LocustMode() {
         onClose={() => setPickerOpen(null)}
         onPick={onFieldPicked}
         axisLabel={pickerOpen ? `Eje ${pickerOpen.toUpperCase()}` : ""}
+        predicate={pickerPredicate}
+        contextHint={pickerContextHint(pickerOpen, xAxis.field)}
       />
     </div>
   );
 }
 
+function pickerContextHint(
+  slot: AxisSlot | null,
+  xField: FieldDef | null,
+): string | null {
+  if (slot === "x") return "Elige un campo categórico que ancle la gráfica.";
+  if (slot === "y" || slot === "z") {
+    if (!xField) return null;
+    return `Filtrado a campos comparables con "${xField.label}" (grano ${xField.grain}).`;
+  }
+  return null;
+}
+
 function drill(axis: AxisState, dir: "down" | "up"): AxisState {
   const field = axis.field;
   if (!field) return axis;
-  // Drill axis depends on field grain — geographic grains use geoLevel,
-  // SCIAN-family fields use scianLevel.
   const isGeo =
     field.grain === "estado" ||
     field.grain === "muni" ||
@@ -236,7 +344,6 @@ function drill(axis: AxisState, dir: "down" | "up"): AxisState {
     const next = dir === "down" ? Math.min(2, cur + 1) : Math.max(0, cur - 1);
     return { ...axis, geoLevel: next as 0 | 1 | 2 };
   }
-  // For SCIAN sectors (categorical_nominal under DENUE)
   const cur = axis.scianLevel;
   const next = dir === "down" ? Math.min(6, cur + 1) : Math.max(2, cur - 1);
   return { ...axis, scianLevel: next as 2 | 3 | 4 | 5 | 6 };
@@ -245,14 +352,28 @@ function drill(axis: AxisState, dir: "down" | "up"): AxisState {
 interface AxisRowProps {
   slot: AxisSlot;
   axis: AxisState;
+  disabled?: boolean;
+  disabledHint?: string;
   onOpen: () => void;
   onDrill: (dir: "down" | "up") => void;
   onClear: () => void;
 }
 
-function AxisRow({ slot, axis, onOpen, onDrill, onClear }: AxisRowProps) {
+function AxisRow({
+  slot,
+  axis,
+  disabled = false,
+  disabledHint,
+  onOpen,
+  onDrill,
+  onClear,
+}: AxisRowProps) {
   return (
-    <div className="border-b border-slate-800 px-3 py-2">
+    <div
+      className={`border-b border-slate-800 px-3 py-2 ${
+        disabled ? "opacity-40" : ""
+      }`}
+    >
       <div className="flex items-center gap-2">
         <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-slate-500">
           {slot.toUpperCase()}
@@ -260,11 +381,19 @@ function AxisRow({ slot, axis, onOpen, onDrill, onClear }: AxisRowProps) {
         <button
           type="button"
           onClick={onOpen}
-          className="flex-1 truncate rounded border border-slate-700 bg-slate-950 px-2 py-1 text-left font-mono text-xs text-slate-200 hover:border-cyan-700"
+          disabled={disabled}
+          title={disabled ? disabledHint : undefined}
+          className={`flex-1 truncate rounded border border-slate-700 bg-slate-950 px-2 py-1 text-left font-mono text-xs text-slate-200 ${
+            disabled ? "cursor-not-allowed" : "hover:border-cyan-700"
+          }`}
         >
-          {axis.field ? axis.field.label : "+ elegir campo"}
+          {axis.field
+            ? axis.field.label
+            : disabled
+              ? (disabledHint ?? "—")
+              : "+ elegir campo"}
         </button>
-        {axis.field && (
+        {axis.field && !disabled && (
           <button
             type="button"
             onClick={onClear}
@@ -274,7 +403,7 @@ function AxisRow({ slot, axis, onOpen, onDrill, onClear }: AxisRowProps) {
           </button>
         )}
       </div>
-      {axis.field && (
+      {axis.field && !disabled && (
         <div className="mt-1 flex items-center gap-2">
           <span className="font-mono text-[9px] text-slate-500">
             {axis.field.source} · {axis.field.grain}
@@ -333,7 +462,13 @@ function ChartTypeToggle({
   );
 }
 
-function EmptyState({ onPreset }: { onPreset: (p: LocustPreset) => void }) {
+function EmptyState({
+  onPreset,
+  entidad,
+}: {
+  onPreset: (p: LocustPreset) => void;
+  entidad: string | null;
+}) {
   return (
     <div className="flex flex-1 items-center justify-center px-6 py-12">
       <div className="w-full max-w-2xl">
@@ -341,19 +476,40 @@ function EmptyState({ onPreset }: { onPreset: (p: LocustPreset) => void }) {
           Elige una preset o configura los ejes X y Y desde el panel.
         </p>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {LOCUST_PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => onPreset(p)}
-              className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-left hover:border-cyan-700 hover:bg-slate-800"
-            >
-              <div className="font-mono text-xs text-cyan-300">{p.title}</div>
-              <div className="mt-0.5 font-mono text-[10px] text-slate-500">
-                {p.description}
-              </div>
-            </button>
-          ))}
+          {LOCUST_PRESETS.map((p) => {
+            const blocked = p.needsEntidad && entidad === null;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                disabled={blocked}
+                onClick={() => {
+                  if (blocked) return;
+                  onPreset(p);
+                }}
+                className={`rounded border border-slate-800 bg-slate-900 px-3 py-2 text-left ${
+                  blocked
+                    ? "cursor-not-allowed opacity-60"
+                    : "hover:border-cyan-700 hover:bg-slate-800"
+                }`}
+                title={
+                  blocked
+                    ? `Selecciona una entidad primero (ej. ${p.exampleEntidad})`
+                    : undefined
+                }
+              >
+                <div className="font-mono text-xs text-cyan-300">{p.title}</div>
+                <div className="mt-0.5 font-mono text-[10px] text-slate-500">
+                  {p.description}
+                </div>
+                {blocked && (
+                  <div className="mt-1 font-mono text-[9px] text-amber-400">
+                    requiere entidad
+                  </div>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -361,37 +517,36 @@ function EmptyState({ onPreset }: { onPreset: (p: LocustPreset) => void }) {
 }
 
 /**
- * Fetches whichever joined dataset can satisfy the current X×Y×Z axis
- * selection. Today the implementation falls back to two endpoints:
- *   - /analytics/national-treemap (entidad-grain rows)
- *   - /analytics/municipios?entidad=XX (muni-grain rows)
- * The field id is mapped to the column name returned by the endpoint;
- * if no mapping exists, the chart shows "Sin datos para esta combinación."
+ * Dispatch to whichever endpoint serves X.grain. Y/Z column names come
+ * off `field.columns[xField.grain]` — we never fall through to a fragile
+ * legacy id→column map. If X has no endpoint for its grain (e.g. ageb),
+ * the query is disabled and the chart shows "Sin datos".
  */
 function useLocustDataset(
   xAxis: AxisState,
   yAxis: AxisState,
   _zAxis: AxisState,
   accessToken: string | null,
+  entidad: string | null,
 ) {
-  const grain = xAxis.field?.grain ?? yAxis.field?.grain ?? "estado";
-  const entidad = useUiStore((s) => s.entidad);
-  const needsEntidad = grain === "muni";
+  const xField = xAxis.field;
+  const yField = yAxis.field;
+  const grain = xField?.grain ?? null;
+  const endpoint = grain ? GRAIN_ENDPOINTS[grain] : undefined;
+  const path = endpoint ? endpoint.path(entidad) : null;
+
   return useQuery({
-    queryKey: ["locust", grain, entidad, xAxis.field?.id, yAxis.field?.id],
+    queryKey: ["locust", grain, entidad, xField?.id, yField?.id],
     queryFn: async () => {
-      const path =
-        grain === "muni" && entidad
-          ? `/analytics/municipios?entidad=${entidad}`
-          : "/analytics/national-treemap";
+      if (!path) throw new Error("no endpoint for grain");
       const res = await apiFetch(path, {}, accessToken);
       return res.json() as Promise<unknown>;
     },
     enabled:
       accessToken !== null &&
-      xAxis.field !== null &&
-      yAxis.field !== null &&
-      (!needsEntidad || entidad !== null),
+      xField !== null &&
+      yField !== null &&
+      path !== null,
     staleTime: 5 * 60 * 1000,
   });
 }
@@ -443,9 +598,6 @@ function LocustChart({
       </div>
     );
   }
-  // RH-1: filter pins on the x-axis act as an inclusion set — show only
-  // the rows whose x value matches one of the pinned values. With no
-  // pins, all rows pass through unchanged.
   const rows = applyFilterPins(allRows, filterPins);
   if (rows.length === 0) {
     return (
@@ -479,10 +631,7 @@ function LocustChart({
 
 /**
  * Apply x-axis filter pins as an inclusion set. With no pins, returns
- * the input unchanged. With pins, returns only rows whose `x` value
- * matches one of the pinned values (compared as strings to bridge the
- * numeric/categorical mismatch from echarts click events).
- * Exported for unit tests.
+ * the input unchanged. Exported for unit tests.
  */
 export function applyFilterPins(
   rows: DataPoint[],
@@ -499,62 +648,83 @@ interface DataPoint {
   z: number | null;
 }
 
-function extractRows(
+/**
+ * Extract data points by reading column names off `field.columns[xGrain]`.
+ * Endpoint payloads are either { rows: [...] } / { entidades: [...] } /
+ * { municipios: [...] } / { sectors: [...] }; we look up the right key
+ * via GRAIN_ENDPOINTS.
+ */
+export function extractRows(
   raw: unknown,
   xAxis: AxisState,
   yAxis: AxisState,
   zAxis: AxisState,
 ): DataPoint[] {
-  // Endpoint payloads are either { rows: [...] } or a top-level array.
+  const xField = xAxis.field;
+  const yField = yAxis.field;
+  if (!xField || !yField) return [];
+  const xGrain = xField.grain;
+  const endpoint = GRAIN_ENDPOINTS[xGrain];
+  if (!endpoint) return [];
+
   let rows: Record<string, unknown>[] = [];
   if (Array.isArray(raw)) {
     rows = raw as Record<string, unknown>[];
   } else if (raw && typeof raw === "object") {
     const r = raw as Record<string, unknown>;
-    if (Array.isArray(r["rows"])) rows = r["rows"] as Record<string, unknown>[];
-    else if (Array.isArray(r["entidades"]))
-      rows = r["entidades"] as Record<string, unknown>[];
-    else if (Array.isArray(r["municipios"]))
-      rows = r["municipios"] as Record<string, unknown>[];
+    if (Array.isArray(r[endpoint.rowsKey])) {
+      rows = r[endpoint.rowsKey] as Record<string, unknown>[];
+    } else if (Array.isArray(r["rows"])) {
+      rows = r["rows"] as Record<string, unknown>[];
+    }
   }
-  if (rows.length === 0 || !xAxis.field || !yAxis.field) return [];
+  if (rows.length === 0) return [];
 
-  // Map field id to row column. Lossy for the demo — only a handful of
-  // ids are wired to /national-treemap and /municipios shapes.
-  const xCol = mapFieldToColumn(xAxis.field.id);
-  const yCol = mapFieldToColumn(yAxis.field.id);
-  const zCol = zAxis.field ? mapFieldToColumn(zAxis.field.id) : null;
+  const xCol = xField.columns[xGrain];
+  const yCol = yField.columns[xGrain];
+  const zField = zAxis.field;
+  const zCol = zField ? zField.columns[xGrain] : undefined;
   if (!xCol || !yCol) return [];
+
+  // C1 audit fix: categorical_ordinal Z fields (e.g. "Muy bajo" … "Muy alto")
+  // need to be projected to a numeric rank via the field's canonical order,
+  // not coerced with Number() which yields NaN and collapses all bars to
+  // slate. Unknown values (e.g. "sin_dato") fall through to null.
+  const zIsOrdinal =
+    zField?.type === "categorical_ordinal" && zField.ordinalOrder !== undefined;
+  const zOrderIndex: Map<string, number> | null = zIsOrdinal
+    ? new Map(zField!.ordinalOrder!.map((v, i) => [v, i]))
+    : null;
+
   return rows
     .map((r) => {
       const xv = r[xCol];
       const yv = r[yCol];
       const zv = zCol ? r[zCol] : null;
+      let z: number | null;
+      if (zOrderIndex !== null) {
+        z =
+          typeof zv === "string" && zOrderIndex.has(zv)
+            ? zOrderIndex.get(zv)!
+            : null;
+      } else if (typeof zv === "number") {
+        z = zv;
+      } else if (zv == null) {
+        z = null;
+      } else {
+        const n = Number(zv);
+        z = Number.isFinite(n) ? n : null;
+      }
       return {
         x:
           typeof xv === "string" || typeof xv === "number"
             ? xv
             : String(xv ?? ""),
         y: typeof yv === "number" ? yv : Number(yv ?? NaN),
-        z: typeof zv === "number" ? zv : zv != null ? Number(zv) : null,
+        z,
       };
     })
     .filter((p) => Number.isFinite(p.y));
-}
-
-function mapFieldToColumn(id: string): string | null {
-  // Subset wiring for the demo. /national-treemap rows have
-  // { entidad, establecimientos, modal_irs_grado, pobreza_pct_promedio }.
-  // /municipios rows have { cve_mun, municipio, poblacion, pobreza_pct,
-  // grado_rezago_social, establecimientos, farmacias, clues }.
-  const m: Record<string, string> = {
-    "denue.entidad_nombre": "entidad",
-    "denue.total_establecimientos": "establecimientos",
-    "coneval.pobreza_pct": "pobreza_pct_promedio", // estado fallback; muni column also "pobreza_pct"
-    "coneval.irs_grado": "modal_irs_grado",
-    "censo.pobtot": "poblacion",
-  };
-  return m[id] ?? null;
 }
 
 function buildEChartsOption(
@@ -568,6 +738,11 @@ function buildEChartsOption(
     ? ["#16a34a", "#65a30d", "#ca8a04", "#dc2626"] // green→red
     : ["#06b6d4"];
 
+  // W3 audit fix: precompute z range once. Previously `colorForZ(p.z, rows)`
+  // recomputed `rows.map().filter().Math.min/max` per row → O(n²) on muni
+  // charts (~2.5k rows). Now O(n).
+  const zRange = zAxis.field ? computeZRange(rows) : null;
+
   const baseAxisLabel = {
     color: "#94a3b8",
     fontFamily: "ui-monospace, SFMono-Regular, monospace",
@@ -578,7 +753,7 @@ function buildEChartsOption(
     const data = rows.map((p) => ({
       name: String(p.x),
       value: p.y,
-      itemStyle: zAxis.field ? { color: colorForZ(p.z, rows) } : undefined,
+      itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
     }));
     return {
       backgroundColor: "transparent",
@@ -627,9 +802,7 @@ function buildEChartsOption(
           symbolSize: zAxis.field ? 10 : 6,
           data: rows.map((p) => ({
             value: [p.x, p.y],
-            itemStyle: zAxis.field
-              ? { color: colorForZ(p.z, rows) }
-              : undefined,
+            itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
           })),
           itemStyle: { color: palette[0] },
         },
@@ -646,9 +819,7 @@ function buildEChartsOption(
           data: rows.map((p) => ({
             name: String(p.x),
             value: p.y,
-            itemStyle: zAxis.field
-              ? { color: colorForZ(p.z, rows) }
-              : undefined,
+            itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
           })),
         },
       ],
@@ -668,14 +839,33 @@ function buildEChartsOption(
   };
 }
 
-function colorForZ(z: number | null, rows: DataPoint[]): string {
+interface ZRange {
+  min: number;
+  max: number;
+}
+
+/**
+ * One linear pass over the rows to derive {min, max} from finite Z. Returns
+ * null when no row has a usable Z (every bar then renders slate). Exported
+ * for unit tests.
+ */
+export function computeZRange(rows: DataPoint[]): ZRange | null {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const r of rows) {
+    if (r.z !== null && Number.isFinite(r.z)) {
+      if (r.z < min) min = r.z;
+      if (r.z > max) max = r.z;
+    }
+  }
+  if (min === Number.POSITIVE_INFINITY) return null;
+  return { min, max };
+}
+
+function colorForZ(z: number | null, range: ZRange): string {
   if (z === null || !Number.isFinite(z)) return "#475569";
-  const zs = rows.map((r) => r.z).filter((v): v is number => v !== null);
-  if (zs.length === 0) return "#475569";
-  const min = Math.min(...zs);
-  const max = Math.max(...zs);
+  const { min, max } = range;
   const t = max === min ? 0.5 : (z - min) / (max - min);
-  // Linear interpolation green (low) → amber → red (high).
   if (t < 0.5) {
     return lerp("#16a34a", "#ca8a04", t * 2);
   }

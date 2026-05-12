@@ -3,26 +3,39 @@ import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import {
   FIELD_CATALOG,
   FIELD_SOURCES,
+  isFieldReachable,
   type FieldDef,
   type FieldSource,
 } from "../lib/fields";
 
 /**
  * ⌘K-style command palette for picking a field from the 14-source catalog.
- * Opens via a button in AxisPanel and is mountable elsewhere.
  *
- * Search: fuzzy over label + description + id; source facet chips at top.
+ * Slot-aware: callers pass a `predicate` that filters the visible set. X
+ * slot passes `f => f.xEligible`; Y/Z slot passes `f => f.columns[xGrain]
+ * !== undefined` so the user only sees fields that are graphable against
+ * the chosen X.
+ *
+ * Unreachable / incompatible fields (predicate false OR no Locust endpoint
+ * yet) are kept in the list but rendered greyed-out with "próximamente"
+ * so the user discovers what's coming without being able to pick it.
  */
 export function FieldPicker({
   open,
   onClose,
   onPick,
   axisLabel,
+  predicate,
+  contextHint,
 }: {
   open: boolean;
   onClose: () => void;
   onPick: (field: FieldDef) => void;
   axisLabel: string;
+  /** Filter callback; defaults to "any reachable field". */
+  predicate?: (f: FieldDef) => boolean;
+  /** Optional hint shown under the axis label (why some fields are greyed). */
+  contextHint?: string | null;
 }) {
   const [filter, setFilter] = useState<FieldSource | null>(null);
   const [query, setQuery] = useState("");
@@ -34,11 +47,22 @@ export function FieldPicker({
     }
   }, [open]);
 
-  const filtered = useMemo(() => {
-    return FIELD_CATALOG.filter((f) => !filter || f.source === filter);
-  }, [filter]);
+  // Compute per-field selectability. Surface every field in the catalog
+  // (so users see what's coming), but disable any that fail the
+  // predicate or have no endpoint wiring.
+  const items = useMemo(() => {
+    return FIELD_CATALOG.filter((f) => !filter || f.source === filter).map(
+      (f) => {
+        const reachable = isFieldReachable(f);
+        const allowed = predicate ? predicate(f) : reachable;
+        let disabledReason: string | null = null;
+        if (!reachable) disabledReason = "próximamente";
+        else if (!allowed) disabledReason = "no comparable con X";
+        return { field: f, disabledReason };
+      },
+    );
+  }, [filter, predicate]);
 
-  // R2 audit W5 — bind Escape so keyboard users have an exit.
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Escape") {
       e.stopPropagation();
@@ -66,7 +90,7 @@ export function FieldPicker({
             {axisLabel}
           </span>
           <span className="flex-1 font-mono text-xs text-slate-500">
-            Elige un campo del catálogo
+            {contextHint ?? "Elige un campo del catálogo"}
           </span>
           <button
             type="button"
@@ -106,28 +130,53 @@ export function FieldPicker({
             <Command.Empty className="px-2 py-4 font-mono text-xs text-slate-500">
               Sin resultados.
             </Command.Empty>
-            {filtered.map((f) => (
+            {items.map(({ field: f, disabledReason }) => (
               <Command.Item
                 key={f.id}
                 value={`${f.id} ${f.label} ${f.description}`}
+                disabled={disabledReason !== null}
                 onSelect={() => {
+                  if (disabledReason !== null) return;
                   onPick(f);
                   onClose();
                 }}
-                className="cursor-pointer rounded px-2 py-1.5 font-mono text-xs text-slate-200 aria-selected:bg-slate-800"
+                className={`rounded px-2 py-1.5 font-mono text-xs aria-selected:bg-slate-800 ${
+                  disabledReason !== null
+                    ? "cursor-not-allowed text-slate-600"
+                    : "cursor-pointer text-slate-200"
+                }`}
+                data-testid={`field-${f.id}`}
+                data-disabled={disabledReason !== null ? "true" : undefined}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate">{f.label}</span>
                   <span className="flex shrink-0 gap-1 font-mono text-[9px]">
+                    {disabledReason !== null && (
+                      <span className="rounded bg-amber-900/40 px-1 text-amber-400">
+                        {disabledReason}
+                      </span>
+                    )}
                     <span className="rounded bg-slate-800 px-1 text-slate-400">
                       {f.source}
                     </span>
-                    <span className="rounded bg-slate-800 px-1 text-cyan-400">
+                    <span
+                      className={`rounded bg-slate-800 px-1 ${
+                        disabledReason !== null
+                          ? "text-slate-600"
+                          : "text-cyan-400"
+                      }`}
+                    >
                       {f.grain}
                     </span>
                   </span>
                 </div>
-                <div className="mt-0.5 text-[10px] text-slate-500">
+                <div
+                  className={`mt-0.5 text-[10px] ${
+                    disabledReason !== null
+                      ? "text-slate-700"
+                      : "text-slate-500"
+                  }`}
+                >
                   {f.description}
                 </div>
               </Command.Item>
