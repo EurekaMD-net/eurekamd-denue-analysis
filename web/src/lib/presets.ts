@@ -7,12 +7,12 @@
  * if the X anchor's grain has columns for all of Y (and Z if set).
  *
  * Invariant (asserted in presets.test.ts): for every preset
- *   xField.xEligible === true
+ *   xField.columns is non-empty (i.e. reachable)
  *   yField.columns[xField.grain] is defined
  *   zField (if present) → zField.columns[xField.grain] is defined
  */
 
-import { findField } from "./fields";
+import { findField, isFieldReachable } from "./fields";
 
 export interface LocustPreset {
   id: string;
@@ -105,7 +105,8 @@ export function validatePreset(p: LocustPreset): string[] {
   if (!x) errors.push(`X "${p.x}" missing from catalog`);
   if (!y) errors.push(`Y "${p.y}" missing from catalog`);
   if (p.z && !z) errors.push(`Z "${p.z}" missing from catalog`);
-  if (x && !x.xEligible) errors.push(`X "${p.x}" is not xEligible`);
+  if (x && !isFieldReachable(x))
+    errors.push(`X "${p.x}" is unreachable (empty columns map)`);
   if (x && y && y.columns[x.grain] === undefined) {
     errors.push(`Y "${p.y}" has no column at grain "${x.grain}"`);
   }

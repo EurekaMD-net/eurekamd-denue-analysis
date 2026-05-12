@@ -10,6 +10,7 @@ import {
   findField,
   GRAIN_ENDPOINTS,
   isFieldGraphableAt,
+  isFieldReachable,
   type FieldDef,
 } from "../lib/fields";
 import { LOCUST_PRESETS, type LocustPreset } from "../lib/presets";
@@ -126,10 +127,13 @@ export function LocustMode() {
     }
   }, [pickerOpen, xAxis.field, yAxis.field]);
 
-  // Picker predicate per slot. X gates by xEligible. Y/Z gate by
-  // "graphable at X's grain" plus de-dupe against already-picked slots.
+  // Picker predicate per slot.
+  // X: any reachable field (operator directive 2026-05-12 — X drives the
+  //    UX, not a restricted anchor set).
+  // Y/Z: filtered to fields graphable at X.grain, deduped against
+  //    already-picked slots.
   const pickerPredicate = useMemo(() => {
-    if (pickerOpen === "x") return (f: FieldDef) => f.xEligible;
+    if (pickerOpen === "x") return (f: FieldDef) => isFieldReachable(f);
     if (pickerOpen === "y") {
       const xg = xAxis.field?.grain;
       if (!xg) return () => false; // shouldn't open Y picker w/o X
@@ -324,7 +328,8 @@ function pickerContextHint(
   slot: AxisSlot | null,
   xField: FieldDef | null,
 ): string | null {
-  if (slot === "x") return "Elige un campo categórico que ancle la gráfica.";
+  if (slot === "x")
+    return "Elige cualquier campo. Y y Z se filtrarán automáticamente.";
   if (slot === "y" || slot === "z") {
     if (!xField) return null;
     return `Filtrado a campos comparables con "${xField.label}" (grano ${xField.grain}).`;

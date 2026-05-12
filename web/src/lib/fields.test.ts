@@ -110,29 +110,41 @@ describe("reachability (X-key invariant)", () => {
     }
   });
 
-  it("every xEligible field has a column at its own grain (self-key)", () => {
+  it("every reachable field has a column at its own grain (self-key)", () => {
+    // Operator directive 2026-05-12: every reachable field can anchor as X.
+    // The implication: when the user picks field F as X, the endpoint
+    // F.grain dispatches to must contain a column for F itself (or the
+    // chart x-axis is unlabelable).
     for (const f of FIELD_CATALOG) {
-      if (f.xEligible) {
+      if (isFieldReachable(f)) {
         expect(
           f.columns[f.grain],
-          `xEligible field "${f.id}" missing self-grain column`,
+          `field "${f.id}" reachable but missing self-grain column`,
         ).toBeDefined();
-        // S1 audit fix: also verify the grain has an endpoint registered.
-        // Otherwise users could pick the anchor and the chart would just
-        // silently render "Sin datos" without explanation.
         expect(
           GRAIN_ENDPOINTS[f.grain],
-          `xEligible field "${f.id}" grain "${f.grain}" has no GRAIN_ENDPOINTS entry`,
+          `field "${f.id}" grain "${f.grain}" has no GRAIN_ENDPOINTS entry`,
         ).toBeDefined();
       }
     }
   });
 
-  it("xEligible fields are categorical (no numeric anchors)", () => {
+  it("permissive-X invariant: every reachable field anchors a non-empty Y set", () => {
+    // Operator directive 2026-05-12: X picker is permissive — every
+    // reachable field is an anchor. The implication: for each anchor,
+    // there must be at least one OTHER reachable field with a column at
+    // X.grain, otherwise picking it strands the user (no Y option). The
+    // self-key column is excluded since the user wouldn't pick the same
+    // field as both X and Y.
     for (const f of FIELD_CATALOG) {
-      if (f.xEligible) {
-        expect(isCategorical(f.type)).toBe(true);
-      }
+      if (!isFieldReachable(f)) continue;
+      const peers = FIELD_CATALOG.filter(
+        (g) => g.id !== f.id && isFieldGraphableAt(g, f.grain),
+      );
+      expect(
+        peers.length,
+        `anchor "${f.id}" (grain ${f.grain}) has no Y-eligible peer`,
+      ).toBeGreaterThan(0);
     }
   });
 

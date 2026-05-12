@@ -40,15 +40,15 @@ describe("validatePreset", () => {
     expect(errors.some((e) => e.includes('X "no.such.field"'))).toBe(true);
   });
 
-  it("rejects non-xEligible X", () => {
+  it("rejects unreachable X (empty columns map)", () => {
     const errors = validatePreset({
       id: "bad",
       title: "",
       description: "",
-      x: "denue.total_establecimientos", // not xEligible
+      x: "sesnsp.homicidio_doloso", // columns: {} — no endpoint
       y: "coneval.pobreza_pct",
     });
-    expect(errors.some((e) => e.includes("not xEligible"))).toBe(true);
+    expect(errors.some((e) => e.includes("unreachable"))).toBe(true);
   });
 
   it("rejects Y with no column at X's grain", () => {

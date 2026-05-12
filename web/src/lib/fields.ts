@@ -8,15 +8,13 @@
  *     as X.
  *   - Field type (categorical|numeric_continuous|numeric_count|...) which
  *     drives auto-chart-type derivation.
- *   - `xEligible`: may this field anchor a chart as the X axis? Only fields
- *     that produce a category set (categorical_nominal or categorical_ordinal)
- *     and have at least one column on a Locust-reachable endpoint qualify.
- *     Temporal anchors are reserved for a future "time series" mode; today
- *     they are not X-eligible.
  *   - `columns`: per-grain column name on the corresponding endpoint
- *     payload. Y/Z compatibility with a chosen X is decided by whether
- *     this map has an entry for `xAxis.field.grain`. An empty map means
- *     the field is not yet reachable from any Locust endpoint.
+ *     payload. **Any field with a non-empty columns map is X-pickable**
+ *     — operator directive 2026-05-12: X is the driver of the UX, not a
+ *     restricted "anchor" set. Y/Z compatibility with a chosen X is
+ *     decided by whether this map has an entry for `xAxis.field.grain`.
+ *     An empty map means the field is not yet reachable from any Locust
+ *     endpoint and renders disabled ("próximamente") in the picker.
  *
  * Reachable endpoints, by grain, are declared in `GRAIN_ENDPOINTS` below.
  * Adding a new endpoint requires:
@@ -56,11 +54,6 @@ export interface FieldDef {
   grain: FieldGrain;
   type: FieldType;
   description: string;
-  /**
-   * X-axis eligibility. Set to true for category-producing anchor fields
-   * (entidad name, municipio name, SCIAN sector). Y/Z slots ignore this.
-   */
-  xEligible: boolean;
   /**
    * Per-grain payload column name. Y/Z fields are graphable against an X
    * field iff `columns[xField.grain]` is defined.
@@ -141,7 +134,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Conteo de unidades económicas DENUE.",
-    xEligible: false,
     // /national-treemap: establecimientos per estado.
     // /municipios: establecimientos per muni.
     // /top-sectors: 'count' per SCIAN sector.
@@ -158,7 +150,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "categorical_nominal",
     description: "Nombre de la entidad federativa (32 estados).",
-    xEligible: true,
     columns: { estado: "nombre" },
   },
   {
@@ -168,7 +159,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "categorical_nominal",
     description: "Nombre del municipio dentro de la entidad seleccionada.",
-    xEligible: true,
     columns: { muni: "municipio" },
   },
   {
@@ -178,7 +168,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "nacional",
     type: "categorical_nominal",
     description: "Sector SCIAN 2-dígito (etiqueta legible).",
-    xEligible: true,
     columns: { nacional: "name" },
   },
 
@@ -190,7 +179,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Población total 2020 INEGI (en /municipios).",
-    xEligible: false,
     columns: { muni: "poblacion" },
   },
   {
@@ -200,7 +188,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_count",
     description: "Población a nivel AGEB urbana 2020.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -210,7 +197,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Población económicamente activa / pob ≥15 años.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -220,7 +206,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Grado promedio de escolaridad ≥15 años.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -230,7 +215,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_pct",
     description: "Población sin derechohabiencia / pobtot, AGEB.",
-    xEligible: false,
     columns: {},
   },
 
@@ -242,7 +226,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza (CONEVAL 2020).",
-    xEligible: false,
     // /national-treemap: pobreza_pct_promedio (ponderado por población).
     // /municipios: pobreza_pct directo.
     columns: { estado: "pobreza_pct_promedio", muni: "pobreza_pct" },
@@ -254,7 +237,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza extrema (CONEVAL 2020).",
-    xEligible: false,
     columns: {},
   },
   {
@@ -264,7 +246,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Carencia por acceso a servicios de salud.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -274,7 +255,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "IRS 2020 (continuo, mayor = más rezago).",
-    xEligible: false,
     columns: { muni: "irs_indice" },
   },
   {
@@ -284,7 +264,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "categorical_ordinal",
     description: "Muy bajo / Bajo / Medio / Alto / Muy alto.",
-    xEligible: false,
     // /national-treemap: modal_irs_grado (moda por estado).
     // /municipios: irs_grado directo.
     columns: { estado: "modal_irs_grado", muni: "irs_grado" },
@@ -297,7 +276,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "categorical_ordinal",
     description: "Grado de rezago social a nivel AGEB urbana.",
-    xEligible: false,
     columns: {},
     ordinalOrder: IRS_GRADO_ORDER,
   },
@@ -310,7 +288,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos de homicidio doloso reportados, promedio anual.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -320,7 +297,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Total de carpetas SESNSP por municipio, promedio anual.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -330,7 +306,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "temporal",
     description: "Año 2015–2026.",
-    xEligible: false,
     columns: {},
   },
 
@@ -342,7 +317,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Defunciones registradas en el municipio (EDR 2024).",
-    xEligible: false,
     columns: {},
   },
   {
@@ -352,7 +326,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Defunciones por enfermedades del sistema circulatorio.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -362,7 +335,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Defunciones por neoplasias.",
-    xEligible: false,
     columns: {},
   },
 
@@ -374,7 +346,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Establecimientos de salud DGIS en operación.",
-    xEligible: false,
     columns: { muni: "unidades_clues" },
   },
 
@@ -386,7 +357,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos diabetes tipo 2 / promedio mensual activos SUS.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -396,7 +366,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos hipertensión / promedio mensual activos SUS.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -406,7 +375,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos obesidad / promedio mensual activos SUS.",
-    xEligible: false,
     columns: {},
   },
 
@@ -418,7 +386,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias con licencia sanitaria vigente COFEPRIS.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -428,7 +395,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias autorizadas a vender estupefacientes.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -438,7 +404,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_count",
     description: "Farmacias con controlados a nivel AGEB.",
-    xEligible: false,
     columns: {},
   },
 
@@ -450,7 +415,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Unidades económicas Censo Económico 2024.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -460,7 +424,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Personal ocupado total (Censo Económico 2024).",
-    xEligible: false,
     columns: {},
   },
   {
@@ -470,7 +433,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Valor agregado censal bruto (CE 2024).",
-    xEligible: false,
     columns: {},
   },
 
@@ -482,7 +444,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_continuous",
     description: "Ingreso mediano estatal ponderado, ENIGH 2024.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -492,7 +453,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "% gasto en alimentos / gasto total (ENIGH).",
-    xEligible: false,
     columns: {},
   },
 
@@ -504,7 +464,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de informalidad laboral ENOE 2025.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -514,7 +473,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de desocupación ENOE 2025.",
-    xEligible: false,
     columns: {},
   },
 
@@ -526,7 +484,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Tránsito diario promedio anual (SICT).",
-    xEligible: false,
     columns: {},
   },
 
@@ -538,7 +495,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Monto subsidiado total vivienda 2025.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -548,7 +504,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Acciones de financiamiento SEDATU.",
-    xEligible: false,
     columns: {},
   },
 
@@ -560,7 +515,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Monto crédito comercial total 2025.",
-    xEligible: false,
     columns: {},
   },
   {
@@ -570,7 +524,6 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% acciones a mujeres (crédito comercial CNBV).",
-    xEligible: false,
     columns: {},
   },
 ];
