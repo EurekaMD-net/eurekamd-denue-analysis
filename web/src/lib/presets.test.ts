@@ -40,29 +40,25 @@ describe("validatePreset", () => {
     expect(errors.some((e) => e.includes('X "no.such.field"'))).toBe(true);
   });
 
-  it("rejects unreachable X (empty columns map)", () => {
+  it("rejects unreachable X (empty endpoints map)", () => {
     const errors = validatePreset({
       id: "bad",
       title: "",
       description: "",
-      x: "sesnsp.homicidio_doloso", // columns: {} — no endpoint
+      x: "sinba.casos_dm2_promedio", // endpoints: {} — no endpoint
       y: "coneval.pobreza_pct",
     });
     expect(errors.some((e) => e.includes("unreachable"))).toBe(true);
   });
 
-  it("rejects Y with no column at X's grain", () => {
+  it("rejects Y that shares no endpoint with X", () => {
     const errors = validatePreset({
       id: "bad",
       title: "",
       description: "",
-      x: "denue.entidad_nombre", // estado
-      y: "clues.total", // only has muni column
+      x: "denue.entidad_nombre", // endpoint: national-treemap
+      y: "clues.total", // endpoint: municipios — no overlap
     });
-    expect(
-      errors.some((e) =>
-        e.includes('Y "clues.total" has no column at grain "estado"'),
-      ),
-    ).toBe(true);
+    expect(errors.some((e) => e.includes("shares no endpoint"))).toBe(true);
   });
 });

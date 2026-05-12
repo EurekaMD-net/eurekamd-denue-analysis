@@ -12,7 +12,7 @@
  *   zField (if present) → zField.columns[xField.grain] is defined
  */
 
-import { findField, isFieldReachable } from "./fields";
+import { findField, getActiveEndpoint, isFieldReachable } from "./fields";
 
 export interface LocustPreset {
   id: string;
@@ -86,6 +86,30 @@ export const LOCUST_PRESETS: LocustPreset[] = [
     needsEntidad: true,
     exampleEntidad: "09",
   },
+
+  // Risk / mortality (via /risk-summary, /mortality-summary).
+  {
+    id: "muni_homicidios_x_poblacion",
+    title: "Municipios: Homicidios × Población",
+    description:
+      "Homicidios dolosos por municipio contra población — densidad de violencia.",
+    x: "denue.municipio_nombre",
+    y: "sesnsp.homicidio_doloso",
+    z: "censo.pobtot",
+    needsEntidad: true,
+    exampleEntidad: "09",
+  },
+  {
+    id: "muni_mortalidad_x_poblacion",
+    title: "Municipios: Defunciones × Población",
+    description:
+      "Defunciones totales (EDR) contra población — base para tasa cruda.",
+    x: "denue.municipio_nombre",
+    y: "edr.total_defunciones",
+    z: "censo.pobtot",
+    needsEntidad: true,
+    exampleEntidad: "09",
+  },
 ];
 
 /**
@@ -106,12 +130,20 @@ export function validatePreset(p: LocustPreset): string[] {
   if (!y) errors.push(`Y "${p.y}" missing from catalog`);
   if (p.z && !z) errors.push(`Z "${p.z}" missing from catalog`);
   if (x && !isFieldReachable(x))
-    errors.push(`X "${p.x}" is unreachable (empty columns map)`);
-  if (x && y && y.columns[x.grain] === undefined) {
-    errors.push(`Y "${p.y}" has no column at grain "${x.grain}"`);
+    errors.push(`X "${p.x}" is unreachable (empty endpoints map)`);
+  // Resolve the endpoint considering all picked fields so multi-endpoint
+  // X (e.g. denue.municipio_nombre on /municipios + /risk-summary +
+  // /mortality-summary) can anchor with Y on a different endpoint than
+  // X's primary.
+  const activeEp = x ? getActiveEndpoint(x, y, z) : null;
+  if (x && y && activeEp === null) {
+    errors.push(`Y "${p.y}" shares no endpoint with X "${p.x}" (cannot graph)`);
   }
-  if (x && z && z.columns[x.grain] === undefined) {
-    errors.push(`Z "${p.z}" has no column at grain "${x.grain}"`);
+  if (x && activeEp && y && y.endpoints[activeEp] === undefined) {
+    errors.push(`Y "${p.y}" has no column on endpoint "${activeEp}"`);
+  }
+  if (x && activeEp && z && z.endpoints[activeEp] === undefined) {
+    errors.push(`Z "${p.z}" has no column on endpoint "${activeEp}"`);
   }
   return errors;
 }

@@ -1,15 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  ENDPOINTS,
   FIELD_CATALOG,
   FIELD_SOURCES,
-  GRAIN_ENDPOINTS,
   deriveChartType,
+  fieldSharesAnyEndpoint,
   findField,
+  getActiveEndpoint,
   isCategorical,
-  isFieldGraphableAt,
+  isFieldOnEndpoint,
   isFieldReachable,
   isNumeric,
-  type FieldGrain,
+  type EndpointId,
 } from "./fields";
 
 describe("FIELD_CATALOG", () => {
@@ -62,68 +64,57 @@ describe("deriveChartType", () => {
 
 // Hardcoded list of currently-served analytics endpoints (paths only —
 // query strings stripped). Sourced from src/api/server.ts. If the backend
-// adds a new Locust-relevant endpoint, append it here AND in
-// GRAIN_ENDPOINTS below before wiring fields.
+// adds a new Locust-relevant endpoint, append it here AND add an entry to
+// ENDPOINTS in fields.ts before wiring fields.
 const KNOWN_ANALYTICS_PATHS = new Set([
   "/analytics/national-treemap",
   "/analytics/municipios",
   "/analytics/top-sectors",
+  "/analytics/risk-summary",
+  "/analytics/mortality-summary",
 ]);
 
-describe("reachability (X-key invariant)", () => {
-  it("every reachable field has at least one column", () => {
+describe("reachability (endpoint-keyed)", () => {
+  it("every reachable field has at least one endpoint", () => {
     for (const f of FIELD_CATALOG) {
       if (isFieldReachable(f)) {
-        expect(Object.keys(f.columns).length).toBeGreaterThan(0);
+        expect(Object.keys(f.endpoints).length).toBeGreaterThan(0);
       } else {
-        expect(Object.keys(f.columns).length).toBe(0);
+        expect(Object.keys(f.endpoints).length).toBe(0);
       }
     }
   });
 
-  it("every column-grain key is one of the FieldGrain literals", () => {
-    const validGrains: FieldGrain[] = ["muni", "ageb", "estado", "nacional"];
+  it("every endpoint key is one of the EndpointId literals", () => {
+    const validEndpoints = Object.keys(ENDPOINTS) as EndpointId[];
     for (const f of FIELD_CATALOG) {
-      for (const grain of Object.keys(f.columns)) {
-        expect(validGrains).toContain(grain as FieldGrain);
+      for (const ep of Object.keys(f.endpoints)) {
+        expect(validEndpoints).toContain(ep as EndpointId);
       }
     }
   });
 
-  it("every wired column-grain has an endpoint in GRAIN_ENDPOINTS", () => {
-    for (const f of FIELD_CATALOG) {
-      for (const grain of Object.keys(f.columns) as FieldGrain[]) {
-        expect(GRAIN_ENDPOINTS[grain]).toBeDefined();
-      }
-    }
-  });
-
-  it("GRAIN_ENDPOINTS only references known backend paths", () => {
-    for (const ep of Object.values(GRAIN_ENDPOINTS)) {
-      if (!ep) continue;
+  it("ENDPOINTS only references known backend paths", () => {
+    for (const ep of Object.values(ENDPOINTS)) {
       // Resolve with a sample entidad ('09' = CDMX) so paths that require
       // it actually produce a URL.
       const sample = ep.path("09");
-      expect(sample, `endpoint.path("09") returned null`).not.toBeNull();
+      expect(
+        sample,
+        `endpoint "${ep.id}" path("09") returned null`,
+      ).not.toBeNull();
       const pathOnly = sample!.split("?")[0]!;
       expect(KNOWN_ANALYTICS_PATHS).toContain(pathOnly);
     }
   });
 
-  it("every reachable field has a column at its own grain (self-key)", () => {
-    // Operator directive 2026-05-12: every reachable field can anchor as X.
-    // The implication: when the user picks field F as X, the endpoint
-    // F.grain dispatches to must contain a column for F itself (or the
-    // chart x-axis is unlabelable).
+  it("every reachable field has primaryEndpoint (if set) in its endpoints map", () => {
     for (const f of FIELD_CATALOG) {
-      if (isFieldReachable(f)) {
+      if (!isFieldReachable(f)) continue;
+      if (f.primaryEndpoint) {
         expect(
-          f.columns[f.grain],
-          `field "${f.id}" reachable but missing self-grain column`,
-        ).toBeDefined();
-        expect(
-          GRAIN_ENDPOINTS[f.grain],
-          `field "${f.id}" grain "${f.grain}" has no GRAIN_ENDPOINTS entry`,
+          f.endpoints[f.primaryEndpoint],
+          `field "${f.id}" primaryEndpoint "${f.primaryEndpoint}" not in endpoints map`,
         ).toBeDefined();
       }
     }
@@ -132,18 +123,16 @@ describe("reachability (X-key invariant)", () => {
   it("permissive-X invariant: every reachable field anchors a non-empty Y set", () => {
     // Operator directive 2026-05-12: X picker is permissive — every
     // reachable field is an anchor. The implication: for each anchor,
-    // there must be at least one OTHER reachable field with a column at
-    // X.grain, otherwise picking it strands the user (no Y option). The
-    // self-key column is excluded since the user wouldn't pick the same
-    // field as both X and Y.
+    // there must be at least one OTHER reachable field on the SAME
+    // endpoint, otherwise picking it strands the user with empty Y.
     for (const f of FIELD_CATALOG) {
       if (!isFieldReachable(f)) continue;
       const peers = FIELD_CATALOG.filter(
-        (g) => g.id !== f.id && isFieldGraphableAt(g, f.grain),
+        (g) => g.id !== f.id && fieldSharesAnyEndpoint(f, g),
       );
       expect(
         peers.length,
-        `anchor "${f.id}" (grain ${f.grain}) has no Y-eligible peer`,
+        `anchor "${f.id}" has no Y-eligible peer (no other field shares its endpoints)`,
       ).toBeGreaterThan(0);
     }
   });
@@ -161,23 +150,93 @@ describe("reachability (X-key invariant)", () => {
   });
 });
 
-describe("isFieldGraphableAt", () => {
-  it("returns true when field has column for the given grain", () => {
+describe("isFieldOnEndpoint", () => {
+  it("returns true when field has a column on the endpoint", () => {
     const estab = findField("denue.total_establecimientos")!;
-    expect(isFieldGraphableAt(estab, "estado")).toBe(true);
-    expect(isFieldGraphableAt(estab, "muni")).toBe(true);
-    expect(isFieldGraphableAt(estab, "nacional")).toBe(true);
+    expect(isFieldOnEndpoint(estab, "municipios")).toBe(true);
+    expect(isFieldOnEndpoint(estab, "national-treemap")).toBe(true);
+    expect(isFieldOnEndpoint(estab, "top-sectors")).toBe(true);
   });
 
-  it("returns false when field has no column for that grain", () => {
+  it("returns false when field has no column on that endpoint", () => {
     const estab = findField("denue.total_establecimientos")!;
-    expect(isFieldGraphableAt(estab, "ageb")).toBe(false);
+    expect(isFieldOnEndpoint(estab, "risk-summary")).toBe(false);
   });
 
-  it("returns false for fields with empty columns map", () => {
-    const orphan = findField("sesnsp.homicidio_doloso")!;
-    expect(orphan.columns).toEqual({});
-    expect(isFieldGraphableAt(orphan, "muni")).toBe(false);
+  it("returns false for fields with empty endpoints map", () => {
+    const orphan = findField("sinba.casos_dm2_promedio")!;
+    expect(orphan.endpoints).toEqual({});
+    expect(isFieldOnEndpoint(orphan, "municipios")).toBe(false);
+  });
+});
+
+describe("getActiveEndpoint (X+Y+Z resolution)", () => {
+  it("returns X.primaryEndpoint when X alone and primary is set", () => {
+    const x = findField("denue.total_establecimientos")!;
+    expect(getActiveEndpoint(x)).toBe("municipios");
+  });
+
+  it("returns first endpoint when X has no primary", () => {
+    const x = findField("denue.entidad_nombre")!;
+    expect(getActiveEndpoint(x)).toBe("national-treemap");
+  });
+
+  it("returns null for unreachable X", () => {
+    const x = findField("sinba.casos_dm2_promedio")!;
+    expect(getActiveEndpoint(x)).toBeNull();
+  });
+
+  it("resolves to endpoint where BOTH X and Y have columns", () => {
+    // X = municipio_nombre (on municipios, risk-summary, mortality-summary)
+    // Y = sesnsp.homicidio_doloso (on risk-summary only)
+    // → resolves to risk-summary, not municipios.
+    const x = findField("denue.municipio_nombre")!;
+    const y = findField("sesnsp.homicidio_doloso")!;
+    expect(getActiveEndpoint(x, y)).toBe("risk-summary");
+  });
+
+  it("prefers X.primaryEndpoint when Y is also on it", () => {
+    // X = municipio_nombre (primary: municipios)
+    // Y = censo.pobtot (on municipios, risk-summary, mortality-summary)
+    // → resolves to municipios (X's primary wins among multiple intersections).
+    const x = findField("denue.municipio_nombre")!;
+    const y = findField("censo.pobtot")!;
+    expect(getActiveEndpoint(x, y)).toBe("municipios");
+  });
+
+  it("returns null when X and Y have no shared endpoint", () => {
+    const x = findField("denue.entidad_nombre")!;
+    const y = findField("sesnsp.homicidio_doloso")!;
+    expect(getActiveEndpoint(x, y)).toBeNull();
+  });
+
+  it("requires Z to share the endpoint too when provided", () => {
+    const x = findField("denue.municipio_nombre")!;
+    const y = findField("censo.pobtot")!;
+    const z = findField("sesnsp.homicidio_doloso")!;
+    // All three must be on same endpoint. Y is on municipios+risk+mortality;
+    // Z is only on risk-summary; X is on all 3. → risk-summary.
+    expect(getActiveEndpoint(x, y, z)).toBe("risk-summary");
+  });
+});
+
+describe("fieldSharesAnyEndpoint", () => {
+  it("true when fields share at least one endpoint", () => {
+    const x = findField("denue.municipio_nombre")!;
+    const y = findField("sesnsp.homicidio_doloso")!;
+    expect(fieldSharesAnyEndpoint(x, y)).toBe(true);
+  });
+
+  it("false when fields are on disjoint endpoints", () => {
+    const x = findField("denue.entidad_nombre")!; // national-treemap
+    const y = findField("sesnsp.homicidio_doloso")!; // risk-summary
+    expect(fieldSharesAnyEndpoint(x, y)).toBe(false);
+  });
+
+  it("false when one field is unreachable", () => {
+    const x = findField("denue.municipio_nombre")!;
+    const y = findField("sinba.casos_dm2_promedio")!;
+    expect(fieldSharesAnyEndpoint(x, y)).toBe(false);
   });
 });
 

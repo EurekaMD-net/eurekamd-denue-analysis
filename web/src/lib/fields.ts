@@ -1,28 +1,32 @@
 /**
  * Field catalog for Locust mode's axis pickers.
  *
- * Each entry binds a stable id (used in URL state) to:
- *   - Data source (one of 14 layers; drives the source-facet chips)
- *   - Preferred grain (muni | ageb | estado | nacional) — drives the picker
- *     grain-section header and is the default join key when the field acts
- *     as X.
- *   - Field type (categorical|numeric_continuous|numeric_count|...) which
- *     drives auto-chart-type derivation.
- *   - `columns`: per-grain column name on the corresponding endpoint
- *     payload. **Any field with a non-empty columns map is X-pickable**
- *     — operator directive 2026-05-12: X is the driver of the UX, not a
- *     restricted "anchor" set. Y/Z compatibility with a chosen X is
- *     decided by whether this map has an entry for `xAxis.field.grain`.
- *     An empty map means the field is not yet reachable from any Locust
- *     endpoint and renders disabled ("próximamente") in the picker.
+ * Architecture (revised 2026-05-12, per-field endpoint model):
  *
- * Reachable endpoints, by grain, are declared in `GRAIN_ENDPOINTS` below.
- * Adding a new endpoint requires:
- *   1. A row in GRAIN_ENDPOINTS for its grain.
- *   2. Populating `columns[<grain>]` on every FieldDef that endpoint serves.
+ *   - Each backend endpoint that returns multi-row data is registered in
+ *     `ENDPOINTS` with its path, rowsKey envelope, grain (display label),
+ *     and entidad-requirement.
+ *   - Each FieldDef declares `endpoints: Partial<Record<EndpointId,string>>` —
+ *     for each endpoint that serves the field, the column name on the
+ *     payload rows. A field with an empty `endpoints` map is unreachable.
+ *   - Locust dispatches the fetch using X's chosen endpoint
+ *     (`field.primaryEndpoint ?? first key of endpoints`). Y/Z gating is
+ *     decided by "Y has a column on X's endpoint" — not by grain. Two
+ *     muni-grain endpoints (`/municipios` and `/risk-summary`) return
+ *     DIFFERENT column sets, so the gate must be endpoint-keyed.
+ *
+ * Why this is better than the prior grain-keyed model:
+ *   - Adding a backend endpoint = adding a row to ENDPOINTS + populating
+ *     one or more `endpoints[id]` entries. No central dispatcher change.
+ *   - Y/Z compatibility is exact (same row source), not heuristic.
+ *   - Multi-source columns (e.g. `municipio` exists on /municipios, /risk-
+ *     summary, /mortality-summary) are wired to all three endpoints, so
+ *     picking sesnsp.homicidio_doloso as X also gives denue.municipio_nombre
+ *     as a Y option for free.
  */
 
 export type FieldGrain = "muni" | "ageb" | "estado" | "nacional";
+
 export type FieldSource =
   | "DENUE"
   | "Censo"
@@ -47,39 +51,114 @@ export type FieldType =
   | "numeric_pct"
   | "temporal";
 
+/**
+ * Stable identifiers for the backend endpoints Locust can dispatch to.
+ * Adding a new endpoint requires:
+ *   1. New EndpointId literal here.
+ *   2. New entry in ENDPOINTS below.
+ *   3. Populating `endpoints[<new-id>]` on every FieldDef the endpoint
+ *      serves (and verifying the column name matches the response shape).
+ */
+export type EndpointId =
+  | "national-treemap"
+  | "municipios"
+  | "top-sectors"
+  | "risk-summary"
+  | "mortality-summary";
+
+export interface EndpointDef {
+  id: EndpointId;
+  /**
+   * Resolves the full URL given the operator's selected `entidad` clave.
+   * Returns null when the endpoint requires an entidad and none is set.
+   */
+  path: (entidad: string | null) => string | null;
+  /** Key on the JSON envelope where the row array lives. */
+  rowsKey: string;
+  /** Surfaces the "selecciona una entidad" hint pre-fetch. */
+  needsEntidad: boolean;
+  /** Display grain — drives the picker chip label. */
+  grain: FieldGrain;
+  /** Human-friendly label for the picker context hint. */
+  label: string;
+}
+
+export const ENDPOINTS: Record<EndpointId, EndpointDef> = {
+  "national-treemap": {
+    id: "national-treemap",
+    path: () => "/analytics/national-treemap",
+    rowsKey: "entidades",
+    needsEntidad: false,
+    grain: "estado",
+    label: "Estados (DENUE national treemap)",
+  },
+  municipios: {
+    id: "municipios",
+    path: (entidad) =>
+      entidad ? `/analytics/municipios?entidad=${entidad}` : null,
+    rowsKey: "municipios",
+    needsEntidad: true,
+    grain: "muni",
+    label: "Municipios (DENUE+CONEVAL+CLUES per muni)",
+  },
+  "top-sectors": {
+    id: "top-sectors",
+    path: (entidad) =>
+      entidad ? `/analytics/top-sectors?entidad=${entidad}` : null,
+    rowsKey: "sectors",
+    needsEntidad: true,
+    grain: "nacional",
+    label: "Sectores SCIAN (top por entidad)",
+  },
+  "risk-summary": {
+    id: "risk-summary",
+    path: (entidad) =>
+      entidad ? `/analytics/risk-summary?entidad=${entidad}` : null,
+    rowsKey: "municipios",
+    needsEntidad: true,
+    grain: "muni",
+    label: "Riesgo SESNSP (delitos por municipio)",
+  },
+  "mortality-summary": {
+    id: "mortality-summary",
+    path: (entidad) =>
+      entidad ? `/analytics/mortality-summary?entidad=${entidad}` : null,
+    rowsKey: "municipios",
+    needsEntidad: true,
+    grain: "muni",
+    label: "Mortalidad EDR (defunciones por municipio)",
+  },
+};
+
 export interface FieldDef {
   id: string;
   label: string;
   source: FieldSource;
+  /** Canonical/display grain — drives picker chip + grouping. */
   grain: FieldGrain;
   type: FieldType;
   description: string;
   /**
-   * Per-grain payload column name. Y/Z fields are graphable against an X
-   * field iff `columns[xField.grain]` is defined.
-   *
-   * Empty object ({}) = field is in the catalog but no Locust endpoint
-   * currently serves it. Surfaced in the picker as a disabled
-   * "próximamente" row so users see what's coming.
+   * Per-endpoint payload column name. Empty map = unreachable
+   * ("próximamente" in the picker, no endpoint serves it yet).
+   * Y/Z are joinable with X iff their `endpoints[X.activeEndpoint]` is defined.
    */
-  columns: Partial<Record<FieldGrain, string>>;
+  endpoints: Partial<Record<EndpointId, string>>;
   /**
-   * For `categorical_ordinal` fields only: the canonical order of category
-   * values, smallest → largest. Used by Locust's Z-colourant pipeline to
-   * map a categorical Z (e.g. "Muy bajo" / "Bajo" / "Medio" / "Alto" /
-   * "Muy alto") to a [0,1] gradient position.
-   *
-   * Values absent from this array (e.g. "sin_dato") render as the slate
-   * "no-data" colour. The order is stable across renders; do NOT derive
-   * it from observed payload order.
+   * Default endpoint when this field is picked as X. If absent, the
+   * dispatcher falls back to the first key in `endpoints`. Useful when a
+   * field appears on multiple endpoints and one is more informative as
+   * an anchor (e.g. denue.total_establecimientos → "municipios" by default,
+   * not "national-treemap").
+   */
+  primaryEndpoint?: EndpointId;
+  /**
+   * For `categorical_ordinal` fields only: canonical order of category
+   * values, smallest → largest. Drives the Z-colourant pipeline.
    */
   ordinalOrder?: readonly string[];
 }
 
-/**
- * IRS rezago social scale, smallest rezago → largest. Used by both
- * `coneval.irs_grado` (muni) and modal-IRS columns rolled up to estado.
- */
 export const IRS_GRADO_ORDER = [
   "Muy bajo",
   "Bajo",
@@ -87,43 +166,6 @@ export const IRS_GRADO_ORDER = [
   "Alto",
   "Muy alto",
 ] as const;
-
-/**
- * Endpoints Locust can dispatch to, keyed by the X-anchor's grain.
- *
- *   path(entidad): the URL to fetch. `entidad` is the currently selected
- *     2-digit clave from FilterControls; some endpoints require it.
- *     Returns null if the endpoint needs entidad and none is selected.
- *   rowsKey: where the row array lives in the JSON envelope.
- *   needsEntidad: surfaces an inline "selecciona una entidad" hint to the
- *     user before fetch is even attempted.
- */
-export interface GrainEndpoint {
-  path: (entidad: string | null) => string | null;
-  rowsKey: string;
-  needsEntidad: boolean;
-}
-
-export const GRAIN_ENDPOINTS: Partial<Record<FieldGrain, GrainEndpoint>> = {
-  estado: {
-    path: () => "/analytics/national-treemap",
-    rowsKey: "entidades",
-    needsEntidad: false,
-  },
-  muni: {
-    path: (entidad) =>
-      entidad ? `/analytics/municipios?entidad=${entidad}` : null,
-    rowsKey: "municipios",
-    needsEntidad: true,
-  },
-  nacional: {
-    path: (entidad) =>
-      entidad ? `/analytics/top-sectors?entidad=${entidad}` : null,
-    rowsKey: "sectors",
-    needsEntidad: true,
-  },
-  // ageb: no endpoint serves a multi-row ageb-grain chart yet.
-};
 
 export const FIELD_CATALOG: FieldDef[] = [
   // ----- DENUE ---------------------------------------------------------
@@ -134,14 +176,12 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Conteo de unidades económicas DENUE.",
-    // /national-treemap: establecimientos per estado.
-    // /municipios: establecimientos per muni.
-    // /top-sectors: 'count' per SCIAN sector.
-    columns: {
-      estado: "establecimientos",
-      muni: "establecimientos",
-      nacional: "count",
+    endpoints: {
+      municipios: "establecimientos",
+      "national-treemap": "establecimientos",
+      "top-sectors": "count",
     },
+    primaryEndpoint: "municipios",
   },
   {
     id: "denue.entidad_nombre",
@@ -150,7 +190,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "categorical_nominal",
     description: "Nombre de la entidad federativa (32 estados).",
-    columns: { estado: "nombre" },
+    endpoints: { "national-treemap": "nombre" },
   },
   {
     id: "denue.municipio_nombre",
@@ -158,8 +198,15 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "DENUE",
     grain: "muni",
     type: "categorical_nominal",
-    description: "Nombre del municipio dentro de la entidad seleccionada.",
-    columns: { muni: "municipio" },
+    description: "Nombre del municipio dentro de la entidad.",
+    // Same column name across all 3 muni-grain endpoints — gives the user
+    // muni labels regardless of which X they picked.
+    endpoints: {
+      municipios: "municipio",
+      "risk-summary": "municipio",
+      "mortality-summary": "municipio",
+    },
+    primaryEndpoint: "municipios",
   },
   {
     id: "denue.scian_sector",
@@ -168,7 +215,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "nacional",
     type: "categorical_nominal",
     description: "Sector SCIAN 2-dígito (etiqueta legible).",
-    columns: { nacional: "name" },
+    endpoints: { "top-sectors": "name" },
   },
 
   // ----- Censo 2020 -----------------------------------------------------
@@ -178,8 +225,13 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "Censo",
     grain: "muni",
     type: "numeric_count",
-    description: "Población total 2020 INEGI (en /municipios).",
-    columns: { muni: "poblacion" },
+    description: "Población total INEGI 2020. Disponible en endpoints muni.",
+    endpoints: {
+      municipios: "poblacion",
+      "risk-summary": "poblacion",
+      "mortality-summary": "poblacion",
+    },
+    primaryEndpoint: "municipios",
   },
   {
     id: "censo.pobtot_ageb",
@@ -188,7 +240,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_count",
     description: "Población a nivel AGEB urbana 2020.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "censo.pct_pea",
@@ -197,7 +249,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Población económicamente activa / pob ≥15 años.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "censo.graproes",
@@ -206,7 +258,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Grado promedio de escolaridad ≥15 años.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "censo.pct_sin_cobertura_salud",
@@ -215,7 +267,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_pct",
     description: "Población sin derechohabiencia / pobtot, AGEB.",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- CONEVAL -------------------------------------------------------
@@ -226,9 +278,13 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza (CONEVAL 2020).",
-    // /national-treemap: pobreza_pct_promedio (ponderado por población).
-    // /municipios: pobreza_pct directo.
-    columns: { estado: "pobreza_pct_promedio", muni: "pobreza_pct" },
+    // national-treemap exposes a population-weighted average per estado;
+    // municipios exposes the raw muni-level value.
+    endpoints: {
+      municipios: "pobreza_pct",
+      "national-treemap": "pobreza_pct_promedio",
+    },
+    primaryEndpoint: "municipios",
   },
   {
     id: "coneval.pobreza_extrema_pct",
@@ -237,7 +293,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza extrema (CONEVAL 2020).",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "coneval.carencia_acceso_salud_pct",
@@ -246,7 +302,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Carencia por acceso a servicios de salud.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "coneval.irs_indice",
@@ -255,7 +311,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "IRS 2020 (continuo, mayor = más rezago).",
-    columns: { muni: "irs_indice" },
+    endpoints: { municipios: "irs_indice" },
   },
   {
     id: "coneval.irs_grado",
@@ -264,9 +320,11 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "categorical_ordinal",
     description: "Muy bajo / Bajo / Medio / Alto / Muy alto.",
-    // /national-treemap: modal_irs_grado (moda por estado).
-    // /municipios: irs_grado directo.
-    columns: { estado: "modal_irs_grado", muni: "irs_grado" },
+    endpoints: {
+      municipios: "irs_grado",
+      "national-treemap": "modal_irs_grado",
+    },
+    primaryEndpoint: "municipios",
     ordinalOrder: IRS_GRADO_ORDER,
   },
   {
@@ -276,7 +334,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "categorical_ordinal",
     description: "Grado de rezago social a nivel AGEB urbana.",
-    columns: {},
+    endpoints: {},
     ordinalOrder: IRS_GRADO_ORDER,
   },
 
@@ -287,8 +345,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "numeric_count",
-    description: "Casos de homicidio doloso reportados, promedio anual.",
-    columns: {},
+    description: "Casos de homicidio doloso por municipio (año actual).",
+    endpoints: { "risk-summary": "homicidio_doloso" },
   },
   {
     id: "sesnsp.total_delitos",
@@ -296,8 +354,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "numeric_count",
-    description: "Total de carpetas SESNSP por municipio, promedio anual.",
-    columns: {},
+    description: "Total de carpetas SESNSP por municipio (año actual).",
+    endpoints: { "risk-summary": "total_delitos" },
   },
   {
     id: "sesnsp.ano",
@@ -305,8 +363,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "temporal",
-    description: "Año 2015–2026.",
-    columns: {},
+    description: "Año 2015–2026 (requiere /risk-trend, no servido aún).",
+    endpoints: {},
   },
 
   // ----- EDR mortalidad -------------------------------------------------
@@ -316,8 +374,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "EDR",
     grain: "muni",
     type: "numeric_count",
-    description: "Defunciones registradas en el municipio (EDR 2024).",
-    columns: {},
+    description: "Defunciones registradas en el municipio (EDR año actual).",
+    endpoints: { "mortality-summary": "total_defunciones" },
   },
   {
     id: "edr.def_circulatorio",
@@ -326,7 +384,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Defunciones por enfermedades del sistema circulatorio.",
-    columns: {},
+    endpoints: { "mortality-summary": "def_circulatorio" },
   },
   {
     id: "edr.def_neoplasias",
@@ -335,7 +393,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Defunciones por neoplasias.",
-    columns: {},
+    endpoints: { "mortality-summary": "def_neoplasias" },
   },
 
   // ----- CLUES ---------------------------------------------------------
@@ -346,7 +404,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Establecimientos de salud DGIS en operación.",
-    columns: { muni: "unidades_clues" },
+    endpoints: { municipios: "unidades_clues" },
   },
 
   // ----- SINBA --------------------------------------------------------
@@ -357,7 +415,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos diabetes tipo 2 / promedio mensual activos SUS.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "sinba.casos_hta_promedio",
@@ -366,7 +424,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos hipertensión / promedio mensual activos SUS.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "sinba.casos_obesidad_promedio",
@@ -375,7 +433,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos obesidad / promedio mensual activos SUS.",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- COFEPRIS ------------------------------------------------------
@@ -386,7 +444,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias con licencia sanitaria vigente COFEPRIS.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "cofepris.con_estupefacientes",
@@ -395,7 +453,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias autorizadas a vender estupefacientes.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "cofepris.con_controlados_ageb",
@@ -404,7 +462,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "numeric_count",
     description: "Farmacias con controlados a nivel AGEB.",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- CE 2024 -------------------------------------------------------
@@ -415,7 +473,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Unidades económicas Censo Económico 2024.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "ce2024.personal_ocupado",
@@ -424,7 +482,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Personal ocupado total (Censo Económico 2024).",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "ce2024.valor_agregado",
@@ -433,7 +491,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Valor agregado censal bruto (CE 2024).",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- ENIGH ---------------------------------------------------------
@@ -444,7 +502,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_continuous",
     description: "Ingreso mediano estatal ponderado, ENIGH 2024.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "enigh.engel_coefficient",
@@ -453,7 +511,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "% gasto en alimentos / gasto total (ENIGH).",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- ENOE ----------------------------------------------------------
@@ -464,7 +522,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de informalidad laboral ENOE 2025.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "enoe.tasa_desocupacion",
@@ -473,7 +531,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de desocupación ENOE 2025.",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- SICT ----------------------------------------------------------
@@ -484,7 +542,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Tránsito diario promedio anual (SICT).",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- SEDATU --------------------------------------------------------
@@ -495,7 +553,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Monto subsidiado total vivienda 2025.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "sedatu.acciones_total",
@@ -504,7 +562,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Acciones de financiamiento SEDATU.",
-    columns: {},
+    endpoints: {},
   },
 
   // ----- CNBV ----------------------------------------------------------
@@ -515,7 +573,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Monto crédito comercial total 2025.",
-    columns: {},
+    endpoints: {},
   },
   {
     id: "cnbv.pct_femenino",
@@ -524,7 +582,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% acciones a mujeres (crédito comercial CNBV).",
-    columns: {},
+    endpoints: {},
   },
 ];
 
@@ -559,22 +617,60 @@ export function isNumeric(t: FieldType): boolean {
   );
 }
 
-/** True iff this field can be selected at all from the Locust picker. */
+/** Field is reachable if at least one endpoint serves it. */
 export function isFieldReachable(f: FieldDef): boolean {
-  return Object.keys(f.columns).length > 0;
-}
-
-/** True iff this field is graphable against an X-anchor at the given grain. */
-export function isFieldGraphableAt(
-  f: FieldDef,
-  anchorGrain: FieldGrain,
-): boolean {
-  return f.columns[anchorGrain] !== undefined;
+  return Object.keys(f.endpoints).length > 0;
 }
 
 /**
- * Pick the chart type given two axes. The Locust override lets the user
- * pick explicitly; this is the auto-derive baseline.
+ * Resolve which endpoint to fetch given the current X (and optional Y, Z).
+ *
+ *   - With X alone: returns X.primaryEndpoint if set, else first key.
+ *   - With X+Y: returns the first endpoint where BOTH X and Y have columns.
+ *     Prefers X.primaryEndpoint if it satisfies both; otherwise picks the
+ *     first intersection. This lets denue.municipio_nombre (on 3 endpoints)
+ *     anchor a chart against sesnsp.homicidio_doloso (on only /risk-summary).
+ *   - With X+Y+Z: same, but requires all three to share an endpoint.
+ *   - Returns null if no endpoint satisfies all chosen fields.
+ */
+export function getActiveEndpoint(
+  x: FieldDef,
+  y?: FieldDef | null,
+  z?: FieldDef | null,
+): EndpointId | null {
+  const xKeys = Object.keys(x.endpoints) as EndpointId[];
+  if (xKeys.length === 0) return null;
+  const candidates = xKeys.filter((ep) => {
+    if (y && y.endpoints[ep] === undefined) return false;
+    if (z && z.endpoints[ep] === undefined) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  if (x.primaryEndpoint && candidates.includes(x.primaryEndpoint)) {
+    return x.primaryEndpoint;
+  }
+  return candidates[0]!;
+}
+
+/** True iff field has a column on the given endpoint. */
+export function isFieldOnEndpoint(f: FieldDef, ep: EndpointId): boolean {
+  return f.endpoints[ep] !== undefined;
+}
+
+/**
+ * True iff `f` shares at least one endpoint with `x`. Used by the Y
+ * picker so the user can pick fields that span X's multi-endpoint scope
+ * — the precise endpoint is resolved once Y is chosen.
+ */
+export function fieldSharesAnyEndpoint(x: FieldDef, f: FieldDef): boolean {
+  return Object.keys(x.endpoints).some(
+    (ep) => f.endpoints[ep as EndpointId] !== undefined,
+  );
+}
+
+/**
+ * Chart type derivation. Locust override lets the user pick explicitly;
+ * this is the auto-derive baseline.
  */
 export function deriveChartType(
   x: FieldType | null,

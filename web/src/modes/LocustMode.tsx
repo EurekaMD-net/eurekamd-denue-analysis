@@ -7,9 +7,11 @@ import { FieldPicker } from "../components/FieldPicker";
 import { FilterControls } from "../components/FilterPanel";
 import {
   deriveChartType,
+  ENDPOINTS,
+  fieldSharesAnyEndpoint,
   findField,
-  GRAIN_ENDPOINTS,
-  isFieldGraphableAt,
+  getActiveEndpoint,
+  isFieldOnEndpoint,
   isFieldReachable,
   type FieldDef,
 } from "../lib/fields";
@@ -33,14 +35,14 @@ const INITIAL_AXIS: AxisState = {
 /**
  * Locust mode — single configurable chart.
  *
- * Invariant: X is the join key. The X field's `grain` selects which
- * backend endpoint is fetched (via GRAIN_ENDPOINTS). Y and Z are values
- * read off the same row by name — `field.columns[xField.grain]`.
+ * Invariant: X is the row source. When X is picked, its
+ * `getActiveEndpoint()` selects the backend endpoint to fetch. Y and Z
+ * are columns on that same payload — `field.endpoints[X.activeEndpoint]`.
  *
- * The picker enforces this invariant pre-pick:
- *   - X slot accepts only fields with xEligible=true.
- *   - Y slot (after X set) accepts only fields whose columns map has X.grain.
- *   - Z slot is gated until X+Y both set; then constrained to Y's rule.
+ * The picker enforces this:
+ *   - X slot: any reachable field (operator directive 2026-05-12).
+ *   - Y/Z slot: filtered to fields with a column on X's active endpoint.
+ *   - Z slot is also disabled until X+Y are both set.
  */
 export function LocustMode() {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
@@ -65,10 +67,10 @@ export function LocustMode() {
     setFilterPins([]);
   };
 
-  // Setting or changing X invalidates Y/Z if they're not graphable at the
-  // new X.grain. Without this, switching X from estado to muni would leave
-  // estado-only Y/Z fields in place and produce the same "Sin datos" we're
-  // trying to eliminate.
+  // Setting or changing X invalidates Y/Z if they're not on X's new
+  // active endpoint. Without this, switching X from one endpoint to
+  // another would leave previously-valid Y/Z fields in place and produce
+  // "Sin datos."
   const setAxis = (slot: AxisSlot, next: AxisState) => {
     if (slot === "x") {
       const prevId = xAxis.field?.id;
@@ -79,23 +81,18 @@ export function LocustMode() {
       if (fieldChanged || drillChanged) {
         setFilterPins([]);
       }
-      // If X grain changed, clear Y/Z that are not graphable at new grain.
-      const newGrain = next.field?.grain ?? null;
-      if (
-        newGrain &&
-        yAxis.field &&
-        !isFieldGraphableAt(yAxis.field, newGrain)
-      ) {
-        setYAxis(INITIAL_AXIS);
+      // Clear Y/Z that don't span any endpoint with the new X.
+      if (next.field && yAxis.field) {
+        if (!fieldSharesAnyEndpoint(next.field, yAxis.field)) {
+          setYAxis(INITIAL_AXIS);
+          setZAxis(INITIAL_AXIS);
+        } else if (
+          zAxis.field &&
+          getActiveEndpoint(next.field, yAxis.field, zAxis.field) === null
+        ) {
+          setZAxis(INITIAL_AXIS);
+        }
       }
-      if (
-        newGrain &&
-        zAxis.field &&
-        !isFieldGraphableAt(zAxis.field, newGrain)
-      ) {
-        setZAxis(INITIAL_AXIS);
-      }
-      // Removing X entirely → clear Y/Z too (Z is meaningless without X).
       if (!next.field) {
         setYAxis(INITIAL_AXIS);
         setZAxis(INITIAL_AXIS);
@@ -103,7 +100,6 @@ export function LocustMode() {
       setXAxis(next);
     } else if (slot === "y") {
       setYAxis(next);
-      // Removing Y clears Z (Z is a colorant of Y).
       if (!next.field) setZAxis(INITIAL_AXIS);
     } else {
       setZAxis(next);
@@ -128,24 +124,24 @@ export function LocustMode() {
   }, [pickerOpen, xAxis.field, yAxis.field]);
 
   // Picker predicate per slot.
-  // X: any reachable field (operator directive 2026-05-12 — X drives the
-  //    UX, not a restricted anchor set).
-  // Y/Z: filtered to fields graphable at X.grain, deduped against
-  //    already-picked slots.
+  // X: any reachable field.
+  // Y: fields sharing ANY endpoint with X (X may be on multiple; the
+  //    active endpoint resolves once Y is picked).
+  // Z: fields on the resolved X+Y endpoint (concrete by then).
   const pickerPredicate = useMemo(() => {
     if (pickerOpen === "x") return (f: FieldDef) => isFieldReachable(f);
+    const xField = xAxis.field;
+    if (!xField) return () => false;
     if (pickerOpen === "y") {
-      const xg = xAxis.field?.grain;
-      if (!xg) return () => false; // shouldn't open Y picker w/o X
       return (f: FieldDef) =>
-        isFieldGraphableAt(f, xg) && f.id !== xAxis.field?.id;
+        f.id !== xField.id && fieldSharesAnyEndpoint(xField, f);
     }
     if (pickerOpen === "z") {
-      const xg = xAxis.field?.grain;
-      if (!xg) return () => false;
+      const xyEndpoint = getActiveEndpoint(xField, yAxis.field);
+      if (!xyEndpoint) return () => false;
       return (f: FieldDef) =>
-        isFieldGraphableAt(f, xg) &&
-        f.id !== xAxis.field?.id &&
+        isFieldOnEndpoint(f, xyEndpoint) &&
+        f.id !== xField.id &&
         f.id !== yAxis.field?.id;
     }
     return () => true;
@@ -166,13 +162,13 @@ export function LocustMode() {
     setAxis(slot, { ...getAxis(slot), field });
   };
 
-  // Pre-fetch UX: surface a hint when X's grain requires entidad and none
-  // is selected. Endpoint dispatcher would otherwise return early with a
-  // generic empty state — this is more actionable.
-  const grainEndpoint = xAxis.field
-    ? GRAIN_ENDPOINTS[xAxis.field.grain]
-    : undefined;
-  const needsEntidad = grainEndpoint?.needsEntidad === true && entidad === null;
+  // Pre-fetch UX: surface a hint when X's active endpoint requires entidad
+  // and none is selected. Dispatcher would otherwise return early.
+  const xActiveEndpointId = xAxis.field
+    ? getActiveEndpoint(xAxis.field, yAxis.field, zAxis.field)
+    : null;
+  const xEndpoint = xActiveEndpointId ? ENDPOINTS[xActiveEndpointId] : null;
+  const needsEntidad = xEndpoint?.needsEntidad === true && entidad === null;
 
   return (
     <div className="flex h-full bg-slate-950 text-slate-100">
@@ -530,20 +526,21 @@ function EmptyState({
 function useLocustDataset(
   xAxis: AxisState,
   yAxis: AxisState,
-  _zAxis: AxisState,
+  zAxis: AxisState,
   accessToken: string | null,
   entidad: string | null,
 ) {
   const xField = xAxis.field;
   const yField = yAxis.field;
-  const grain = xField?.grain ?? null;
-  const endpoint = grain ? GRAIN_ENDPOINTS[grain] : undefined;
+  const zField = zAxis.field;
+  const endpointId = xField ? getActiveEndpoint(xField, yField, zField) : null;
+  const endpoint = endpointId ? ENDPOINTS[endpointId] : null;
   const path = endpoint ? endpoint.path(entidad) : null;
 
   return useQuery({
-    queryKey: ["locust", grain, entidad, xField?.id, yField?.id],
+    queryKey: ["locust", endpointId, entidad, xField?.id, yField?.id],
     queryFn: async () => {
-      if (!path) throw new Error("no endpoint for grain");
+      if (!path) throw new Error("no endpoint for X");
       const res = await apiFetch(path, {}, accessToken);
       return res.json() as Promise<unknown>;
     },
@@ -654,10 +651,9 @@ interface DataPoint {
 }
 
 /**
- * Extract data points by reading column names off `field.columns[xGrain]`.
- * Endpoint payloads are either { rows: [...] } / { entidades: [...] } /
- * { municipios: [...] } / { sectors: [...] }; we look up the right key
- * via GRAIN_ENDPOINTS.
+ * Extract data points by reading column names off
+ * `field.endpoints[xActiveEndpoint]`. Each ENDPOINTS entry declares its
+ * own rowsKey envelope — we look it up rather than guessing.
  */
 export function extractRows(
   raw: unknown,
@@ -668,9 +664,9 @@ export function extractRows(
   const xField = xAxis.field;
   const yField = yAxis.field;
   if (!xField || !yField) return [];
-  const xGrain = xField.grain;
-  const endpoint = GRAIN_ENDPOINTS[xGrain];
-  if (!endpoint) return [];
+  const epId = getActiveEndpoint(xField);
+  if (!epId) return [];
+  const endpoint = ENDPOINTS[epId];
 
   let rows: Record<string, unknown>[] = [];
   if (Array.isArray(raw)) {
@@ -685,10 +681,10 @@ export function extractRows(
   }
   if (rows.length === 0) return [];
 
-  const xCol = xField.columns[xGrain];
-  const yCol = yField.columns[xGrain];
+  const xCol = xField.endpoints[epId];
+  const yCol = yField.endpoints[epId];
   const zField = zAxis.field;
-  const zCol = zField ? zField.columns[xGrain] : undefined;
+  const zCol = zField ? zField.endpoints[epId] : undefined;
   if (!xCol || !yCol) return [];
 
   // C1 audit fix: categorical_ordinal Z fields (e.g. "Muy bajo" … "Muy alto")
