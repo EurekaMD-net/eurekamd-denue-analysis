@@ -72,6 +72,8 @@ const KNOWN_ANALYTICS_PATHS = new Set([
   "/analytics/top-sectors",
   "/analytics/risk-summary",
   "/analytics/mortality-summary",
+  "/analytics/locust-muni",
+  "/analytics/locust-estado",
 ]);
 
 describe("reachability (endpoint-keyed)", () => {
@@ -164,7 +166,9 @@ describe("isFieldOnEndpoint", () => {
   });
 
   it("returns false for fields with empty endpoints map", () => {
-    const orphan = findField("sinba.casos_dm2_promedio")!;
+    // sesnsp.ano is temporal — needs /risk-trend which isn't a Locust
+    // endpoint yet. Remains unreachable across all current EndpointIds.
+    const orphan = findField("sesnsp.ano")!;
     expect(orphan.endpoints).toEqual({});
     expect(isFieldOnEndpoint(orphan, "municipios")).toBe(false);
   });
@@ -173,7 +177,7 @@ describe("isFieldOnEndpoint", () => {
 describe("getActiveEndpoint (X+Y+Z resolution)", () => {
   it("returns X.primaryEndpoint when X alone and primary is set", () => {
     const x = findField("denue.total_establecimientos")!;
-    expect(getActiveEndpoint(x)).toBe("municipios");
+    expect(getActiveEndpoint(x)).toBe("locust-muni");
   });
 
   it("returns first endpoint when X has no primary", () => {
@@ -182,26 +186,26 @@ describe("getActiveEndpoint (X+Y+Z resolution)", () => {
   });
 
   it("returns null for unreachable X", () => {
-    const x = findField("sinba.casos_dm2_promedio")!;
+    const x = findField("sesnsp.ano")!;
     expect(getActiveEndpoint(x)).toBeNull();
   });
 
   it("resolves to endpoint where BOTH X and Y have columns", () => {
-    // X = municipio_nombre (on municipios, risk-summary, mortality-summary)
+    // X = municipio_nombre (on locust-muni, municipios, risk-summary, mortality-summary)
     // Y = sesnsp.homicidio_doloso (on risk-summary only)
-    // → resolves to risk-summary, not municipios.
+    // → resolves to risk-summary.
     const x = findField("denue.municipio_nombre")!;
     const y = findField("sesnsp.homicidio_doloso")!;
     expect(getActiveEndpoint(x, y)).toBe("risk-summary");
   });
 
   it("prefers X.primaryEndpoint when Y is also on it", () => {
-    // X = municipio_nombre (primary: municipios)
-    // Y = censo.pobtot (on municipios, risk-summary, mortality-summary)
-    // → resolves to municipios (X's primary wins among multiple intersections).
+    // X = municipio_nombre (primary: locust-muni)
+    // Y = censo.pobtot (on locust-muni, municipios, risk-summary, mortality-summary)
+    // → resolves to locust-muni (X's primary wins).
     const x = findField("denue.municipio_nombre")!;
     const y = findField("censo.pobtot")!;
-    expect(getActiveEndpoint(x, y)).toBe("municipios");
+    expect(getActiveEndpoint(x, y)).toBe("locust-muni");
   });
 
   it("returns null when X and Y have no shared endpoint", () => {
@@ -214,8 +218,8 @@ describe("getActiveEndpoint (X+Y+Z resolution)", () => {
     const x = findField("denue.municipio_nombre")!;
     const y = findField("censo.pobtot")!;
     const z = findField("sesnsp.homicidio_doloso")!;
-    // All three must be on same endpoint. Y is on municipios+risk+mortality;
-    // Z is only on risk-summary; X is on all 3. → risk-summary.
+    // Y is on locust-muni+municipios+risk+mortality; Z only on risk-summary;
+    // X on all four. → risk-summary.
     expect(getActiveEndpoint(x, y, z)).toBe("risk-summary");
   });
 });
@@ -235,7 +239,8 @@ describe("fieldSharesAnyEndpoint", () => {
 
   it("false when one field is unreachable", () => {
     const x = findField("denue.municipio_nombre")!;
-    const y = findField("sinba.casos_dm2_promedio")!;
+    // sesnsp.ano is still unreachable (no /risk-trend wired).
+    const y = findField("sesnsp.ano")!;
     expect(fieldSharesAnyEndpoint(x, y)).toBe(false);
   });
 });

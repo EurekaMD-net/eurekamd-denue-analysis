@@ -64,7 +64,9 @@ export type EndpointId =
   | "municipios"
   | "top-sectors"
   | "risk-summary"
-  | "mortality-summary";
+  | "mortality-summary"
+  | "locust-muni"
+  | "locust-estado";
 
 export interface EndpointDef {
   id: EndpointId;
@@ -128,6 +130,23 @@ export const ENDPOINTS: Record<EndpointId, EndpointDef> = {
     grain: "muni",
     label: "Mortalidad EDR (defunciones por municipio)",
   },
+  "locust-muni": {
+    id: "locust-muni",
+    path: (entidad) =>
+      entidad ? `/analytics/locust-muni?entidad=${entidad}` : null,
+    rowsKey: "municipios",
+    needsEntidad: true,
+    grain: "muni",
+    label: "Composite muni (todas las fuentes joinables por cve_mun)",
+  },
+  "locust-estado": {
+    id: "locust-estado",
+    path: () => "/analytics/locust-estado",
+    rowsKey: "entidades",
+    needsEntidad: false,
+    grain: "estado",
+    label: "Composite estado (ENOE + ENIGH + censo entidades)",
+  },
 };
 
 export interface FieldDef {
@@ -177,11 +196,12 @@ export const FIELD_CATALOG: FieldDef[] = [
     type: "numeric_count",
     description: "Conteo de unidades económicas DENUE.",
     endpoints: {
+      "locust-muni": "denue_establecimientos",
       municipios: "establecimientos",
       "national-treemap": "establecimientos",
       "top-sectors": "count",
     },
-    primaryEndpoint: "municipios",
+    primaryEndpoint: "locust-muni",
   },
   {
     id: "denue.entidad_nombre",
@@ -190,7 +210,10 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "categorical_nominal",
     description: "Nombre de la entidad federativa (32 estados).",
-    endpoints: { "national-treemap": "nombre" },
+    endpoints: {
+      "national-treemap": "nombre",
+      "locust-estado": "nom_ent",
+    },
   },
   {
     id: "denue.municipio_nombre",
@@ -199,14 +222,13 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "categorical_nominal",
     description: "Nombre del municipio dentro de la entidad.",
-    // Same column name across all 3 muni-grain endpoints — gives the user
-    // muni labels regardless of which X they picked.
     endpoints: {
+      "locust-muni": "municipio",
       municipios: "municipio",
       "risk-summary": "municipio",
       "mortality-summary": "municipio",
     },
-    primaryEndpoint: "municipios",
+    primaryEndpoint: "locust-muni",
   },
   {
     id: "denue.scian_sector",
@@ -225,13 +247,14 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "Censo",
     grain: "muni",
     type: "numeric_count",
-    description: "Población total INEGI 2020. Disponible en endpoints muni.",
+    description: "Población total INEGI 2020.",
     endpoints: {
+      "locust-muni": "poblacion",
       municipios: "poblacion",
       "risk-summary": "poblacion",
       "mortality-summary": "poblacion",
     },
-    primaryEndpoint: "municipios",
+    primaryEndpoint: "locust-muni",
   },
   {
     id: "censo.pobtot_ageb",
@@ -249,7 +272,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Población económicamente activa / pob ≥15 años.",
-    endpoints: {},
+    endpoints: { "locust-muni": "pct_pea" },
   },
   {
     id: "censo.graproes",
@@ -258,16 +281,21 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Grado promedio de escolaridad ≥15 años.",
-    endpoints: {},
+    endpoints: { "locust-muni": "graproes" },
   },
   {
     id: "censo.pct_sin_cobertura_salud",
-    label: "% sin cobertura salud (AGEB)",
+    label: "% sin derechohabiencia",
     source: "Censo",
-    grain: "ageb",
+    // Re-grained from "ageb" to "muni" since locust-muni serves a
+    // muni-aggregated version. AGEB version still unimplemented. Label
+    // corrected per audit R3: "sin derechohabiencia" ≠ "sin cobertura"
+    // (people with private insurance / Seguro Popular have cobertura
+    // without derechohabiencia formal).
+    grain: "muni",
     type: "numeric_pct",
-    description: "Población sin derechohabiencia / pobtot, AGEB.",
-    endpoints: {},
+    description: "psinder / pobtot (% sin afiliación a salud pública).",
+    endpoints: { "locust-muni": "pct_sin_cobertura_salud" },
   },
 
   // ----- CONEVAL -------------------------------------------------------
@@ -278,13 +306,12 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza (CONEVAL 2020).",
-    // national-treemap exposes a population-weighted average per estado;
-    // municipios exposes the raw muni-level value.
     endpoints: {
+      "locust-muni": "pobreza_pct",
       municipios: "pobreza_pct",
       "national-treemap": "pobreza_pct_promedio",
     },
-    primaryEndpoint: "municipios",
+    primaryEndpoint: "locust-muni",
   },
   {
     id: "coneval.pobreza_extrema_pct",
@@ -293,7 +320,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% en pobreza extrema (CONEVAL 2020).",
-    endpoints: {},
+    endpoints: { "locust-muni": "pobreza_extrema_pct" },
   },
   {
     id: "coneval.carencia_acceso_salud_pct",
@@ -302,7 +329,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "Carencia por acceso a servicios de salud.",
-    endpoints: {},
+    endpoints: { "locust-muni": "carencia_acceso_salud_pct" },
   },
   {
     id: "coneval.irs_indice",
@@ -311,7 +338,11 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "IRS 2020 (continuo, mayor = más rezago).",
-    endpoints: { municipios: "irs_indice" },
+    endpoints: {
+      "locust-muni": "irs_indice",
+      municipios: "irs_indice",
+    },
+    primaryEndpoint: "locust-muni",
   },
   {
     id: "coneval.irs_grado",
@@ -321,10 +352,11 @@ export const FIELD_CATALOG: FieldDef[] = [
     type: "categorical_ordinal",
     description: "Muy bajo / Bajo / Medio / Alto / Muy alto.",
     endpoints: {
+      "locust-muni": "irs_grado",
       municipios: "irs_grado",
       "national-treemap": "modal_irs_grado",
     },
-    primaryEndpoint: "municipios",
+    primaryEndpoint: "locust-muni",
     ordinalOrder: IRS_GRADO_ORDER,
   },
   {
@@ -404,7 +436,11 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Establecimientos de salud DGIS en operación.",
-    endpoints: { municipios: "unidades_clues" },
+    endpoints: {
+      "locust-muni": "unidades_clues",
+      municipios: "unidades_clues",
+    },
+    primaryEndpoint: "locust-muni",
   },
 
   // ----- SINBA --------------------------------------------------------
@@ -415,7 +451,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos diabetes tipo 2 / promedio mensual activos SUS.",
-    endpoints: {},
+    endpoints: { "locust-muni": "sinba_dm2_promedio" },
   },
   {
     id: "sinba.casos_hta_promedio",
@@ -424,7 +460,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos hipertensión / promedio mensual activos SUS.",
-    endpoints: {},
+    endpoints: { "locust-muni": "sinba_hta_promedio" },
   },
   {
     id: "sinba.casos_obesidad_promedio",
@@ -433,7 +469,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Casos obesidad / promedio mensual activos SUS.",
-    endpoints: {},
+    endpoints: { "locust-muni": "sinba_obesidad_promedio" },
   },
 
   // ----- COFEPRIS ------------------------------------------------------
@@ -444,7 +480,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias con licencia sanitaria vigente COFEPRIS.",
-    endpoints: {},
+    endpoints: { "locust-muni": "cofepris_total_licenciadas" },
   },
   {
     id: "cofepris.con_estupefacientes",
@@ -453,7 +489,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Farmacias autorizadas a vender estupefacientes.",
-    endpoints: {},
+    endpoints: { "locust-muni": "cofepris_con_estupefacientes" },
   },
   {
     id: "cofepris.con_controlados_ageb",
@@ -473,7 +509,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Unidades económicas Censo Económico 2024.",
-    endpoints: {},
+    endpoints: { "locust-muni": "ce2024_ue" },
   },
   {
     id: "ce2024.personal_ocupado",
@@ -482,7 +518,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Personal ocupado total (Censo Económico 2024).",
-    endpoints: {},
+    endpoints: { "locust-muni": "ce2024_personal_ocupado" },
   },
   {
     id: "ce2024.valor_agregado",
@@ -491,7 +527,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_continuous",
     description: "Valor agregado censal bruto (CE 2024).",
-    endpoints: {},
+    endpoints: { "locust-muni": "ce2024_valor_agregado" },
   },
 
   // ----- ENIGH ---------------------------------------------------------
@@ -502,16 +538,16 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_continuous",
     description: "Ingreso mediano estatal ponderado, ENIGH 2024.",
-    endpoints: {},
+    endpoints: { "locust-estado": "enigh_ingreso_p50" },
   },
   {
     id: "enigh.engel_coefficient",
-    label: "Coeficiente Engel",
+    label: "% gasto alimentos (Engel)",
     source: "ENIGH",
     grain: "estado",
     type: "numeric_pct",
     description: "% gasto en alimentos / gasto total (ENIGH).",
-    endpoints: {},
+    endpoints: { "locust-estado": "enigh_pct_gasto_alimentos" },
   },
 
   // ----- ENOE ----------------------------------------------------------
@@ -522,7 +558,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de informalidad laboral ENOE 2025.",
-    endpoints: {},
+    endpoints: { "locust-estado": "enoe_tasa_informalidad" },
   },
   {
     id: "enoe.tasa_desocupacion",
@@ -531,7 +567,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "estado",
     type: "numeric_pct",
     description: "Tasa de desocupación ENOE 2025.",
-    endpoints: {},
+    endpoints: { "locust-estado": "enoe_tasa_desocupacion" },
   },
 
   // ----- SICT ----------------------------------------------------------
@@ -542,7 +578,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Tránsito diario promedio anual (SICT).",
-    endpoints: {},
+    endpoints: { "locust-muni": "sict_tdpa_total" },
   },
 
   // ----- SEDATU --------------------------------------------------------
@@ -552,8 +588,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SEDATU",
     grain: "muni",
     type: "numeric_continuous",
-    description: "Monto subsidiado total vivienda 2025.",
-    endpoints: {},
+    description: "Monto subsidiado total vivienda (último periodo).",
+    endpoints: { "locust-muni": "sedatu_monto_total" },
   },
   {
     id: "sedatu.acciones_total",
@@ -562,7 +598,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_count",
     description: "Acciones de financiamiento SEDATU.",
-    endpoints: {},
+    endpoints: { "locust-muni": "sedatu_acciones_total" },
   },
 
   // ----- CNBV ----------------------------------------------------------
@@ -572,8 +608,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "CNBV",
     grain: "muni",
     type: "numeric_continuous",
-    description: "Monto crédito comercial total 2025.",
-    endpoints: {},
+    description: "Monto crédito comercial total (último periodo).",
+    endpoints: { "locust-muni": "cnbv_monto_total" },
   },
   {
     id: "cnbv.pct_femenino",
@@ -582,7 +618,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "muni",
     type: "numeric_pct",
     description: "% acciones a mujeres (crédito comercial CNBV).",
-    endpoints: {},
+    endpoints: { "locust-muni": "cnbv_pct_femenino" },
   },
 ];
 

@@ -122,6 +122,8 @@ import {
   type RiskSummaryResult,
   type RiskTrendResult,
   type ScianLevel,
+  type LocustEstadoResult,
+  type LocustMuniResult,
   type SectorGradeMatrixResult,
   type StateCalibratorsResult,
   type StateCalibratorsRow,
@@ -4795,6 +4797,276 @@ SELECT json_agg(row_to_json(t)) FROM (
     datos_viales: datosVialesFromRow(r),
     vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
     vivienda_credito_comercial: creditoComercialFromRow(r),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "Authorization, X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/locust-muni?entidad=XX
+//
+// Wide muni-grain row aggregator. One LEFT-JOIN-anchored row per muni,
+// pulling pre-aggregated columns from every source view/matview we have
+// at muni grain. Powers Locust mode: declaring a field via
+// `endpoints["locust-muni"]: <col>` makes it joinable with every other
+// field on this payload.
+//
+// Performance: each LEFT JOIN is on indexed cve_mun. Measured ~350-450ms
+// warm for muni-heavy states (Oaxaca 570 munis); ~200ms for CDMX (16
+// munis). Cache-Control sets max-age=300, so per-entidad responses warm
+// quickly across users. The DISTINCT ON on `sinba_latest` is load-bearing
+// (sinba_morbidity_municipal keys on (cve_mun, anio)); the DISTINCT ON on
+// cnbv_latest / sedatu_latest is defensive forward-compat (today both
+// source matviews have UNIQUE(cve_mun); the projection is a no-op until
+// they ingest multi-year history).
+// ---------------------------------------------------------------------------
+
+interface RawLocustMuniRow {
+  cve_mun: string;
+  municipio: string | null;
+  poblacion: number | string | null;
+  pea: number | string | null;
+  graproes: number | string | null;
+  pct_pea: number | string | null;
+  pct_sin_cobertura_salud: number | string | null;
+  denue_establecimientos: number | string;
+  denue_farmacias: number | string;
+  unidades_clues: number | string;
+  pobreza_pct: number | string | null;
+  pobreza_extrema_pct: number | string | null;
+  carencia_acceso_salud_pct: number | string | null;
+  irs_indice: number | string | null;
+  irs_grado: string | null;
+  ce2024_ue: number | string | null;
+  ce2024_personal_ocupado: number | string | null;
+  ce2024_valor_agregado: number | string | null;
+  sinba_dm2_promedio: number | string | null;
+  sinba_hta_promedio: number | string | null;
+  sinba_obesidad_promedio: number | string | null;
+  cofepris_total_licenciadas: number | string | null;
+  cofepris_con_estupefacientes: number | string | null;
+  sict_tdpa_total: number | string | null;
+  cnbv_monto_total: number | string | null;
+  cnbv_pct_femenino: number | string | null;
+  sedatu_monto_total: number | string | null;
+  sedatu_acciones_total: number | string | null;
+}
+
+function locustMuniSql(entidad: string): string {
+  return `
+WITH denue_agg AS (
+  SELECT
+    area_geo AS cve_mun,
+    COUNT(*)::bigint AS denue_establecimientos,
+    COUNT(*) FILTER (WHERE clase_actividad_id LIKE '4659%')::bigint AS denue_farmacias
+  FROM establecimientos
+  WHERE entidad = '${entidad}' AND area_geo IS NOT NULL
+  GROUP BY area_geo
+),
+clues_agg AS (
+  SELECT cve_mun, COUNT(*)::bigint AS unidades_clues
+  FROM clues
+  WHERE LEFT(cve_mun, 2) = '${entidad}'
+  GROUP BY cve_mun
+),
+ce2024_totals AS (
+  -- The "TOTAL DE SECTOR" all-strata rollup row uses sector IS NULL +
+  -- id_estrato IS NULL (NOT sector = '00' — the loader at scripts/
+  -- load-ce2024.ts:204 applies NULLIF(sector, '') and the source CSV
+  -- represents rollups with an empty SECTOR field). One row per cve_mun.
+  -- C1 audit fix 2026-05-12: prior 'WHERE sector = ''00''' returned 0 rows,
+  -- silently NULLing all CE 2024 fields in /locust-muni responses.
+  SELECT cve_mun, ue, personal_ocupado_total, valor_agregado_censal_bruto
+  FROM ce2024_municipal
+  WHERE sector IS NULL AND id_estrato IS NULL AND cve_ent = '${entidad}'
+),
+sinba_latest AS (
+  SELECT DISTINCT ON (cve_mun)
+    cve_mun, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio
+  FROM sinba_morbidity_municipal
+  WHERE LEFT(cve_mun, 2) = '${entidad}'
+  ORDER BY cve_mun, anio DESC
+),
+cnbv_latest AS (
+  SELECT DISTINCT ON (cve_mun) cve_mun, monto_total, pct_femenino
+  FROM cnbv_credito_by_municipio
+  WHERE cve_ent = '${entidad}'
+  ORDER BY cve_mun, periodo DESC
+),
+sedatu_latest AS (
+  SELECT DISTINCT ON (cve_mun) cve_mun, monto_total, acciones_total
+  FROM sedatu_financing_by_municipio
+  WHERE cve_ent = '${entidad}'
+  ORDER BY cve_mun, periodo DESC
+)
+SELECT json_agg(row_to_json(t) ORDER BY t.denue_establecimientos DESC NULLS LAST) FROM (
+  SELECT
+    cm.cve_mun,
+    cm.nom_mun AS municipio,
+    cm.pobtot AS poblacion,
+    cm.pea,
+    cm.graproes,
+    CASE
+      WHEN cm.p_15ymas IS NOT NULL AND cm.p_15ymas > 0
+      THEN ROUND((cm.pea::numeric / cm.p_15ymas) * 100, 2)
+      ELSE NULL
+    END AS pct_pea,
+    CASE
+      WHEN cm.pobtot IS NOT NULL AND cm.pobtot > 0
+      THEN ROUND((cm.psinder::numeric / cm.pobtot) * 100, 2)
+      ELSE NULL
+    END AS pct_sin_cobertura_salud,
+    COALESCE(d.denue_establecimientos, 0) AS denue_establecimientos,
+    COALESCE(d.denue_farmacias, 0) AS denue_farmacias,
+    COALESCE(c.unidades_clues, 0) AS unidades_clues,
+    p.pobreza_pct,
+    p.pobreza_extrema_pct,
+    p.carencia_acceso_salud_pct,
+    i.irs_indice,
+    i.irs_grado,
+    ce.ue AS ce2024_ue,
+    ce.personal_ocupado_total AS ce2024_personal_ocupado,
+    ce.valor_agregado_censal_bruto AS ce2024_valor_agregado,
+    s.casos_dm2_promedio AS sinba_dm2_promedio,
+    s.casos_hta_promedio AS sinba_hta_promedio,
+    s.casos_obesidad_promedio AS sinba_obesidad_promedio,
+    cof.total_licenciadas AS cofepris_total_licenciadas,
+    cof.con_estupefacientes AS cofepris_con_estupefacientes,
+    sict.tdpa_total AS sict_tdpa_total,
+    cn.monto_total AS cnbv_monto_total,
+    cn.pct_femenino AS cnbv_pct_femenino,
+    sed.monto_total AS sedatu_monto_total,
+    sed.acciones_total AS sedatu_acciones_total
+  FROM censo_municipios cm
+  LEFT JOIN denue_agg d ON d.cve_mun = cm.cve_mun
+  LEFT JOIN clues_agg c ON c.cve_mun = cm.cve_mun
+  LEFT JOIN coneval_pobreza_municipal p ON p.cve_mun = cm.cve_mun
+  LEFT JOIN coneval_irs_municipal i ON i.cve_mun = cm.cve_mun
+  LEFT JOIN ce2024_totals ce ON ce.cve_mun = cm.cve_mun
+  LEFT JOIN sinba_latest s ON s.cve_mun = cm.cve_mun
+  LEFT JOIN cofepris_farmacias_by_municipio cof ON cof.cve_mun = cm.cve_mun
+  LEFT JOIN sict_traffic_by_municipio sict ON sict.cve_mun = cm.cve_mun
+  LEFT JOIN cnbv_latest cn ON cn.cve_mun = cm.cve_mun
+  LEFT JOIN sedatu_latest sed ON sed.cve_mun = cm.cve_mun
+  WHERE cm.entidad = '${entidad}'
+) t;
+`;
+}
+
+export async function locustMuniHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const entidad = c.req.query("entidad");
+  if (!entidad || !ENTIDAD_RE.test(entidad)) {
+    throw new HttpError(
+      `entidad inválida "${entidad ?? ""}"`,
+      400,
+      "validation.entidad",
+    );
+  }
+  const rows = runJsonQuery<RawLocustMuniRow[]>(config, locustMuniSql(entidad));
+  const num = (v: number | string | null | undefined): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const result: LocustMuniResult = {
+    entidad,
+    municipios: rows.map((r) => ({
+      cve_mun: r.cve_mun,
+      municipio: r.municipio,
+      poblacion: num(r.poblacion),
+      pea: num(r.pea),
+      graproes: num(r.graproes),
+      pct_pea: num(r.pct_pea),
+      pct_sin_cobertura_salud: num(r.pct_sin_cobertura_salud),
+      denue_establecimientos: Number(r.denue_establecimientos),
+      denue_farmacias: Number(r.denue_farmacias),
+      unidades_clues: Number(r.unidades_clues),
+      pobreza_pct: num(r.pobreza_pct),
+      pobreza_extrema_pct: num(r.pobreza_extrema_pct),
+      carencia_acceso_salud_pct: num(r.carencia_acceso_salud_pct),
+      irs_indice: num(r.irs_indice),
+      irs_grado: r.irs_grado ? normalizeGrado(r.irs_grado) : null,
+      ce2024_ue: num(r.ce2024_ue),
+      ce2024_personal_ocupado: num(r.ce2024_personal_ocupado),
+      ce2024_valor_agregado: num(r.ce2024_valor_agregado),
+      sinba_dm2_promedio: num(r.sinba_dm2_promedio),
+      sinba_hta_promedio: num(r.sinba_hta_promedio),
+      sinba_obesidad_promedio: num(r.sinba_obesidad_promedio),
+      cofepris_total_licenciadas: num(r.cofepris_total_licenciadas),
+      cofepris_con_estupefacientes: num(r.cofepris_con_estupefacientes),
+      sict_tdpa_total: num(r.sict_tdpa_total),
+      cnbv_monto_total: num(r.cnbv_monto_total),
+      cnbv_pct_femenino: num(r.cnbv_pct_femenino),
+      sedatu_monto_total: num(r.sedatu_monto_total),
+      sedatu_acciones_total: num(r.sedatu_acciones_total),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=300");
+  c.header("Vary", "Authorization, X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/locust-estado
+//
+// 32-row estado-grain composite. Latest-year ENOE + ENIGH per entidad
+// via LATERAL subqueries. Powers Locust's estado-grain reachability for
+// fields that don't fit /analytics/national-treemap.
+// ---------------------------------------------------------------------------
+
+interface RawLocustEstadoRow {
+  cve_ent: string;
+  nom_ent: string;
+  enoe_tasa_informalidad: number | string | null;
+  enoe_tasa_desocupacion: number | string | null;
+  enigh_ingreso_p50: number | string | null;
+  enigh_pct_gasto_alimentos: number | string | null;
+}
+
+const LOCUST_ESTADO_SQL = `
+SELECT json_agg(row_to_json(t) ORDER BY t.cve_ent) FROM (
+  SELECT
+    en.entidad AS cve_ent,
+    en.nom_ent,
+    enoe.tasa_informalidad AS enoe_tasa_informalidad,
+    enoe.tasa_desocupacion AS enoe_tasa_desocupacion,
+    enigh.ingreso_corriente_mediana AS enigh_ingreso_p50,
+    enigh.pct_gasto_alimentos AS enigh_pct_gasto_alimentos
+  FROM censo_entidades en
+  LEFT JOIN LATERAL (
+    SELECT tasa_informalidad, tasa_desocupacion
+    FROM calibrators_enoe_state
+    WHERE entidad = en.entidad
+    ORDER BY ano_levantamiento DESC
+    LIMIT 1
+  ) enoe ON true
+  LEFT JOIN LATERAL (
+    SELECT ingreso_corriente_mediana, pct_gasto_alimentos
+    FROM calibrators_enigh_state
+    WHERE entidad = en.entidad
+    ORDER BY ano_levantamiento DESC
+    LIMIT 1
+  ) enigh ON true
+) t;
+`;
+
+export async function locustEstadoHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const rows = runJsonQuery<RawLocustEstadoRow[]>(config, LOCUST_ESTADO_SQL);
+  const num = (v: number | string | null | undefined): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  const result: LocustEstadoResult = {
+    entidades: rows.map((r) => ({
+      cve_ent: r.cve_ent,
+      nom_ent: r.nom_ent,
+      enoe_tasa_informalidad: num(r.enoe_tasa_informalidad),
+      enoe_tasa_desocupacion: num(r.enoe_tasa_desocupacion),
+      enigh_ingreso_p50: num(r.enigh_ingreso_p50),
+      enigh_pct_gasto_alimentos: num(r.enigh_pct_gasto_alimentos),
+    })),
   };
   c.header("Cache-Control", "public, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");

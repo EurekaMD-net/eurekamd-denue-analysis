@@ -60,6 +60,8 @@ import type {
   LicensedPharmaciesByMunicipioResult,
   LocalitiesByMunicipioResult,
   LocalityDetailResult,
+  LocustEstadoResult,
+  LocustMuniResult,
   ManzanasByAgebResult,
   MortalitySummaryResult,
   MortalityTrendResult,
@@ -7671,5 +7673,192 @@ describe("/analytics/entidad-detail (v0.2.17 vivienda_credito_comercial)", () =>
     ]) {
       expect(sql).toContain(col);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/locust-muni?entidad=XX
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/locust-muni", () => {
+  it("returns wide muni row joining every pre-aggregated source", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          municipio: "Cuauhtémoc",
+          poblacion: 545884,
+          pea: 290000,
+          graproes: 12.5,
+          pct_pea: 65.2,
+          pct_sin_cobertura_salud: 18.4,
+          denue_establecimientos: 78421,
+          denue_farmacias: 1542,
+          unidades_clues: 145,
+          pobreza_pct: 22.3,
+          pobreza_extrema_pct: 2.1,
+          carencia_acceso_salud_pct: 18.4,
+          irs_indice: -2.41,
+          irs_grado: "Muy bajo",
+          ce2024_ue: 78421,
+          ce2024_personal_ocupado: 412000,
+          ce2024_valor_agregado: 891000000,
+          sinba_dm2_promedio: 1820,
+          sinba_hta_promedio: 2950,
+          sinba_obesidad_promedio: 410,
+          cofepris_total_licenciadas: 320,
+          cofepris_con_estupefacientes: 88,
+          sict_tdpa_total: 145000,
+          cnbv_monto_total: 1.2e9,
+          cnbv_pct_femenino: 41.5,
+          sedatu_monto_total: 8.4e7,
+          sedatu_acciones_total: 245,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-muni?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocustMuniResult;
+    expect(body.entidad).toBe("09");
+    expect(body.municipios).toHaveLength(1);
+    const row = body.municipios[0]!;
+    // Spot-check each source contributes its column.
+    expect(row.poblacion).toBe(545884);
+    expect(row.denue_establecimientos).toBe(78421);
+    expect(row.unidades_clues).toBe(145);
+    expect(row.pobreza_pct).toBe(22.3);
+    expect(row.irs_grado).toBe("Muy bajo");
+    expect(row.ce2024_ue).toBe(78421);
+    expect(row.sinba_dm2_promedio).toBe(1820);
+    expect(row.cofepris_total_licenciadas).toBe(320);
+    expect(row.sict_tdpa_total).toBe(145000);
+    expect(row.cnbv_monto_total).toBe(1.2e9);
+    expect(row.sedatu_acciones_total).toBe(245);
+  });
+
+  it("inlines entidad into all source CTE join filters", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-muni?entidad=14", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    // entidad is inlined into multiple WHERE clauses across CTEs.
+    expect(sql).toMatch(/entidad = '14'/);
+    expect(sql).toMatch(/LEFT\(cve_mun, 2\) = '14'/);
+    expect(sql).toMatch(/cve_ent = '14'/);
+    // LEFT JOIN structure preserved.
+    expect(sql).toMatch(/LEFT JOIN coneval_pobreza_municipal/);
+    expect(sql).toMatch(/LEFT JOIN sict_traffic_by_municipio/);
+    expect(sql).toMatch(/LEFT JOIN cofepris_farmacias_by_municipio/);
+  });
+
+  // C1 audit pin (2026-05-12): the ce2024_municipal "all sectors" rollup
+  // is keyed by sector IS NULL + id_estrato IS NULL, NOT sector = '00'.
+  // The wrong filter silently returns 0 rows. Pin the right one so the
+  // bug can't reappear via copy/paste from another sector-keyed handler.
+  it("CE2024 rollup uses sector IS NULL (not sector = '00')", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-muni?entidad=09", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(
+      /FROM ce2024_municipal\s+WHERE sector IS NULL AND id_estrato IS NULL/,
+    );
+    // Negative match: the literal WHERE clause must not use `= '00'`.
+    // (A `'00'` mention inside a doc-comment is allowed; the SQL itself
+    // must not.)
+    expect(sql).not.toMatch(/WHERE sector = '00'/);
+  });
+
+  it("rejects invalid entidad with 400 / validation.entidad", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-muni?entidad=99", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.entidad");
+  });
+
+  it("emits Cache-Control + Vary headers", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-muni?entidad=09", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/locust-estado
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/locust-estado", () => {
+  it("returns one row per estado with latest ENOE + ENIGH columns", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_ent: "09",
+          nom_ent: "Ciudad de México",
+          enoe_tasa_informalidad: 45.42,
+          enoe_tasa_desocupacion: 4.12,
+          enigh_ingreso_p50: 18450,
+          enigh_pct_gasto_alimentos: 28.5,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-estado", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocustEstadoResult;
+    expect(body.entidades).toHaveLength(1);
+    expect(body.entidades[0]).toEqual({
+      cve_ent: "09",
+      nom_ent: "Ciudad de México",
+      enoe_tasa_informalidad: 45.42,
+      enoe_tasa_desocupacion: 4.12,
+      enigh_ingreso_p50: 18450,
+      enigh_pct_gasto_alimentos: 28.5,
+    });
+  });
+
+  it("uses LATERAL ORDER BY ano_levantamiento DESC LIMIT 1 for latest-year", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-estado", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/LEFT JOIN LATERAL/);
+    expect(sql).toMatch(/calibrators_enoe_state/);
+    expect(sql).toMatch(/calibrators_enigh_state/);
+    expect(sql).toMatch(/ORDER BY ano_levantamiento DESC/);
+    expect(sql).toMatch(/LIMIT 1/);
+  });
+
+  it("emits Cache-Control + Vary headers", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-estado", {
+      headers: AUTH,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
+  });
+
+  it("does not require entidad param (32 estados always returned)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-estado", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
   });
 });

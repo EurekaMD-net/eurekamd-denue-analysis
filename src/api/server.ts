@@ -64,6 +64,8 @@ import {
   licensedPharmaciesByMunicipioHandler,
   localitiesByMunicipioHandler,
   localityDetailHandler,
+  locustEstadoHandler,
+  locustMuniHandler,
   manzanasByAgebHandler,
   mortalitySummaryHandler,
   mortalityTrendHandler,
@@ -162,6 +164,8 @@ export function createServer(config: ApiServerConfig): Hono {
   app.get("/analytics/mortality-summary", (c) =>
     mortalitySummaryHandler(c, config),
   );
+  app.get("/analytics/locust-muni", (c) => locustMuniHandler(c, config));
+  app.get("/analytics/locust-estado", (c) => locustEstadoHandler(c, config));
   app.get("/analytics/mortality-trend", (c) =>
     mortalityTrendHandler(c, config),
   );

@@ -45,7 +45,7 @@ describe("validatePreset", () => {
       id: "bad",
       title: "",
       description: "",
-      x: "sinba.casos_dm2_promedio", // endpoints: {} — no endpoint
+      x: "sesnsp.ano", // endpoints: {} — temporal, no /risk-trend wired
       y: "coneval.pobreza_pct",
     });
     expect(errors.some((e) => e.includes("unreachable"))).toBe(true);

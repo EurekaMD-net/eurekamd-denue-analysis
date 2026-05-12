@@ -91,7 +91,10 @@ describe("extractRows (X-key invariant)", () => {
     });
   });
 
-  it("reads /municipios payload for muni-grain X", () => {
+  it("reads /locust-muni payload for muni-grain X", () => {
+    // X = municipio_nombre (primary: locust-muni) + Y = total_establecimientos
+    // (primary: locust-muni) + Z = censo.pobtot (on locust-muni) → resolves
+    // to locust-muni endpoint. Payload column names match locust-muni schema.
     const payload = {
       entidad: "09",
       municipios: [
@@ -99,14 +102,14 @@ describe("extractRows (X-key invariant)", () => {
           cve_mun: "09003",
           municipio: "Coyoacán",
           poblacion: 614447,
-          establecimientos: 14000,
+          denue_establecimientos: 14000,
           pobreza_pct: 18.5,
         },
         {
           cve_mun: "09005",
           municipio: "Gustavo A. Madero",
           poblacion: 1173351,
-          establecimientos: 26500,
+          denue_establecimientos: 26500,
           pobreza_pct: 25.9,
         },
       ],

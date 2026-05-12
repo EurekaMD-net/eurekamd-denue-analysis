@@ -1921,6 +1921,74 @@ export const MAX_TILE_ZOOM = 22;
 export const TILE_FEATURE_CAP = 50_000;
 
 // ---------------------------------------------------------------------------
+// Locust composite endpoints — wide muni / estado rows joining every
+// pre-aggregated source. Powers the frontend Locust mode picker:
+// declaring a field's column on /analytics/locust-muni is enough to make
+// it Y/Z-joinable with any other field on the same payload.
+// ---------------------------------------------------------------------------
+
+export interface LocustMuniRow {
+  cve_mun: string;
+  municipio: string | null;
+  // Censo
+  poblacion: number | null;
+  pea: number | null;
+  graproes: number | null;
+  pct_pea: number | null;
+  pct_sin_cobertura_salud: number | null;
+  // DENUE
+  denue_establecimientos: number;
+  denue_farmacias: number;
+  // CLUES
+  unidades_clues: number;
+  // CONEVAL
+  pobreza_pct: number | null;
+  pobreza_extrema_pct: number | null;
+  carencia_acceso_salud_pct: number | null;
+  irs_indice: number | null;
+  irs_grado: IrsGrado | null;
+  // CE2024
+  ce2024_ue: number | null;
+  ce2024_personal_ocupado: number | null;
+  ce2024_valor_agregado: number | null;
+  // SINBA (latest year)
+  sinba_dm2_promedio: number | null;
+  sinba_hta_promedio: number | null;
+  sinba_obesidad_promedio: number | null;
+  // COFEPRIS
+  cofepris_total_licenciadas: number | null;
+  cofepris_con_estupefacientes: number | null;
+  // SICT
+  sict_tdpa_total: number | null;
+  // CNBV (latest year)
+  cnbv_monto_total: number | null;
+  cnbv_pct_femenino: number | null;
+  // SEDATU (latest year)
+  sedatu_monto_total: number | null;
+  sedatu_acciones_total: number | null;
+}
+
+export interface LocustMuniResult {
+  entidad: string;
+  municipios: LocustMuniRow[];
+}
+
+export interface LocustEstadoRow {
+  cve_ent: string;
+  nom_ent: string;
+  // ENOE (latest year)
+  enoe_tasa_informalidad: number | null;
+  enoe_tasa_desocupacion: number | null;
+  // ENIGH (latest year)
+  enigh_ingreso_p50: number | null;
+  enigh_pct_gasto_alimentos: number | null;
+}
+
+export interface LocustEstadoResult {
+  entidades: LocustEstadoRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
