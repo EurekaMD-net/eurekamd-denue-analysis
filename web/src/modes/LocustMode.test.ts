@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyFilterPins, computeZRange, extractRows } from "./LocustMode";
+import {
+  applyFilterPins,
+  buildEChartsOption,
+  computeZRange,
+  extractRows,
+} from "./LocustMode";
 import { findField } from "../lib/fields";
 
 const rows = [
@@ -511,6 +516,81 @@ describe("extractRows (X-key invariant)", () => {
       axisState("coneval.irs_grado"),
     );
     expect(rows.map((r) => r.z)).toEqual([0, 2, 4, null]);
+  });
+});
+
+describe("buildEChartsOption (per-capita label invariants)", () => {
+  // Audit C1 (commit 3ccef39 → follow-up): X label was wrongly gaining
+  // "/ 1k hab" when X was a count field, even though extractRows never
+  // normalizes X. Pin: X label is always raw, Y/Z labels gain the suffix
+  // only when the field is a non-pobtot count.
+  it("scatter: X axis label never gets per-capita suffix, even if X is a count", () => {
+    const xCount = axisState("denue.total_establecimientos");
+    const yCount = axisState("sesnsp.total_delitos");
+    const option = buildEChartsOption(
+      "scatter",
+      [{ x: 100, y: 200, z: null }],
+      xCount,
+      yCount,
+      axisState(null),
+      { perCapita: true },
+    );
+    const xName = (option.xAxis as { name?: string }).name;
+    const yName = (option.yAxis as { name?: string }).name;
+    expect(xName).toBe(xCount.field!.label);
+    expect(xName).not.toMatch(/\/ 1k hab/);
+    expect(yName).toMatch(/\/ 1k hab$/);
+  });
+
+  it("bar: Y axis gets suffix when count + perCapita; raw label otherwise", () => {
+    const xMuni = axisState("denue.municipio_nombre");
+    const yCount = axisState("sesnsp.total_delitos");
+    const onOption = buildEChartsOption(
+      "bar",
+      [{ x: "Coyoacán", y: 10, z: null }],
+      xMuni,
+      yCount,
+      axisState(null),
+      { perCapita: true },
+    );
+    expect((onOption.yAxis as { name?: string }).name).toMatch(/\/ 1k hab$/);
+    const offOption = buildEChartsOption(
+      "bar",
+      [{ x: "Coyoacán", y: 10, z: null }],
+      xMuni,
+      yCount,
+      axisState(null),
+      { perCapita: false },
+    );
+    expect((offOption.yAxis as { name?: string }).name).toBe(
+      yCount.field!.label,
+    );
+  });
+
+  it("line: yAxis carries `name` so the per-capita suffix surfaces (W1 fix)", () => {
+    const option = buildEChartsOption(
+      "line",
+      [{ x: "Coyoacán", y: 10, z: null }],
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+      { perCapita: true },
+    );
+    const yAxis = option.yAxis as { name?: string };
+    expect(yAxis.name).toMatch(/\/ 1k hab$/);
+  });
+
+  it("Y is censo.pobtot: no suffix even with perCapita on", () => {
+    const option = buildEChartsOption(
+      "bar",
+      [{ x: "Coyoacán", y: 600000, z: null }],
+      axisState("denue.municipio_nombre"),
+      axisState("censo.pobtot"),
+      axisState(null),
+      { perCapita: true },
+    );
+    const yName = (option.yAxis as { name?: string }).name;
+    expect(yName).not.toMatch(/\/ 1k hab/);
   });
 });
 

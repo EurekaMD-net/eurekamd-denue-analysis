@@ -177,6 +177,12 @@ export function LocustMode() {
   // The toggle stays in state regardless of eligibility, but is hidden /
   // ignored when not applicable so combos that lose eligibility (e.g.
   // changing X to estado grain) don't silently flip back on later.
+  // R1 audit note: this is a *UX gate* — extractRows() re-checks
+  // endpoint.grain === "muni" AND looks up censo.pobtot.endpoints[epId]
+  // before doing any arithmetic, so a future muni-grain endpoint missing
+  // a pobtot column would no-op safely there even if the toggle armed
+  // here. Two-source-of-truth on purpose: UX hides the affordance;
+  // extractRows is authoritative.
   const isPerCapitaCandidate = (f: FieldDef | null) =>
     f !== null && f.type === "numeric_count" && f.id !== "censo.pobtot";
   const perCapitaEligible =
@@ -821,7 +827,7 @@ export function extractRows(
     .filter((p) => Number.isFinite(p.y));
 }
 
-function buildEChartsOption(
+export function buildEChartsOption(
   chartType: string,
   rows: DataPoint[],
   xAxis: AxisState,
@@ -844,16 +850,54 @@ function buildEChartsOption(
     fontSize: 10,
   };
 
+  // Only Y and Z get normalized in extractRows — X is always the row
+  // identifier and passes through untouched (audit C1, 3ccef39: scatter
+  // X label was wrongly gaining "/ 1k hab" when a count field was put on
+  // X, even though the plotted X values were raw).
   const isCountField = (f: FieldDef | null | undefined) =>
     f != null && f.type === "numeric_count" && f.id !== "censo.pobtot";
-  const axisLabelOf = (f: FieldDef | null | undefined): string => {
+  const labelWithPerCapita = (f: FieldDef | null | undefined): string => {
     if (!f) return "";
     return options.perCapita && isCountField(f)
       ? `${f.label} / 1k hab`
       : f.label;
   };
-  const yAxisName = axisLabelOf(yAxis.field);
-  const xAxisName = axisLabelOf(xAxis.field);
+  const yAxisName = labelWithPerCapita(yAxis.field);
+  const zAxisName = labelWithPerCapita(zAxis.field);
+  const xAxisName = xAxis.field?.label ?? "";
+
+  // Tooltip formatter: shows axis name + value with the per-capita
+  // suffix already baked in. Without this, hovering a bar shows a bare
+  // number and the only "× 1k hab" affordance is the off-screen header
+  // chip (audit W2).
+  const tooltipFormatter = (
+    params:
+      | {
+          seriesName?: string;
+          name?: string;
+          value?: unknown;
+          data?: { value?: unknown };
+        }
+      | Array<{ seriesName?: string; name?: string; value?: unknown }>,
+  ): string => {
+    const fmt = (n: unknown): string => {
+      if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+      if (Math.abs(n) >= 1000)
+        return n.toLocaleString("es-MX", { maximumFractionDigits: 1 });
+      return n.toLocaleString("es-MX", { maximumFractionDigits: 2 });
+    };
+    const single = Array.isArray(params) ? params[0] : params;
+    if (!single) return "";
+    const name = single.name ?? "";
+    const v = Array.isArray(single.value)
+      ? single.value[1]
+      : (single.value ??
+        (single as { data?: { value?: unknown } }).data?.value);
+    const zLabel = zAxisName
+      ? `<br/>${zAxisName}: ${fmt((single as { value?: unknown[] }).value?.[2])}`
+      : "";
+    return `<b>${name}</b><br/>${yAxisName}: ${fmt(v)}${zLabel}`;
+  };
 
   if (chartType === "bar") {
     const data = rows.map((p) => ({
@@ -864,7 +908,7 @@ function buildEChartsOption(
     return {
       backgroundColor: "transparent",
       grid: { left: 60, right: 20, top: 20, bottom: 60 },
-      tooltip: { trigger: "axis" },
+      tooltip: { trigger: "axis", formatter: tooltipFormatter },
       xAxis: {
         type: "category",
         data: data.map((d) => d.name),
@@ -889,7 +933,7 @@ function buildEChartsOption(
     return {
       backgroundColor: "transparent",
       grid: { left: 60, right: 20, top: 20, bottom: 50 },
-      tooltip: { trigger: "item" },
+      tooltip: { trigger: "item", formatter: tooltipFormatter },
       xAxis: {
         type: "value",
         name: xAxisName,
@@ -907,7 +951,7 @@ function buildEChartsOption(
           type: "scatter",
           symbolSize: zAxis.field ? 10 : 6,
           data: rows.map((p) => ({
-            value: [p.x, p.y],
+            value: [p.x, p.y, p.z],
             itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
           })),
           itemStyle: { color: palette[0] },
@@ -918,7 +962,7 @@ function buildEChartsOption(
   if (chartType === "treemap") {
     return {
       backgroundColor: "transparent",
-      tooltip: { trigger: "item" },
+      tooltip: { trigger: "item", formatter: tooltipFormatter },
       series: [
         {
           type: "treemap",
@@ -931,16 +975,23 @@ function buildEChartsOption(
       ],
     };
   }
-  // Default: line
+  // Default: line. W1 audit fix: yAxis was missing `name`, so per-capita
+  // "/ 1k hab" suffix never surfaced on line charts.
   return {
     backgroundColor: "transparent",
     grid: { left: 60, right: 20, top: 20, bottom: 40 },
+    tooltip: { trigger: "axis", formatter: tooltipFormatter },
     xAxis: {
       type: "category",
       data: rows.map((p) => String(p.x)),
       axisLabel: baseAxisLabel,
     },
-    yAxis: { type: "value", axisLabel: baseAxisLabel },
+    yAxis: {
+      type: "value",
+      name: yAxisName,
+      nameTextStyle: baseAxisLabel,
+      axisLabel: baseAxisLabel,
+    },
     series: [{ type: "line", data: rows.map((p) => p.y), smooth: true }],
   };
 }
