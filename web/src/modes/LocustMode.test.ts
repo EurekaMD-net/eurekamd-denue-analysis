@@ -187,6 +187,91 @@ describe("extractRows (X-key invariant)", () => {
     expect(rows[0]?.y).toBe(99);
   });
 
+  // Regression 2026-05-13: extractRows previously called
+  // getActiveEndpoint(xField) with only X, which picks X.primaryEndpoint
+  // (or X's first key). When Y lived on a *different* endpoint shared
+  // with X (e.g. entidad_nombre × enigh.ingreso_p50 share only
+  // locust-estado; X's first key is national-treemap), the wrong
+  // endpoint was selected, the Y column lookup missed, and every row
+  // was dropped. The fetcher already resolves with X+Y+Z; the parser
+  // must agree.
+
+  it("Entidad × enigh.ingreso_p50 resolves to locust-estado (not X's first endpoint)", () => {
+    // X is on national-treemap + locust-estado. Y is only on
+    // locust-estado. Must resolve to locust-estado.
+    const payload = {
+      entidades: [
+        {
+          cve_ent: "09",
+          nom_ent: "Ciudad de México",
+          enigh_ingreso_p50: 81867.96,
+        },
+        { cve_ent: "15", nom_ent: "México", enigh_ingreso_p50: 58311.63 },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.entidad_nombre"),
+      axisState("enigh.ingreso_p50"),
+      axisState(null),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({ x: "Ciudad de México", y: 81867.96, z: null });
+  });
+
+  it("Municipio × sesnsp.total_delitos resolves to risk-summary (not X.primaryEndpoint)", () => {
+    // X.primaryEndpoint = locust-muni. Y is only on risk-summary. Must
+    // resolve to risk-summary because the X+Y intersection forces it.
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 614447,
+          total_delitos: 12000,
+        },
+        {
+          cve_mun: "09005",
+          municipio: "Gustavo A. Madero",
+          poblacion: 1173351,
+          total_delitos: 23000,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({ x: "Coyoacán", y: 12000, z: null });
+  });
+
+  it("Municipio × edr.total_defunciones resolves to mortality-summary", () => {
+    // Same bug class, mortality-summary surface.
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 614447,
+          total_defunciones: 4200,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("edr.total_defunciones"),
+      axisState(null),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.y).toBe(4200);
+  });
+
   it("drops rows where Y is not finite", () => {
     const payload = {
       entidades: [

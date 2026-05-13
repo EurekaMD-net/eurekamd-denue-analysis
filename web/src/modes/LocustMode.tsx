@@ -663,8 +663,16 @@ export function extractRows(
 ): DataPoint[] {
   const xField = xAxis.field;
   const yField = yAxis.field;
+  const zField = zAxis.field;
   if (!xField || !yField) return [];
-  const epId = getActiveEndpoint(xField);
+  // Must resolve against X+Y+Z, not X alone: a field combo like
+  // entidad_nombre × enigh.ingreso_p50 has X on national-treemap AND
+  // locust-estado, but Y is only on locust-estado. Resolving with X alone
+  // picks national-treemap (first key), then the Y column lookup misses
+  // and every row is dropped. The upstream fetcher already uses X+Y+Z;
+  // the parser must agree or the network fetches the right endpoint and
+  // the parser silently throws the rows away.
+  const epId = getActiveEndpoint(xField, yField, zField);
   if (!epId) return [];
   const endpoint = ENDPOINTS[epId];
 
@@ -683,7 +691,6 @@ export function extractRows(
 
   const xCol = xField.endpoints[epId];
   const yCol = yField.endpoints[epId];
-  const zField = zAxis.field;
   const zCol = zField ? zField.endpoints[epId] : undefined;
   if (!xCol || !yCol) return [];
 
