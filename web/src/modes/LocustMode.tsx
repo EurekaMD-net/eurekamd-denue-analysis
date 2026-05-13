@@ -778,7 +778,7 @@ export function extractRows(
     zField.id !== "censo.pobtot";
 
   return rows
-    .map((r) => {
+    .map((r): DataPoint | null => {
       const xv = r[xCol];
       const yv = r[yCol];
       const zv = zCol ? r[zCol] : null;
@@ -790,6 +790,29 @@ export function extractRows(
             ? popRaw
             : Number(popRaw);
       const canNormalize = popCol !== null && Number.isFinite(pop) && pop > 0;
+
+      // Drop rows with no X identifier. These typically arise from a
+      // source row whose cve_mun isn't in the anchor catalog (e.g. INEGI
+      // censo 2020 doesn't yet include post-2020 munis like 02007 San
+      // Felipe, BC — SESNSP reports its crimes separately and the LEFT
+      // JOIN on censo_municipios yields null for nom_mun + pobtot).
+      // Rendering them as empty-name bars under a "per 1k" label is
+      // doubly wrong: the bar has no label AND the value isn't actually
+      // normalized.
+      const xIsEmpty =
+        xv === null ||
+        xv === undefined ||
+        (typeof xv === "string" && xv.trim() === "");
+      if (xIsEmpty) return null;
+
+      // Per-capita drop rule: if the user asked for normalization and Y
+      // (the load-bearing axis) is normalizable but this specific row
+      // has no usable pobtot, drop it. Otherwise raw counts and rates
+      // would coexist on the same chart under a "/ 1k hab" label —
+      // exactly the mislabel the audit caught on commit 1ef15f9 (where
+      // null-pop rows fell through to raw). Z falls back to raw because
+      // Z is only a colourant.
+      if (options.perCapita && yNormalizable && !canNormalize) return null;
 
       let z: number | null;
       if (zOrderIndex !== null) {
@@ -816,15 +839,12 @@ export function extractRows(
           : yNum;
 
       return {
-        x:
-          typeof xv === "string" || typeof xv === "number"
-            ? xv
-            : String(xv ?? ""),
+        x: typeof xv === "string" || typeof xv === "number" ? xv : String(xv),
         y: yOut,
         z,
       };
     })
-    .filter((p) => Number.isFinite(p.y));
+    .filter((p): p is DataPoint => p !== null && Number.isFinite(p.y));
 }
 
 export function buildEChartsOption(

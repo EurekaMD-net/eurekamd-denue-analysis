@@ -442,21 +442,33 @@ describe("extractRows (X-key invariant)", () => {
     expect(rows[0]?.y).toBe(451000);
   });
 
-  it("perCapita on but pobtot row is null/zero: leaves Y unchanged (no /0)", () => {
+  // Pre-fix this test asserted "leaves Y unchanged" — wrong. Mixing raw
+  // counts with normalized rates under a "/ 1k hab" label produced the
+  // 02007 San Felipe bug (893 delitos shown as "893 per 1k" because
+  // censo 2020 has no pop record for that post-2020 muni). Now: when Y
+  // is normalizable but the row's pobtot is null/zero, the row is
+  // dropped so the chart only shows valid rates.
+  it("perCapita on, normalizable Y, null/zero pobtot row: dropped", () => {
     const payload = {
-      entidad: "09",
+      entidad: "02",
       municipios: [
         {
-          cve_mun: "09003",
-          municipio: "Coyoacán",
-          poblacion: null,
-          total_delitos: 12000,
+          cve_mun: "02004",
+          municipio: "Tijuana",
+          poblacion: 1922523,
+          total_delitos: 8760,
         },
         {
-          cve_mun: "09005",
-          municipio: "GAM",
+          cve_mun: "02007",
+          municipio: "San Felipe",
+          poblacion: null, // post-2020 muni absent from censo 2020
+          total_delitos: 893,
+        },
+        {
+          cve_mun: "02-test",
+          municipio: "Zero-pop muni",
           poblacion: 0,
-          total_delitos: 6000,
+          total_delitos: 100,
         },
       ],
     };
@@ -467,7 +479,85 @@ describe("extractRows (X-key invariant)", () => {
       axisState(null),
       { perCapita: true },
     );
-    expect(rows.map((r) => r.y)).toEqual([12000, 6000]);
+    // Only Tijuana survives: 8760 / 1922523 * 1000 = 4.557...
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.x).toBe("Tijuana");
+    expect(rows[0]?.y).toBeCloseTo(4.557, 2);
+  });
+
+  // The same null-pop rows would still appear with raw values when
+  // per-capita is off — the chart isn't lying about units in that case.
+  it("perCapita off, null pobtot row: kept (no normalization claim)", () => {
+    const payload = {
+      entidad: "02",
+      municipios: [
+        {
+          cve_mun: "02007",
+          municipio: "San Felipe",
+          poblacion: null,
+          total_delitos: 893,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+      { perCapita: false },
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.y).toBe(893);
+  });
+
+  // Source rows missing from the anchor catalog (e.g. censo 2020 doesn't
+  // have a post-2020 muni; the LEFT JOIN leaves municipio = null) come
+  // back as no-name bars. Drop them regardless of per-capita state —
+  // their X is unattributed.
+  it("drops rows whose X column is null (unattributed muni)", () => {
+    const payload = {
+      entidad: "02",
+      municipios: [
+        {
+          cve_mun: "02004",
+          municipio: "Tijuana",
+          poblacion: 1922523,
+          total_delitos: 8760,
+        },
+        {
+          cve_mun: "02007",
+          municipio: null,
+          poblacion: null,
+          total_delitos: 893,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.x).toBe("Tijuana");
+  });
+
+  it("drops rows whose X column is an empty/whitespace string", () => {
+    const payload = {
+      entidades: [
+        { nombre: "Ciudad de México", establecimientos: 451000 },
+        { nombre: "", establecimientos: 999 },
+        { nombre: "   ", establecimientos: 888 },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.entidad_nombre"),
+      axisState("denue.total_establecimientos"),
+      axisState(null),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.x).toBe("Ciudad de México");
   });
 
   it("perCapita on (Y is pct, not count): no normalization", () => {
