@@ -55,6 +55,7 @@ export function LocustMode() {
   const [filterPins, setFilterPins] = useState<
     Array<{ axis: AxisSlot; label: string; value: string }>
   >([]);
+  const [perCapita, setPerCapita] = useState(false);
 
   const applyPreset = (preset: LocustPreset) => {
     setXAxis({ ...INITIAL_AXIS, field: findField(preset.x) ?? null });
@@ -170,6 +171,19 @@ export function LocustMode() {
   const xEndpoint = xActiveEndpointId ? ENDPOINTS[xActiveEndpointId] : null;
   const needsEntidad = xEndpoint?.needsEntidad === true && entidad === null;
 
+  // Per-capita (× 1,000 inhabitants) is offered only where it makes sense:
+  //   - Active endpoint is muni-grain (all four muni endpoints carry pobtot)
+  //   - At least one of Y/Z is a count-type field that isn't itself pobtot
+  // The toggle stays in state regardless of eligibility, but is hidden /
+  // ignored when not applicable so combos that lose eligibility (e.g.
+  // changing X to estado grain) don't silently flip back on later.
+  const isPerCapitaCandidate = (f: FieldDef | null) =>
+    f !== null && f.type === "numeric_count" && f.id !== "censo.pobtot";
+  const perCapitaEligible =
+    xEndpoint?.grain === "muni" &&
+    (isPerCapitaCandidate(yAxis.field) || isPerCapitaCandidate(zAxis.field));
+  const perCapitaActive = perCapita && perCapitaEligible;
+
   return (
     <div className="flex h-full bg-slate-950 text-slate-100">
       {/* Left rail: axis panel + filter pins */}
@@ -270,6 +284,31 @@ export function LocustMode() {
           )}
           <span className="h-4 w-px bg-slate-800" />
           <FilterControls />
+          {perCapitaEligible && (
+            <>
+              <span className="h-4 w-px bg-slate-800" />
+              <label
+                className="flex cursor-pointer select-none items-center gap-1.5 font-mono text-[10px] text-slate-300 hover:text-slate-100"
+                title="Normaliza Y y Z por cada 1,000 habitantes del municipio"
+              >
+                <input
+                  type="checkbox"
+                  checked={perCapita}
+                  onChange={(e) => setPerCapita(e.target.checked)}
+                  className="h-3 w-3 cursor-pointer accent-cyan-500"
+                />
+                <span>por 1,000 hab.</span>
+              </label>
+            </>
+          )}
+          {perCapitaActive && (
+            <span
+              className="rounded bg-cyan-900/60 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200"
+              title="Y y Z elegibles se muestran por cada 1,000 habitantes"
+            >
+              × 1k hab
+            </span>
+          )}
           <div className="flex-1" />
           <ChartTypeToggle
             current={chartType}
@@ -299,6 +338,7 @@ export function LocustMode() {
               zAxis={zAxis}
               dataset={dataset}
               filterPins={filterPins}
+              perCapita={perCapitaActive}
               onCellPin={(label, value) => {
                 if (filterPins.some((p) => p.value === value)) return;
                 setFilterPins([...filterPins, { axis: "x", label, value }]);
@@ -566,6 +606,8 @@ interface ChartProps {
   zAxis: AxisState;
   dataset: ReturnType<typeof useLocustDataset>;
   filterPins: FilterPin[];
+  /** When true, Y and Z numeric_count fields are projected per 1,000 hab. */
+  perCapita: boolean;
   onCellPin: (label: string, value: string) => void;
 }
 
@@ -576,6 +618,7 @@ function LocustChart({
   zAxis,
   dataset,
   filterPins,
+  perCapita,
   onCellPin,
 }: ChartProps) {
   if (dataset.isLoading) {
@@ -592,7 +635,9 @@ function LocustChart({
       </div>
     );
   }
-  const allRows = extractRows(dataset.data, xAxis, yAxis, zAxis);
+  const allRows = extractRows(dataset.data, xAxis, yAxis, zAxis, {
+    perCapita,
+  });
   if (allRows.length === 0) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-slate-500">
@@ -615,7 +660,9 @@ function LocustChart({
     );
   }
 
-  const option = buildEChartsOption(chartType, rows, xAxis, yAxis, zAxis);
+  const option = buildEChartsOption(chartType, rows, xAxis, yAxis, zAxis, {
+    perCapita,
+  });
   return (
     <ReactECharts
       style={{ height: "100%", width: "100%" }}
@@ -660,6 +707,7 @@ export function extractRows(
   xAxis: AxisState,
   yAxis: AxisState,
   zAxis: AxisState,
+  options: { perCapita?: boolean } = {},
 ): DataPoint[] {
   const xField = xAxis.field;
   const yField = yAxis.field;
@@ -704,11 +752,39 @@ export function extractRows(
     ? new Map(zField!.ordinalOrder!.map((v, i) => [v, i]))
     : null;
 
+  // Per-capita projection: only applies on muni-grain endpoints where the
+  // censo.pobtot field exposes a column. We look the column up via the
+  // field catalog so the SQL alias can change without breaking this. A
+  // count field that IS pobtot itself is excluded (normalizing pobtot by
+  // pobtot is the constant 1000).
+  const popField = findField("censo.pobtot");
+  const popCol =
+    options.perCapita && endpoint.grain === "muni"
+      ? (popField?.endpoints[epId] ?? null)
+      : null;
+  const yNormalizable =
+    popCol !== null &&
+    yField.type === "numeric_count" &&
+    yField.id !== "censo.pobtot";
+  const zNormalizable =
+    popCol !== null &&
+    zField?.type === "numeric_count" &&
+    zField.id !== "censo.pobtot";
+
   return rows
     .map((r) => {
       const xv = r[xCol];
       const yv = r[yCol];
       const zv = zCol ? r[zCol] : null;
+      const popRaw = popCol ? r[popCol] : null;
+      const pop =
+        popRaw == null
+          ? NaN
+          : typeof popRaw === "number"
+            ? popRaw
+            : Number(popRaw);
+      const canNormalize = popCol !== null && Number.isFinite(pop) && pop > 0;
+
       let z: number | null;
       if (zOrderIndex !== null) {
         z =
@@ -723,12 +799,22 @@ export function extractRows(
         const n = Number(zv);
         z = Number.isFinite(n) ? n : null;
       }
+      if (zNormalizable && canNormalize && z !== null) {
+        z = (z * 1000) / pop;
+      }
+
+      const yNum = typeof yv === "number" ? yv : Number(yv ?? NaN);
+      const yOut =
+        yNormalizable && canNormalize && Number.isFinite(yNum)
+          ? (yNum * 1000) / pop
+          : yNum;
+
       return {
         x:
           typeof xv === "string" || typeof xv === "number"
             ? xv
             : String(xv ?? ""),
-        y: typeof yv === "number" ? yv : Number(yv ?? NaN),
+        y: yOut,
         z,
       };
     })
@@ -741,6 +827,7 @@ function buildEChartsOption(
   xAxis: AxisState,
   yAxis: AxisState,
   zAxis: AxisState,
+  options: { perCapita?: boolean } = {},
 ): Record<string, unknown> {
   const palette = zAxis.field
     ? ["#16a34a", "#65a30d", "#ca8a04", "#dc2626"] // green→red
@@ -756,6 +843,17 @@ function buildEChartsOption(
     fontFamily: "ui-monospace, SFMono-Regular, monospace",
     fontSize: 10,
   };
+
+  const isCountField = (f: FieldDef | null | undefined) =>
+    f != null && f.type === "numeric_count" && f.id !== "censo.pobtot";
+  const axisLabelOf = (f: FieldDef | null | undefined): string => {
+    if (!f) return "";
+    return options.perCapita && isCountField(f)
+      ? `${f.label} / 1k hab`
+      : f.label;
+  };
+  const yAxisName = axisLabelOf(yAxis.field);
+  const xAxisName = axisLabelOf(xAxis.field);
 
   if (chartType === "bar") {
     const data = rows.map((p) => ({
@@ -774,7 +872,7 @@ function buildEChartsOption(
       },
       yAxis: {
         type: "value",
-        name: yAxis.field?.label ?? "",
+        name: yAxisName,
         nameTextStyle: baseAxisLabel,
         axisLabel: baseAxisLabel,
       },
@@ -794,13 +892,13 @@ function buildEChartsOption(
       tooltip: { trigger: "item" },
       xAxis: {
         type: "value",
-        name: xAxis.field?.label ?? "",
+        name: xAxisName,
         nameTextStyle: baseAxisLabel,
         axisLabel: baseAxisLabel,
       },
       yAxis: {
         type: "value",
-        name: yAxis.field?.label ?? "",
+        name: yAxisName,
         nameTextStyle: baseAxisLabel,
         axisLabel: baseAxisLabel,
       },

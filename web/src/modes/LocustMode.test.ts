@@ -308,6 +308,186 @@ describe("extractRows (X-key invariant)", () => {
     expect(rows[0]?.y).toBe(1);
   });
 
+  // 2026-05-13: per-capita (× 1,000 hab) normalization toggle. Only
+  // applies on muni-grain endpoints where censo.pobtot is exposed, only
+  // to numeric_count fields, and never to censo.pobtot itself.
+
+  it("perCapita off: leaves Y/Z unchanged (default)", () => {
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 600000,
+          total_delitos: 12000,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+    );
+    expect(rows[0]?.y).toBe(12000);
+  });
+
+  it("perCapita on (muni, count Y): projects Y to (y * 1000) / pobtot", () => {
+    const payload = {
+      entidad: "09",
+      municipios: [
+        // 12000 delitos / 600000 hab * 1000 = 20.0 per 1k hab
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 600000,
+          total_delitos: 12000,
+        },
+        // 6000 / 1000000 * 1000 = 6.0
+        {
+          cve_mun: "09005",
+          municipio: "GAM",
+          poblacion: 1000000,
+          total_delitos: 6000,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+      { perCapita: true },
+    );
+    expect(rows.map((r) => r.y)).toEqual([20, 6]);
+  });
+
+  it("perCapita on (muni, count Y + count Z): normalizes both axes", () => {
+    const payload = {
+      entidad: "09",
+      municipios: [
+        // y = total_defunciones / pob * 1000; z = total_delitos / pob * 1000
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 500000,
+          total_defunciones: 2500,
+          total_delitos: 10000,
+        },
+      ],
+    };
+    // X=municipio_nombre + Y=edr.total_defunciones + Z=sesnsp.total_delitos
+    // share no muni-composite endpoint (one is on mortality-summary, the
+    // other on risk-summary). Use Z on the same endpoint as Y instead.
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("edr.total_defunciones"),
+      axisState("censo.pobtot"),
+      { perCapita: true },
+    );
+    // Y normalized: 2500 / 500000 * 1000 = 5.0
+    // Z is censo.pobtot itself → NOT normalized (would be the constant 1000)
+    expect(rows[0]?.y).toBe(5);
+    expect(rows[0]?.z).toBe(500000);
+  });
+
+  it("perCapita on but Y is censo.pobtot: Y is NOT normalized", () => {
+    // Normalizing pobtot by pobtot gives the constant 1000 — silly. The
+    // implementation excludes the field by id.
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 600000,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("censo.pobtot"),
+      axisState(null),
+      { perCapita: true },
+    );
+    expect(rows[0]?.y).toBe(600000);
+  });
+
+  it("perCapita on (estado-grain): no normalization (only muni grain qualifies)", () => {
+    // /national-treemap returns one row per estado with no pobtot column.
+    const payload = {
+      entidades: [
+        {
+          nombre: "CDMX",
+          establecimientos: 451000,
+          pobreza_pct_promedio: 27.1,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.entidad_nombre"),
+      axisState("denue.total_establecimientos"),
+      axisState(null),
+      { perCapita: true },
+    );
+    expect(rows[0]?.y).toBe(451000);
+  });
+
+  it("perCapita on but pobtot row is null/zero: leaves Y unchanged (no /0)", () => {
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: null,
+          total_delitos: 12000,
+        },
+        {
+          cve_mun: "09005",
+          municipio: "GAM",
+          poblacion: 0,
+          total_delitos: 6000,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("sesnsp.total_delitos"),
+      axisState(null),
+      { perCapita: true },
+    );
+    expect(rows.map((r) => r.y)).toEqual([12000, 6000]);
+  });
+
+  it("perCapita on (Y is pct, not count): no normalization", () => {
+    // numeric_pct fields are already ratios — normalizing again is wrong.
+    const payload = {
+      entidad: "09",
+      municipios: [
+        {
+          cve_mun: "09003",
+          municipio: "Coyoacán",
+          poblacion: 600000,
+          pobreza_pct: 18.5,
+        },
+      ],
+    };
+    const rows = extractRows(
+      payload,
+      axisState("denue.municipio_nombre"),
+      axisState("coneval.pobreza_pct"),
+      axisState(null),
+      { perCapita: true },
+    );
+    expect(rows[0]?.y).toBe(18.5);
+  });
+
   // C1 audit fix: categorical_ordinal Z (irs_grado) must map "Muy bajo" …
   // "Muy alto" to ranks 0..4, not NaN.
   it("maps categorical_ordinal Z values to ordinal ranks (irs_grado)", () => {
