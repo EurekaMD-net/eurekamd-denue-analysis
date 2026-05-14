@@ -583,33 +583,47 @@ function ResultTable({ turn }: { turn: ChatTurn }) {
       <div className="font-mono text-[11px] text-slate-500">— sin filas —</div>
     );
   }
+  // `turn.rows` is fewer than `turn.rowCount` in two cases: a restored
+  // thread (backend digest keeps only the first 5 rows) or a live turn
+  // with >100 rows (we render at most 100). Surface the gap so the
+  // badge count and the visible rows don't silently disagree.
+  const shown = Math.min(turn.rows.length, 100);
+  const isSample = shown < turn.rowCount;
   return (
-    <div className="max-h-72 overflow-auto rounded border border-slate-800">
-      <table className="w-full font-mono text-[11px] text-slate-300">
-        <thead className="sticky top-0 bg-slate-950 text-slate-500">
-          <tr>
-            {turn.columns.map((c) => (
-              <th
-                key={c}
-                className="border-b border-slate-800 px-2 py-1 text-left"
-              >
-                {c}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {turn.rows.slice(0, 100).map((r, i) => (
-            <tr key={i} className="even:bg-slate-950/50">
+    <div>
+      <div className="max-h-72 overflow-auto rounded border border-slate-800">
+        <table className="w-full font-mono text-[11px] text-slate-300">
+          <thead className="sticky top-0 bg-slate-950 text-slate-500">
+            <tr>
               {turn.columns.map((c) => (
-                <td key={c} className="border-b border-slate-900 px-2 py-1">
-                  {formatCell((r as Record<string, unknown>)[c])}
-                </td>
+                <th
+                  key={c}
+                  className="border-b border-slate-800 px-2 py-1 text-left"
+                >
+                  {c}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {turn.rows.slice(0, 100).map((r, i) => (
+              <tr key={i} className="even:bg-slate-950/50">
+                {turn.columns.map((c) => (
+                  <td key={c} className="border-b border-slate-900 px-2 py-1">
+                    {formatCell((r as Record<string, unknown>)[c])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {isSample && (
+        <div className="mt-1 font-mono text-[10px] text-slate-500">
+          muestra: {shown.toLocaleString("es-MX")} de{" "}
+          {turn.rowCount.toLocaleString("es-MX")} filas
+        </div>
+      )}
     </div>
   );
 }

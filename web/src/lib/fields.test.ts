@@ -47,9 +47,9 @@ describe("deriveChartType", () => {
     expect(deriveChartType("temporal", "numeric_count")).toBe("line");
   });
 
-  it("categorical × categorical → heatmap", () => {
+  it("categorical × categorical → bar (no heatmap: one value per X row)", () => {
     expect(deriveChartType("categorical_nominal", "categorical_ordinal")).toBe(
-      "heatmap",
+      "bar",
     );
   });
 

@@ -53,7 +53,7 @@ export function LocustMode() {
   const [pickerOpen, setPickerOpen] = useState<AxisSlot | null>(null);
   const [chartOverride, setChartOverride] = useState<string | null>(null);
   const [filterPins, setFilterPins] = useState<
-    Array<{ axis: AxisSlot; label: string; value: string }>
+    Array<{ label: string; value: string }>
   >([]);
   const [perCapita, setPerCapita] = useState(false);
 
@@ -347,7 +347,7 @@ export function LocustMode() {
               perCapita={perCapitaActive}
               onCellPin={(label, value) => {
                 if (filterPins.some((p) => p.value === value)) return;
-                setFilterPins([...filterPins, { axis: "x", label, value }]);
+                setFilterPins([...filterPins, { label, value }]);
               }}
             />
           </div>
@@ -487,7 +487,9 @@ function ChartTypeToggle({
   derived: string;
   onSet: (v: string | null) => void;
 }) {
-  const opts = ["bar", "scatter", "line", "heatmap", "treemap"];
+  // No "heatmap": buildEChartsOption has no heatmap branch and Locust's
+  // {x, y, z} row model can't express a 2-categorical-axis grid.
+  const opts = ["bar", "scatter", "line", "treemap"];
   return (
     <div className="flex items-center gap-1">
       <span className="font-mono text-[9px] text-slate-500">Chart:</span>
@@ -600,7 +602,6 @@ function useLocustDataset(
 }
 
 interface FilterPin {
-  axis: AxisSlot;
   label: string;
   value: string;
 }

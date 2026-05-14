@@ -711,10 +711,12 @@ export function fieldSharesAnyEndpoint(x: FieldDef, f: FieldDef): boolean {
 export function deriveChartType(
   x: FieldType | null,
   y: FieldType | null,
-): "bar" | "scatter" | "line" | "heatmap" | "treemap" {
+): "bar" | "scatter" | "line" | "treemap" {
   if (!x && !y) return "treemap";
   if (x === "temporal" && y && isNumeric(y)) return "line";
-  if (x && isCategorical(x) && y && isCategorical(y)) return "heatmap";
+  // cat × cat falls to bar: Locust's row model is one numeric value per
+  // X identifier, so there's no second value axis to fill a heatmap cell.
+  if (x && isCategorical(x) && y && isCategorical(y)) return "bar";
   if (x && isNumeric(x) && y && isNumeric(y)) return "scatter";
   if (x && isCategorical(x) && y && isNumeric(y)) return "bar";
   if (x && isNumeric(x) && y && isCategorical(y)) return "bar";

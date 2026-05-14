@@ -19,25 +19,21 @@ describe("applyFilterPins (RH-1)", () => {
   });
 
   it("filters to rows whose x matches a single pin value", () => {
-    const out = applyFilterPins(rows, [
-      { axis: "x", label: "Entidad", value: "Puebla" },
-    ]);
+    const out = applyFilterPins(rows, [{ label: "Entidad", value: "Puebla" }]);
     expect(out).toHaveLength(1);
     expect(out[0]?.x).toBe("Puebla");
   });
 
-  it("treats multiple pins as an inclusion set (OR within axis)", () => {
+  it("treats multiple pins as an inclusion set (OR across pins)", () => {
     const out = applyFilterPins(rows, [
-      { axis: "x", label: "Entidad", value: "Veracruz" },
-      { axis: "x", label: "Entidad", value: "Oaxaca" },
+      { label: "Entidad", value: "Veracruz" },
+      { label: "Entidad", value: "Oaxaca" },
     ]);
     expect(out.map((r) => r.x)).toEqual(["Veracruz", "Oaxaca"]);
   });
 
   it("returns empty when no row matches any pin", () => {
-    const out = applyFilterPins(rows, [
-      { axis: "x", label: "Entidad", value: "Yucatán" },
-    ]);
+    const out = applyFilterPins(rows, [{ label: "Entidad", value: "Yucatán" }]);
     expect(out).toEqual([]);
   });
 
@@ -47,9 +43,7 @@ describe("applyFilterPins (RH-1)", () => {
       { x: "9", y: 2, z: null },
       { x: "10", y: 3, z: null },
     ];
-    const out = applyFilterPins(mixed, [
-      { axis: "x", label: "ent", value: "9" },
-    ]);
+    const out = applyFilterPins(mixed, [{ label: "ent", value: "9" }]);
     expect(out).toHaveLength(2);
   });
 });
