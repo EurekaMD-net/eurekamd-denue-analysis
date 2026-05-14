@@ -66,19 +66,32 @@ export type EndpointId =
   | "risk-summary"
   | "mortality-summary"
   | "locust-muni"
-  | "locust-estado";
+  | "locust-estado"
+  | "locust-ageb";
+
+/**
+ * Selection context threaded into `EndpointDef.path`. Most endpoints only
+ * read `entidad`; AGEB-grain endpoints read `cveMun` (a 5-digit municipio
+ * code that already encodes the entidad in its first two digits).
+ */
+export interface EndpointPathCtx {
+  entidad: string | null;
+  cveMun: string | null;
+}
 
 export interface EndpointDef {
   id: EndpointId;
   /**
-   * Resolves the full URL given the operator's selected `entidad` clave.
-   * Returns null when the endpoint requires an entidad and none is set.
+   * Resolves the full URL from the current selection context. Returns
+   * null when a required selection (entidad or cveMun) is missing.
    */
-  path: (entidad: string | null) => string | null;
+  path: (ctx: EndpointPathCtx) => string | null;
   /** Key on the JSON envelope where the row array lives. */
   rowsKey: string;
   /** Surfaces the "selecciona una entidad" hint pre-fetch. */
   needsEntidad: boolean;
+  /** Surfaces the "selecciona un municipio" hint pre-fetch (AGEB grain). */
+  needsCveMun: boolean;
   /** Display grain — drives the picker chip label. */
   grain: FieldGrain;
   /** Human-friendly label for the picker context hint. */
@@ -91,51 +104,57 @@ export const ENDPOINTS: Record<EndpointId, EndpointDef> = {
     path: () => "/analytics/national-treemap",
     rowsKey: "entidades",
     needsEntidad: false,
+    needsCveMun: false,
     grain: "estado",
     label: "Estados (DENUE national treemap)",
   },
   municipios: {
     id: "municipios",
-    path: (entidad) =>
+    path: ({ entidad }) =>
       entidad ? `/analytics/municipios?entidad=${entidad}` : null,
     rowsKey: "municipios",
     needsEntidad: true,
+    needsCveMun: false,
     grain: "muni",
     label: "Municipios (DENUE+CONEVAL+CLUES per muni)",
   },
   "top-sectors": {
     id: "top-sectors",
-    path: (entidad) =>
+    path: ({ entidad }) =>
       entidad ? `/analytics/top-sectors?entidad=${entidad}` : null,
     rowsKey: "sectors",
     needsEntidad: true,
+    needsCveMun: false,
     grain: "nacional",
     label: "Sectores SCIAN (top por entidad)",
   },
   "risk-summary": {
     id: "risk-summary",
-    path: (entidad) =>
+    path: ({ entidad }) =>
       entidad ? `/analytics/risk-summary?entidad=${entidad}` : null,
     rowsKey: "municipios",
     needsEntidad: true,
+    needsCveMun: false,
     grain: "muni",
     label: "Riesgo SESNSP (delitos por municipio)",
   },
   "mortality-summary": {
     id: "mortality-summary",
-    path: (entidad) =>
+    path: ({ entidad }) =>
       entidad ? `/analytics/mortality-summary?entidad=${entidad}` : null,
     rowsKey: "municipios",
     needsEntidad: true,
+    needsCveMun: false,
     grain: "muni",
     label: "Mortalidad EDR (defunciones por municipio)",
   },
   "locust-muni": {
     id: "locust-muni",
-    path: (entidad) =>
+    path: ({ entidad }) =>
       entidad ? `/analytics/locust-muni?entidad=${entidad}` : null,
     rowsKey: "municipios",
     needsEntidad: true,
+    needsCveMun: false,
     grain: "muni",
     label: "Composite muni (todas las fuentes joinables por cve_mun)",
   },
@@ -144,8 +163,22 @@ export const ENDPOINTS: Record<EndpointId, EndpointDef> = {
     path: () => "/analytics/locust-estado",
     rowsKey: "entidades",
     needsEntidad: false,
+    needsCveMun: false,
     grain: "estado",
     label: "Composite estado (ENOE + ENIGH + censo entidades)",
+  },
+  "locust-ageb": {
+    id: "locust-ageb",
+    // cve_mun (5-digit) already encodes the entidad; this endpoint only
+    // needs the municipio. The UI still gates the municipio selector
+    // behind entidad so the muni list can be populated.
+    path: ({ cveMun }) =>
+      cveMun ? `/analytics/locust-ageb?cve_mun=${cveMun}` : null,
+    rowsKey: "agebs",
+    needsEntidad: false,
+    needsCveMun: true,
+    grain: "ageb",
+    label: "Composite AGEB (censo + CONEVAL por AGEB de un municipio)",
   },
 };
 
@@ -257,13 +290,24 @@ export const FIELD_CATALOG: FieldDef[] = [
     primaryEndpoint: "locust-muni",
   },
   {
+    id: "censo.cve_ageb",
+    label: "Clave AGEB",
+    source: "Censo",
+    grain: "ageb",
+    type: "categorical_nominal",
+    description:
+      "Identificador de AGEB urbana — eje X para gráficas a grano AGEB de un municipio.",
+    endpoints: { "locust-ageb": "cve_ageb" },
+    primaryEndpoint: "locust-ageb",
+  },
+  {
     id: "censo.pobtot_ageb",
     label: "Población AGEB",
     source: "Censo",
     grain: "ageb",
     type: "numeric_count",
     description: "Población a nivel AGEB urbana 2020.",
-    endpoints: {},
+    endpoints: { "locust-ageb": "pobtot_ageb" },
   },
   {
     id: "censo.pct_pea",
@@ -366,7 +410,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     grain: "ageb",
     type: "categorical_ordinal",
     description: "Grado de rezago social a nivel AGEB urbana.",
-    endpoints: {},
+    endpoints: { "locust-ageb": "grado_rezago_ageb" },
     ordinalOrder: IRS_GRADO_ORDER,
   },
 
@@ -395,7 +439,14 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "temporal",
-    description: "Año 2015–2026 (requiere /risk-trend, no servido aún).",
+    // Unreachable by design, not by omission. `/analytics/risk-trend`
+    // exists but returns a single-municipio monthly time-series envelope
+    // — incompatible with Locust's multi-row-per-grain X/Y/Z model.
+    // Wiring it needs a design decision (a Locust trend sub-mode, or a
+    // new yearly-aggregated-by-entidad endpoint), not a catalog entry.
+    // See docs/V0.3.1-FRONTEND-HARDENING.md "E1 deferral".
+    description:
+      "Año 2015–2026 — serie temporal sólo vía /risk-trend (un municipio); no encaja en el modelo X/Y/Z de Locust aún.",
     endpoints: {},
   },
 

@@ -12,6 +12,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   listSavedThreads,
   removeThread,
+  savedThreadsStorageKey,
   upsertThread,
   type SavedThreadIndexEntry,
 } from "../lib/sage-threads-store";
@@ -60,6 +61,21 @@ export function SageMode() {
   // see User A's thread index until they refreshed.
   useEffect(() => {
     setSavedThreads(listSavedThreads(userId));
+  }, [userId]);
+
+  // Cross-tab sync (Phase 3 R3): when another tab adds or forgets a
+  // thread, the browser fires a `storage` event in THIS tab. (Same-tab
+  // writes don't fire it — those already call setSavedThreads directly.)
+  // Re-read the index when the event targets the current user's key, or
+  // when e.key is null (a localStorage.clear() — re-read defensively).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === savedThreadsStorageKey(userId)) {
+        setSavedThreads(listSavedThreads(userId));
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, [userId]);
 
   const health = useQuery({

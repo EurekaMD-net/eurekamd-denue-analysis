@@ -301,6 +301,26 @@ export interface RiskTrendResult {
 }
 
 // ---------------------------------------------------------------------------
+// /analytics/locust-ageb?cve_mun=NNNNN — all AGEB-grain rows within one
+// municipio, joining census population (censo_ageb) with CONEVAL rezago-social
+// grade (coneval_grs_ageb) on the 13-char cvegeo key. LEFT JOIN: an AGEB may
+// have a census row but no CONEVAL row, so grado_rezago_ageb can be null.
+// ---------------------------------------------------------------------------
+
+export interface LocustAgebRow {
+  cvegeo: string;
+  cve_ageb: string;
+  pobtot_ageb: number | null;
+  grado_rezago_ageb: string | null;
+}
+
+export interface LocustAgebResult {
+  cve_mun: string;
+  municipio: string | null;
+  agebs: LocustAgebRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Mortality (EDR/SINAIS) — see scripts/perf-matviews.sql for the underlying
 // mv_mortalidad_municipal_yearly aggregation. v0.2.3-A.
 // ---------------------------------------------------------------------------

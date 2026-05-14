@@ -60,6 +60,7 @@ import type {
   LicensedPharmaciesByMunicipioResult,
   LocalitiesByMunicipioResult,
   LocalityDetailResult,
+  LocustAgebResult,
   LocustEstadoResult,
   LocustMuniResult,
   ManzanasByAgebResult,
@@ -1112,6 +1113,115 @@ describe("GET /analytics/risk-trend", () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("postgres.parse_error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /analytics/locust-ageb?cve_mun=NNNNN
+// ---------------------------------------------------------------------------
+
+describe("GET /analytics/locust-ageb", () => {
+  it("returns the AGEB rows + municipio metadata", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0901400010123",
+            cve_ageb: "0123",
+            pobtot_ageb: 4521,
+            grado_rezago_ageb: "Muy bajo",
+          },
+          {
+            cvegeo: "0901400010138",
+            cve_ageb: "0138",
+            pobtot_ageb: null,
+            grado_rezago_ageb: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        JSON.stringify([{ municipio: "Cuauhtémoc", poblacion: 545884 }]),
+      );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb?cve_mun=09014", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocustAgebResult;
+    expect(body.cve_mun).toBe("09014");
+    expect(body.municipio).toBe("Cuauhtémoc");
+    expect(body.agebs).toHaveLength(2);
+    expect(body.agebs[0]).toMatchObject({
+      cvegeo: "0901400010123",
+      cve_ageb: "0123",
+      pobtot_ageb: 4521,
+      grado_rezago_ageb: "Muy bajo",
+    });
+    // LEFT JOIN: census-only AGEB → null CONEVAL grade.
+    expect(body.agebs[1]).toMatchObject({
+      cve_ageb: "0138",
+      pobtot_ageb: null,
+      grado_rezago_ageb: null,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+  });
+
+  it("inlines cve_mun verbatim and LEFT JOINs the two AGEB views", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-ageb?cve_mun=14039", {
+      headers: AUTH,
+    });
+    const agebArgs = mockExec.mock.calls[0]?.[1] as string[];
+    const agebSql = agebArgs[agebArgs.length - 1] ?? "";
+    expect(agebSql).toMatch(/LEFT\(c\.cvegeo, 5\) = '14039'/);
+    expect(agebSql).toMatch(/FROM censo_ageb c/);
+    expect(agebSql).toMatch(/LEFT JOIN coneval_grs_ageb r/);
+    expect(agebSql).toMatch(/ORDER BY t\.cvegeo/);
+  });
+
+  it("returns null municipio + empty agebs when the cve_mun is unknown", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb?cve_mun=09014", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as LocustAgebResult;
+    expect(body.municipio).toBeNull();
+    expect(body.agebs).toEqual([]);
+  });
+
+  it("rejects invalid cve_mun (non-digit) with 400 / validation.cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb?cve_mun=foo", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cve_mun");
+  });
+
+  it("rejects missing cve_mun with 400 / validation.cve_mun", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb", { headers: AUTH });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cve_mun");
+  });
+
+  it("rejects cve_mun with wrong length", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb?cve_mun=0901", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("requires X-Api-Key", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/locust-ageb?cve_mun=09014");
+    expect(res.status).toBe(401);
   });
 });
 

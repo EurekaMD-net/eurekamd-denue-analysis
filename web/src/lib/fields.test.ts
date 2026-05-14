@@ -74,6 +74,7 @@ const KNOWN_ANALYTICS_PATHS = new Set([
   "/analytics/mortality-summary",
   "/analytics/locust-muni",
   "/analytics/locust-estado",
+  "/analytics/locust-ageb",
 ]);
 
 describe("reachability (endpoint-keyed)", () => {
@@ -98,12 +99,13 @@ describe("reachability (endpoint-keyed)", () => {
 
   it("ENDPOINTS only references known backend paths", () => {
     for (const ep of Object.values(ENDPOINTS)) {
-      // Resolve with a sample entidad ('09' = CDMX) so paths that require
-      // it actually produce a URL.
-      const sample = ep.path("09");
+      // Resolve with a sample entidad ('09' = CDMX) AND a sample cve_mun
+      // ('09014' = Cuauhtémoc) so both entidad- and cveMun-scoped paths
+      // actually produce a URL.
+      const sample = ep.path({ entidad: "09", cveMun: "09014" });
       expect(
         sample,
-        `endpoint "${ep.id}" path("09") returned null`,
+        `endpoint "${ep.id}" path() returned null with full context`,
       ).not.toBeNull();
       const pathOnly = sample!.split("?")[0]!;
       expect(KNOWN_ANALYTICS_PATHS).toContain(pathOnly);
@@ -242,6 +244,46 @@ describe("fieldSharesAnyEndpoint", () => {
     // sesnsp.ano is still unreachable (no /risk-trend wired).
     const y = findField("sesnsp.ano")!;
     expect(fieldSharesAnyEndpoint(x, y)).toBe(false);
+  });
+});
+
+describe("AGEB-grain wiring (E2: locust-ageb)", () => {
+  it("locust-ageb endpoint is cveMun-scoped, not entidad-scoped", () => {
+    const ep = ENDPOINTS["locust-ageb"];
+    expect(ep.grain).toBe("ageb");
+    expect(ep.needsEntidad).toBe(false);
+    expect(ep.needsCveMun).toBe(true);
+    expect(ep.rowsKey).toBe("agebs");
+  });
+
+  it("locust-ageb path is null without cveMun, resolves with it", () => {
+    const ep = ENDPOINTS["locust-ageb"];
+    expect(ep.path({ entidad: "09", cveMun: null })).toBeNull();
+    expect(ep.path({ entidad: null, cveMun: "09014" })).toBe(
+      "/analytics/locust-ageb?cve_mun=09014",
+    );
+  });
+
+  it("the three formerly-unreachable AGEB fields except sesnsp.ano are now reachable", () => {
+    const cveAgeb = findField("censo.cve_ageb")!;
+    const pobAgeb = findField("censo.pobtot_ageb")!;
+    const rezAgeb = findField("coneval.grado_rezago_ageb")!;
+    expect(isFieldReachable(cveAgeb)).toBe(true);
+    expect(isFieldReachable(pobAgeb)).toBe(true);
+    expect(isFieldReachable(rezAgeb)).toBe(true);
+    expect(cveAgeb.endpoints["locust-ageb"]).toBe("cve_ageb");
+    expect(pobAgeb.endpoints["locust-ageb"]).toBe("pobtot_ageb");
+    expect(rezAgeb.endpoints["locust-ageb"]).toBe("grado_rezago_ageb");
+    expect(cveAgeb.primaryEndpoint).toBe("locust-ageb");
+  });
+
+  it("getActiveEndpoint resolves an AGEB X+Y pair to locust-ageb", () => {
+    const x = findField("censo.cve_ageb")!;
+    const y = findField("censo.pobtot_ageb")!;
+    const z = findField("coneval.grado_rezago_ageb")!;
+    expect(getActiveEndpoint(x)).toBe("locust-ageb");
+    expect(getActiveEndpoint(x, y)).toBe("locust-ageb");
+    expect(getActiveEndpoint(x, y, z)).toBe("locust-ageb");
   });
 });
 

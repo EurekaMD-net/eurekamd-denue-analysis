@@ -56,6 +56,14 @@ export function LocustMode() {
     Array<{ label: string; value: string }>
   >([]);
   const [perCapita, setPerCapita] = useState(false);
+  // AGEB-grain endpoints (`locust-ageb`) are scoped to one municipio, not
+  // a whole entidad. `cveMun` holds that selection. It's cleared whenever
+  // the store's `entidad` changes — a muni from the previous entidad is
+  // not valid under the new one.
+  const [cveMun, setCveMun] = useState<string | null>(null);
+  useEffect(() => {
+    setCveMun(null);
+  }, [entidad]);
 
   const applyPreset = (preset: LocustPreset) => {
     setXAxis({ ...INITIAL_AXIS, field: findField(preset.x) ?? null });
@@ -155,7 +163,14 @@ export function LocustMode() {
   );
   const chartType = chartOverride ?? derivedChartType;
 
-  const dataset = useLocustDataset(xAxis, yAxis, zAxis, accessToken, entidad);
+  const dataset = useLocustDataset(
+    xAxis,
+    yAxis,
+    zAxis,
+    accessToken,
+    entidad,
+    cveMun,
+  );
 
   const onFieldPicked = (field: FieldDef) => {
     if (!pickerOpen) return;
@@ -170,6 +185,12 @@ export function LocustMode() {
     : null;
   const xEndpoint = xActiveEndpointId ? ENDPOINTS[xActiveEndpointId] : null;
   const needsEntidad = xEndpoint?.needsEntidad === true && entidad === null;
+  // AGEB-grain endpoints need a municipio. The municipio selector itself
+  // needs an entidad to populate its list, so an AGEB X-anchor surfaces
+  // two hints in sequence: pick entidad → pick municipio.
+  const needsCveMun = xEndpoint?.needsCveMun === true && cveMun === null;
+  const needsEntidadForMuni =
+    xEndpoint?.needsCveMun === true && entidad === null;
 
   // Per-capita (× 1,000 inhabitants) is offered only where it makes sense:
   //   - Active endpoint is muni-grain (all four muni endpoints carry pobtot)
@@ -290,6 +311,17 @@ export function LocustMode() {
           )}
           <span className="h-4 w-px bg-slate-800" />
           <FilterControls />
+          {xEndpoint?.needsCveMun === true && (
+            <>
+              <span className="h-4 w-px bg-slate-800" />
+              <MunicipioSelect
+                entidad={entidad}
+                cveMun={cveMun}
+                onChange={setCveMun}
+                accessToken={accessToken}
+              />
+            </>
+          )}
           {perCapitaEligible && (
             <>
               <span className="h-4 w-px bg-slate-800" />
@@ -325,14 +357,27 @@ export function LocustMode() {
 
         {!xAxis.field || !yAxis.field ? (
           <EmptyState onPreset={applyPreset} entidad={entidad} />
-        ) : needsEntidad ? (
+        ) : needsEntidad || needsEntidadForMuni ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 font-mono text-xs text-slate-400">
             <span>
               Selecciona una entidad arriba para ver datos a grano{" "}
               <span className="text-cyan-400">{xAxis.field.grain}</span>.
             </span>
             <span className="text-[10px] text-slate-600">
-              El X-anchor "{xAxis.field.label}" requiere entidad.
+              {needsEntidadForMuni
+                ? `El X-anchor "${xAxis.field.label}" es de grano AGEB — elige entidad y luego municipio.`
+                : `El X-anchor "${xAxis.field.label}" requiere entidad.`}
+            </span>
+          </div>
+        ) : needsCveMun ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 font-mono text-xs text-slate-400">
+            <span>
+              Selecciona un municipio arriba para ver datos a grano{" "}
+              <span className="text-cyan-400">AGEB</span>.
+            </span>
+            <span className="text-[10px] text-slate-600">
+              El X-anchor "{xAxis.field.label}" agrega las AGEBs de un solo
+              municipio.
             </span>
           </div>
         ) : (
@@ -478,6 +523,77 @@ function AxisRow({
   );
 }
 
+/**
+ * Municipio picker for AGEB-grain X-anchors. The `locust-ageb` endpoint
+ * is scoped to one municipio; this dropdown supplies that `cve_mun`. The
+ * municipio list itself comes from `/analytics/municipios?entidad=` — so
+ * the control is inert until an entidad is chosen (the parent only
+ * renders it when X's active endpoint `needsCveMun`, and shows a separate
+ * "elige entidad" hint when entidad is still null).
+ */
+function MunicipioSelect({
+  entidad,
+  cveMun,
+  onChange,
+  accessToken,
+}: {
+  entidad: string | null;
+  cveMun: string | null;
+  onChange: (v: string | null) => void;
+  accessToken: string | null;
+}) {
+  const munis = useQuery({
+    queryKey: ["municipios-list", entidad],
+    queryFn: async () => {
+      const res = await apiFetch(
+        `/analytics/municipios?entidad=${entidad}`,
+        {},
+        accessToken,
+      );
+      return res.json() as Promise<{
+        municipios: Array<{ cve_mun: string; municipio: string | null }>;
+      }>;
+    },
+    enabled: accessToken !== null && entidad !== null,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  if (entidad === null) {
+    return (
+      <span className="font-mono text-[10px] text-slate-600">
+        municipio: elige entidad primero
+      </span>
+    );
+  }
+  const list = munis.data?.municipios ?? [];
+  return (
+    <label className="flex items-center gap-1.5 font-mono text-[10px] text-slate-300">
+      <span className="text-slate-500">Municipio:</span>
+      <select
+        value={cveMun ?? ""}
+        onChange={(e) =>
+          onChange(e.target.value === "" ? null : e.target.value)
+        }
+        disabled={munis.isLoading || munis.isError}
+        className="rounded border border-slate-700 bg-slate-950 px-1 py-0.5 font-mono text-[10px] text-slate-200 disabled:opacity-50"
+      >
+        <option value="">
+          {munis.isLoading
+            ? "cargando…"
+            : munis.isError
+              ? "error al cargar"
+              : "— elige —"}
+        </option>
+        {list.map((m) => (
+          <option key={m.cve_mun} value={m.cve_mun}>
+            {m.municipio ?? m.cve_mun}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function ChartTypeToggle({
   current,
   derived,
@@ -577,16 +693,17 @@ function useLocustDataset(
   zAxis: AxisState,
   accessToken: string | null,
   entidad: string | null,
+  cveMun: string | null,
 ) {
   const xField = xAxis.field;
   const yField = yAxis.field;
   const zField = zAxis.field;
   const endpointId = xField ? getActiveEndpoint(xField, yField, zField) : null;
   const endpoint = endpointId ? ENDPOINTS[endpointId] : null;
-  const path = endpoint ? endpoint.path(entidad) : null;
+  const path = endpoint ? endpoint.path({ entidad, cveMun }) : null;
 
   return useQuery({
-    queryKey: ["locust", endpointId, entidad, xField?.id, yField?.id],
+    queryKey: ["locust", endpointId, entidad, cveMun, xField?.id, yField?.id],
     queryFn: async () => {
       if (!path) throw new Error("no endpoint for X");
       const res = await apiFetch(path, {}, accessToken);

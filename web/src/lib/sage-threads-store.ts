@@ -32,12 +32,20 @@ export interface SavedThreadIndexEntry {
   updated_at: number;
 }
 
-function key(userId: string | null): string {
-  // Per-user scope. Anonymous fallback ("anon") shouldn't happen in
-  // practice (LoginGate blocks unauthenticated children) but the
-  // fallback keeps the store safe to use during the hydration window.
+/**
+ * The localStorage key this store writes under, for a given user. Exported
+ * so SageMode's cross-tab `storage`-event listener can match the event's
+ * `key` against the currently signed-in user without re-deriving the
+ * prefix convention. Anonymous fallback ("anon") shouldn't happen in
+ * practice (LoginGate blocks unauthenticated children) but the fallback
+ * keeps the store safe to use during the hydration window.
+ */
+export function savedThreadsStorageKey(userId: string | null): string {
   return `${STORAGE_PREFIX}${userId ?? "anon"}`;
 }
+
+// Internal alias kept terse for the accessors below.
+const key = savedThreadsStorageKey;
 
 function safeStorage(): Storage | null {
   if (typeof window === "undefined") return null;

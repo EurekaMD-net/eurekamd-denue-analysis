@@ -122,6 +122,7 @@ import {
   type RiskSummaryResult,
   type RiskTrendResult,
   type ScianLevel,
+  type LocustAgebResult,
   type LocustEstadoResult,
   type LocustMuniResult,
   type SectorGradeMatrixResult,
@@ -1050,6 +1051,79 @@ export async function riskTrendHandler(
       homicidio_doloso: Number(p.homicidio_doloso),
       extorsion: Number(p.extorsion),
       total: Number(p.total),
+    })),
+  };
+  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "Authorization, X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// /analytics/locust-ageb?cve_mun=NNNNN
+//
+// All AGEB-grain rows within one municipio: a big-city municipio has a few
+// thousand AGEBs, small ones a handful. Joins the census population view
+// (censo_ageb) with the CONEVAL rezago-social grade view (coneval_grs_ageb)
+// on the 13-char cvegeo key (ENT2+MUN3+LOC4+AGEB4). LEFT JOIN — an AGEB can
+// have a census row but no CONEVAL row, so grado_rezago_ageb may be null.
+// Reads the views directly: a cvegeo-prefix scan over the btree-indexed raw
+// tables is sub-100ms, no mat-view needed (mirrors risk-trend's reasoning).
+// ---------------------------------------------------------------------------
+
+interface RawLocustAgebRow {
+  cvegeo: string;
+  cve_ageb: string;
+  pobtot_ageb: number | string | null;
+  grado_rezago_ageb: string | null;
+}
+
+function locustAgebSql(cveMun: string): string {
+  // cveMun pre-validated by CVE_MUN_RE — exactly 5 digits, never a quote.
+  return `
+SELECT json_agg(row_to_json(t) ORDER BY t.cvegeo) FROM (
+  SELECT c.cvegeo,
+         c.ageb   AS cve_ageb,
+         c.pobtot AS pobtot_ageb,
+         r.grado  AS grado_rezago_ageb
+  FROM censo_ageb c
+  LEFT JOIN coneval_grs_ageb r ON r.cvegeo = c.cvegeo
+  WHERE LEFT(c.cvegeo, 5) = '${cveMun}'
+  ORDER BY c.cvegeo
+) t;
+`;
+}
+
+export async function locustAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Promise<Response> {
+  const cveMun = c.req.query("cve_mun");
+  if (!cveMun || !CVE_MUN_RE.test(cveMun)) {
+    throw new HttpError(
+      `cve_mun inválido "${cveMun ?? ""}". Debe ser 5 dígitos zero-padded (ENT01-32 + MUN001-999).`,
+      400,
+      "validation.cve_mun",
+    );
+  }
+
+  const rows = runJsonQuery<RawLocustAgebRow[]>(config, locustAgebSql(cveMun));
+  const meta = runJsonQuery<RawMunicipioMeta[]>(
+    config,
+    municipioMetaSql(cveMun),
+  );
+  const metaRow = meta[0] ?? null;
+
+  const result: LocustAgebResult = {
+    cve_mun: cveMun,
+    municipio: metaRow?.municipio ?? null,
+    agebs: rows.map((r) => ({
+      cvegeo: r.cvegeo,
+      cve_ageb: r.cve_ageb,
+      pobtot_ageb:
+        r.pobtot_ageb === null || r.pobtot_ageb === undefined
+          ? null
+          : Number(r.pobtot_ageb),
+      grado_rezago_ageb: r.grado_rezago_ageb ?? null,
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");

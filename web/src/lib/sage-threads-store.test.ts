@@ -4,6 +4,7 @@ import type { SageStoredTurn } from "../api/sage-client";
 import {
   listSavedThreads,
   removeThread,
+  savedThreadsStorageKey,
   upsertThread,
   type SavedThreadIndexEntry,
 } from "./sage-threads-store";
@@ -108,6 +109,25 @@ describe("sage-threads-store (RH-4)", () => {
       "this is not json",
     );
     expect(listSavedThreads("user-1")).toEqual([]);
+  });
+
+  it("savedThreadsStorageKey matches the key writes land under (cross-tab sync, D)", () => {
+    // SageMode's `storage`-event listener compares e.key against this
+    // helper to decide whether another tab touched the current user's
+    // index. The helper must agree with what upsertThread actually wrote.
+    upsertThread("user-1", entry({ thread_id: "abc" }));
+    const k = savedThreadsStorageKey("user-1");
+    expect(k).toBe("denue_sage_threads:user-1");
+    expect(window.localStorage.getItem(k)).not.toBeNull();
+  });
+
+  it("savedThreadsStorageKey is per-user and falls back to anon for null", () => {
+    expect(savedThreadsStorageKey("user-A")).toBe("denue_sage_threads:user-A");
+    expect(savedThreadsStorageKey("user-B")).toBe("denue_sage_threads:user-B");
+    expect(savedThreadsStorageKey(null)).toBe("denue_sage_threads:anon");
+    expect(savedThreadsStorageKey("user-A")).not.toBe(
+      savedThreadsStorageKey("user-B"),
+    );
   });
 
   it("rejects malformed entries from storage (defensive parse)", () => {
