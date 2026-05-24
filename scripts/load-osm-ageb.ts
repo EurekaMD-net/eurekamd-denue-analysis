@@ -74,7 +74,10 @@ function assertSafePath(label: string, p: string): void {
 export const CREATE_AGGREGATE_TABLE_SQL = `
 DROP TABLE IF EXISTS osm_ageb_aggregates;
 CREATE TABLE osm_ageb_aggregates (
-  cvegeo                       TEXT PRIMARY KEY REFERENCES ageb_polygons(cvegeo),
+  -- cvegeo is the warehouse-wide AGEB key; no FK declared because
+  -- ageb_polygons has its PK on ogc_fid (ogr2ogr-assigned), no UNIQUE
+  -- on cvegeo. Consistent with how every other *_ageb consumer joins.
+  cvegeo                       TEXT PRIMARY KEY,
   road_length_m                NUMERIC,
   road_density_km_per_km2      NUMERIC,
   dist_to_major_road_m         NUMERIC,
@@ -85,6 +88,22 @@ CREATE TABLE osm_ageb_aggregates (
 COMMENT ON TABLE  osm_ageb_aggregates IS 'Per-AGEB OSM road network rollup. Loaded by scripts/load-osm-ageb.ts from Geofabrik MX PBF. cvegeo joins to ageb_polygons / censo_ageb / coneval_grs_ageb_raw.';
 COMMENT ON COLUMN osm_ageb_aggregates.dist_to_major_road_m IS 'Geodetic distance (m) from AGEB centroid to nearest motorway/trunk/primary. NULL if no major road exists in the country slice (should be vanishingly rare for MX).';
 COMMENT ON COLUMN osm_ageb_aggregates.road_class_counts IS 'JSONB: {"residential":42, "secondary":3, ...}. Includes ALL highway classes counted within the AGEB, not just major.';
+
+-- Consumer grants. Loader runs as 'postgres' which is OUTSIDE the
+-- default-ACL path that auto-grants supabase_admin-created tables to
+-- mcp_readonly. Explicit GRANTs keep the table reachable from:
+--   - mcp_readonly (Jarvis mission-control via mcp__supabase__query)
+--   - denue_sage   (Sage LLM-drafted SQL path in this analyzer)
+-- Idempotent: re-running the loader re-issues these without conflict.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp_readonly') THEN
+    EXECUTE 'GRANT SELECT ON osm_ageb_aggregates TO mcp_readonly';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage') THEN
+    EXECUTE 'GRANT SELECT ON osm_ageb_aggregates TO denue_sage';
+  END IF;
+END $$;
 `;
 
 /**
@@ -138,13 +157,28 @@ FROM osm_roads_loader
 WHERE feat->'properties' ? 'highway'
   AND feat->>'geometry' IS NOT NULL;
 
-CREATE INDEX ON osm_roads_staging USING GIST (geom);
--- Partial GIST on major-road subset accelerates the nearest_major KNN
--- below: without it, bbox-AND with the highway-IN filter falls back to
--- a filtered seq-scan, pathological at 80k AGEBs x ~1M segments.
+-- Pre-compute per-road centroid + geodesic length ONCE, then index it.
+-- ST_Length on each road's full geometry is much cheaper than ST_Intersection
+-- per (road, AGEB) pair — point-in-polygon attribution scales as
+-- O(roads × log(AGEBs)) via the GIST below, vs O(roads × intersecting AGEBs
+-- × polygon-clip cost) for the original ST_Intersection approach (which
+-- statement_timeout'd at 25 min on the full MX dataset).
+CREATE TEMPORARY TABLE osm_roads_centroids ON COMMIT DROP AS
+SELECT
+  highway,
+  ST_Length(geom::geography)  AS road_len_m,
+  ST_Centroid(geom)           AS pt
+FROM osm_roads_staging
+WHERE highway IS NOT NULL;
+CREATE INDEX ON osm_roads_centroids USING GIST (pt);
+
+-- Keep the major-road geometries available for the nearest_major LATERAL
+-- (KNN needs the line geometry, not the centroid, for accurate distance).
 CREATE INDEX ON osm_roads_staging USING GIST (geom)
   WHERE highway IN ('motorway','trunk','primary');
+
 ANALYZE osm_roads_staging;
+ANALYZE osm_roads_centroids;
 
 INSERT INTO osm_ageb_aggregates (
   cvegeo,
@@ -154,35 +188,29 @@ INSERT INTO osm_ageb_aggregates (
   has_major_road_within_5km,
   road_class_counts
 )
-WITH per_ageb_intersections AS (
+WITH ageb_rollup AS (
+  -- Centroid attribution: each road counts toward ONE AGEB (the one
+  -- containing its midpoint). Long highways spanning multiple AGEBs are
+  -- counted in whichever AGEB owns the midpoint — acceptable for
+  -- "density per AGEB" since a road just clipping a corner shouldn't add
+  -- much to that AGEB's density anyway. Trade-off documented at column
+  -- comment time; consumers should treat road_length_m as "roads whose
+  -- midpoint lies inside the AGEB", not as "linear meters of road within
+  -- the AGEB polygon".
   SELECT
     a.cvegeo,
-    a.geom                                                    AS ageb_geom,
-    ST_Area(a.geom::geography)                                AS ageb_area_m2,
-    r.highway                                                 AS highway,
-    ST_Length(ST_Intersection(r.geom, a.geom)::geography)     AS seg_len_m
+    ST_Area(a.geom::geography)                AS ageb_area_m2,
+    COALESCE(SUM(rc.road_len_m), 0)           AS total_len_m,
+    jsonb_object_agg(rc.highway, hw_count)
+      FILTER (WHERE rc.highway IS NOT NULL)   AS class_counts
   FROM ageb_polygons a
-  LEFT JOIN osm_roads_staging r
-    ON ST_Intersects(a.geom, r.geom)
-),
-ageb_rollup AS (
-  SELECT
-    cvegeo,
-    MAX(ageb_area_m2)                                          AS ageb_area_m2,
-    COALESCE(SUM(seg_len_m), 0)                                AS total_len_m,
-    jsonb_object_agg(highway, hw_count)
-      FILTER (WHERE highway IS NOT NULL)                       AS class_counts
-  FROM (
-    -- hw_count is segment-count (post ST_Intersection split), not OSM-way-
-    -- count. seg_len_m is the per-class length sum within the AGEB, summed
-    -- again across classes in the outer ageb_rollup CTE to get total_len_m.
-    SELECT cvegeo, ageb_area_m2, highway,
-           COUNT(*)                  AS hw_count,
-           SUM(seg_len_m)            AS seg_len_m
-    FROM per_ageb_intersections
-    GROUP BY cvegeo, ageb_area_m2, highway
-  ) c
-  GROUP BY cvegeo
+  LEFT JOIN LATERAL (
+    SELECT highway, COUNT(*) AS hw_count, SUM(road_len_m) AS road_len_m
+    FROM osm_roads_centroids rc
+    WHERE ST_Contains(a.geom, rc.pt)
+    GROUP BY highway
+  ) rc ON TRUE
+  GROUP BY a.cvegeo, a.geom
 ),
 nearest_major AS (
   SELECT
@@ -333,6 +361,12 @@ export async function loadOsmAgeb(
       { encoding: "utf-8", timeout: 10 * 60_000 },
     );
 
+    // Pipe SQL via stdin, NOT `-c`. The aggregate script is multi-statement
+    // and includes the `\copy` backslash meta-command (used to ingest the
+    // GeoJSONSeq into the temp loader table). `psql -c "..."` only accepts
+    // a single statement OR a single backslash command, NOT both — passing
+    // the whole script via `-c` fails with `syntax error at or near "\"`.
+    // Stdin / `-f` accept multi-statement scripts that mix SQL and \copy.
     execFileSync(
       "docker",
       [
@@ -346,10 +380,12 @@ export async function loadOsmAgeb(
         "postgres",
         "-v",
         "ON_ERROR_STOP=1",
-        "-c",
-        buildAggregateSql(containerGeojsonPath),
       ],
-      { encoding: "utf-8", timeout: 60 * 60_000 },
+      {
+        input: buildAggregateSql(containerGeojsonPath),
+        encoding: "utf-8",
+        timeout: 60 * 60_000,
+      },
     );
   } finally {
     try {

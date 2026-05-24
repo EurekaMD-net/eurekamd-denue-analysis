@@ -43,9 +43,12 @@ describe("CREATE_AGGREGATE_TABLE_SQL", () => {
     );
   });
 
-  it("declares cvegeo as PK with FK to ageb_polygons", () => {
-    expect(CREATE_AGGREGATE_TABLE_SQL).toMatch(
-      /cvegeo\s+TEXT PRIMARY KEY REFERENCES ageb_polygons\(cvegeo\)/,
+  it("declares cvegeo as PK (no FK; ageb_polygons has PK on ogc_fid, not cvegeo)", () => {
+    expect(CREATE_AGGREGATE_TABLE_SQL).toMatch(/cvegeo\s+TEXT PRIMARY KEY/);
+    // Explicit non-FK: every other *_ageb consumer joins on cvegeo without
+    // a formal FK, matching the warehouse convention.
+    expect(CREATE_AGGREGATE_TABLE_SQL).not.toContain(
+      "REFERENCES ageb_polygons",
     );
   });
 
@@ -64,6 +67,26 @@ describe("CREATE_AGGREGATE_TABLE_SQL", () => {
 
   it("road_class_counts uses JSONB, not TEXT", () => {
     expect(CREATE_AGGREGATE_TABLE_SQL).toMatch(/road_class_counts\s+JSONB/);
+  });
+
+  it("grants SELECT to mcp_readonly + denue_sage (idempotent, role-guarded)", () => {
+    // Loader runs as 'postgres' which is outside Supabase's default-ACL
+    // auto-grant. Without explicit GRANTs Jarvis (mcp_readonly) and Sage
+    // (denue_sage) cannot SELECT from the new table.
+    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+      "GRANT SELECT ON osm_ageb_aggregates TO mcp_readonly",
+    );
+    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+      "GRANT SELECT ON osm_ageb_aggregates TO denue_sage",
+    );
+    // Each GRANT must be role-existence-guarded so the loader works on a
+    // dev box that doesn't have these roles provisioned.
+    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+      "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp_readonly')",
+    );
+    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+      "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage')",
+    );
   });
 });
 
@@ -140,12 +163,21 @@ describe("buildAggregateSql", () => {
     expect(sql).not.toMatch(/ORDER BY ST_SetSRID\(geom, 4326\) <->/);
   });
 
-  it("joins on ST_Intersects + casts to geography for true meters", () => {
-    expect(sql).toContain("ST_Intersects(a.geom, r.geom)");
+  it("uses centroid attribution + ST_Contains (NOT ST_Intersection clip)", () => {
+    // Original ST_Intersection-based approach statement_timeout'd at 25min
+    // on the full MX dataset. Centroid attribution scales as
+    // O(roads × log(AGEBs)) via GIST(pt) instead of O(roads × intersecting
+    // AGEBs × polygon-clip cost). Trade-off: long roads spanning multiple
+    // AGEBs attribute fully to whichever AGEB owns the midpoint.
+    expect(sql).toContain("ST_Centroid(geom)");
+    expect(sql).toContain("ST_Contains(a.geom, rc.pt)");
     expect(sql).toContain(
-      "ST_Length(ST_Intersection(r.geom, a.geom)::geography)",
+      "CREATE INDEX ON osm_roads_centroids USING GIST (pt)",
     );
+    expect(sql).toContain("ST_Length(geom::geography)");
     expect(sql).toContain("ST_Area(a.geom::geography)");
+    // No polygon-clip step anywhere
+    expect(sql).not.toContain("ST_Intersection(");
   });
 
   it("computes density km_per_km2 with explicit divide-by-zero guard", () => {
@@ -162,9 +194,9 @@ describe("buildAggregateSql", () => {
     expect(sql).toContain("AND feat->>'geometry' IS NOT NULL");
   });
 
-  it("LEFT JOIN preserves AGEBs with zero road intersections", () => {
-    expect(sql).toContain("LEFT JOIN osm_roads_staging");
-    expect(sql).toContain("COALESCE(SUM(seg_len_m), 0)");
+  it("LEFT JOIN LATERAL preserves AGEBs with zero road centroids inside", () => {
+    expect(sql).toContain("LEFT JOIN LATERAL");
+    expect(sql).toContain("COALESCE(SUM(rc.road_len_m), 0)");
   });
 });
 
@@ -242,10 +274,20 @@ describe("loadOsmAgeb (orchestration)", () => {
     expect(mockExec.mock.calls[4]![0]).toBe("docker");
     expect(mockExec.mock.calls[4]![1]).toContain("cp");
     expect(mockExec.mock.calls[4]![1]).toContain("--");
-    // Step 5: docker exec psql -c buildAggregateSql
+    // Step 5: docker exec psql with aggregate SQL via STDIN (3rd arg `input`).
+    // Cannot pass via `-c` — psql's -c rejects multi-statement scripts that
+    // mix SQL with the `\copy` meta-command (verified against psql 17).
     expect(mockExec.mock.calls[5]![0]).toBe("docker");
-    expect(mockExec.mock.calls[5]![1]?.join(" ")).toContain(
+    expect(mockExec.mock.calls[5]![1]?.join(" ")).not.toContain(
       "INSERT INTO osm_ageb_aggregates",
+    );
+    expect(mockExec.mock.calls[5]![1]).not.toContain("-c");
+    const aggregateOpts = mockExec.mock.calls[5]![2] as
+      | { input?: string }
+      | undefined;
+    expect(aggregateOpts?.input).toContain("INSERT INTO osm_ageb_aggregates");
+    expect(aggregateOpts?.input).toContain(
+      "\\copy osm_roads_loader (feat) FROM",
     );
     // Step 6: docker exec rm -f (cleanup, in finally)
     expect(mockExec.mock.calls[6]![0]).toBe("docker");
