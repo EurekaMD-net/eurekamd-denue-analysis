@@ -1,0 +1,47 @@
+# Snapshot of /etc/systemd/system/osm-refresh.service.
+#
+# Install on a fresh VPS:
+#   sudo cp ops/osm-refresh.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now osm-refresh.timer
+#
+# This unit wraps scripts/refresh-osm.sh (fetches the latest Geofabrik
+# Mexico PBF and rebuilds osm_ageb_aggregates end-to-end). Triggered by
+# osm-refresh.timer; can also be run manually:
+#   sudo systemctl start osm-refresh.service
+#
+# Why a timer: OSM in Mexico is well-mapped and slow-changing (weeks-to-
+# months for road network edits to land). A weekly rebuild caps staleness
+# at 7 days; daily would be churn with negligible signal change.
+#
+# Runtime budget: fetch ~10 min (~750 MB), osmium tags-filter ~2 min,
+# osmium export ~3 min, docker cp ~1 min, aggregate ~5 min, cleanup <1 min.
+# Total ~22 min steady-state; 1800s (30 min) timeout matches the
+# denue-matview-refresh cadence and leaves comfortable headroom.
+#
+# Logs: `journalctl -u osm-refresh -f`
+# Status: `systemctl status osm-refresh.timer`
+
+[Unit]
+Description=DENUE analyzer OSM road aggregates refresh
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/claude/projects/data-intelligence/denue-data-analysis
+ExecStart=/root/claude/projects/data-intelligence/denue-data-analysis/scripts/refresh-osm.sh
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=osm-refresh
+
+Environment=TZ=America/Mexico_City
+# /usr/bin in PATH is required for node + npx (validated 2026-05-24: both
+# resolve to /usr/bin/{node,npx}); /usr/local/bin first so a future nvm /
+# project-local install shadows correctly.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

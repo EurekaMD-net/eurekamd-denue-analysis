@@ -49,6 +49,7 @@ GRANT SELECT ON sedatu_financing_by_estado   TO denue_sage;
 GRANT SELECT ON sedatu_financing_by_municipio TO denue_sage;
 GRANT SELECT ON sict_traffic_by_estado       TO denue_sage;
 GRANT SELECT ON sict_traffic_by_municipio    TO denue_sage;
+GRANT SELECT ON osm_ageb_aggregates          TO denue_sage;
 
 -- Analytical views (no expensive base joins).
 GRANT SELECT ON aeropuertos_by_municipio       TO denue_sage;

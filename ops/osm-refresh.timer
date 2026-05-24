@@ -1,0 +1,30 @@
+# Snapshot of /etc/systemd/system/osm-refresh.timer.
+#
+# Install: see ops/osm-refresh.service.
+#
+# Cadence: weekly on Sunday at 06:00 UTC (~00:00 CDMX winter / 01:00
+# summer). Picked for the lowest-traffic window of the lowest-traffic
+# day; well clear of denue-matview-refresh's 04:00 daily slot so the two
+# never overlap. Persistent=true catches up after VPS reboots so a missed
+# run still fires on the next boot.
+#
+# Source release cadence: Geofabrik publishes daily snapshots, but Mexico
+# OSM road network edits land on a multi-week timescale. Weekly is
+# generous; monthly would also be reasonable. The full pipeline is ~22
+# min so cost is negligible regardless.
+#
+# To run more / less often:
+#   - Daily:   OnCalendar=*-*-* 06:00:00 UTC
+#   - Monthly: OnCalendar=*-*-01 06:00:00 UTC
+
+[Unit]
+Description=Weekly refresh of DENUE analyzer OSM road aggregates
+
+[Timer]
+OnCalendar=Sun *-*-* 06:00:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+Unit=osm-refresh.service
+
+[Install]
+WantedBy=timers.target
