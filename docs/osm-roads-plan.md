@@ -82,4 +82,10 @@ Same `osm_ageb_aggregates` pattern, additive table columns / sibling tables:
 
 Each ships as its own `load-osm-<layer>.ts` + `osm_ageb_<layer>` table — keeps the per-loader runtime bounded and the schema additive.
 
-Also deferred: an integration test that runs `buildAggregateSql` against a real PostGIS with a 2-feature fixture (audit R1). The current 26 unit tests assert string shapes; an integration test would have caught C1 + C2 at build time. Worth adding before the buildings loader ships, since that loader will reuse the same `\copy` framing.
+## Integration test
+
+`scripts/load-osm-ageb.integration.ts` (`npm run test:integration:osm`) — runs against the live PostGIS in a throwaway schema. Fixtures 2 AGEB rectangles + 3 LineString roads, applies the actual `CREATE_AGGREGATE_TABLE_SQL` + `buildAggregateSql`, asserts row count, class attribution by centroid, grant propagation, and major-road distance semantics. Schema is dropped in `finally` regardless of pass/fail; the production `public.osm_ageb_aggregates` is never touched.
+
+Exit codes: `0` pass, `1` assertion fail, `77` SKIP (DB container not reachable — CI-safe). Total runtime ~3s on a real PG.
+
+This test would have caught all three live-load bugs (FK on a non-UNIQUE column, `psql -c` rejecting `\copy` in compound scripts, `ST_Intersection` polygon-clip scaling) at build time. Run before shipping any sibling loader (buildings / POIs / land use) — the SQL shape is the load-bearing part and the unit tests can only assert string shape, not actual PG semantics.

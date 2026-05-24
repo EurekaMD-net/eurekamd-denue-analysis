@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc --project tsconfig.build.json",
-    "extract": "tsx scripts/extract.ts"
+    "extract": "tsx scripts/extract.ts",
+    "test:integration:osm": "tsx scripts/load-osm-ageb.integration.ts"
   },
   "repository": {
     "type": "git",
