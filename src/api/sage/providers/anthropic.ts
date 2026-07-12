@@ -204,6 +204,10 @@ export class AnthropicProvider implements SageProvider {
       allowedTools,
       // Disable Claude Code built-ins; this is a pure tool-router call.
       tools: [],
+      // Isolation: without an explicit [], the SDK loads the host user's
+      // ~/.claude/CLAUDE.md + rules + memory into every call (~23k tokens of
+      // operator config). Omitted ≠ none — [] is load-bearing.
+      settingSources: [],
       permissionMode: "dontAsk",
       maxTurns: 2,
       abortController,
@@ -290,6 +294,8 @@ export class AnthropicProvider implements SageProvider {
       mcpServers: {},
       allowedTools: [],
       tools: [],
+      // Isolation — see router options above; [] is load-bearing.
+      settingSources: [],
       permissionMode: "dontAsk",
       maxTurns: 1,
       abortController,
