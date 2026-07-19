@@ -75,6 +75,7 @@ import {
   nationalTreemapHandler,
   opportunityByAgebHandler,
   opportunityByColoniaHandler,
+  resolveAgebHandler,
   riskSummaryHandler,
   riskTrendHandler,
   sectorGradeMatrixHandler,
@@ -122,6 +123,7 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/sectors", auth);
   app.use("/tiles/*", auth);
   app.use("/analytics/*", auth);
+  app.use("/resolve/*", auth);
   app.use("/sage/query", auth);
   app.use("/sage/thread/*", auth);
 
@@ -216,6 +218,7 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/entidad-detail", (c) => entidadDetailHandler(c, config));
   app.get("/analytics/layers/values", (c) => layersValuesHandler(c, config));
+  app.get("/resolve/ageb", (c) => resolveAgebHandler(c, config));
 
   // Sage (LLM gateway). The handlers self-check for config.sageProvider
   // and return 503 if Sage is not configured — server still boots

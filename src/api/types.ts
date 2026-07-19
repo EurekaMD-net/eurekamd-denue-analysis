@@ -2017,3 +2017,14 @@ export interface ApiError {
   code: string;
   details?: unknown;
 }
+
+/** GET /resolve/ageb — point-in-polygon resolution against ageb_polygons. */
+export interface ResolveAgebResult {
+  lat: number;
+  lon: number;
+  /** 13-char urban / 9-char rural cvegeo. */
+  cvegeo: string;
+  ambito: "Urbana" | "Rural" | null;
+  /** 5-digit ENT+MUN — the key the analytics endpoints take. */
+  cve_mun: string;
+}

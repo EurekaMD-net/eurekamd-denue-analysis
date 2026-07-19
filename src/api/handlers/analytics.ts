@@ -90,6 +90,7 @@ import {
   type IrsGrado,
   type LicensedPharmaciesByAgebResult,
   type LicensedPharmaciesByMunicipioResult,
+  type ResolveAgebResult,
   type ColoniasByAgebResult,
   type DatosVialesResult,
   type EntidadDetailResult,
@@ -5143,6 +5144,108 @@ export async function locustEstadoHandler(
     })),
   };
   c.header("Cache-Control", "public, max-age=3600");
+  c.header("Vary", "Authorization, X-Api-Key");
+  return c.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// GET /resolve/ageb?lat=&lon= — point → AGEB resolution.
+//
+// Uncharted Lite Phase-2 dependency: colonia is a free-text label with no
+// geometry, so address validation must land on an AGEB polygon. ST_Contains
+// against ageb_polygons (81k MultiPolygons, GIST-indexed) resolves a
+// geocoded point to the 13-char (urban) / 9-char (rural) cvegeo plus the
+// 5-digit cve_mun the analytics endpoints key on.
+// ---------------------------------------------------------------------------
+
+// Digits/dot/minus only — the regex is what makes inlining into SQL safe,
+// same stance as ENTIDAD_RE/CVE_MUN_RE literals elsewhere in this file.
+const COORD_LAT_RE = /^-?[0-9]{1,2}(\.[0-9]{1,10})?$/;
+const COORD_LON_RE = /^-?[0-9]{1,3}(\.[0-9]{1,10})?$/;
+// Mexico bounding box (generous, islands included). Out-of-country points
+// get an honest 400 instead of a wasted spatial scan + confusing 404.
+const MX_LAT_MIN = 14.3;
+const MX_LAT_MAX = 33.0;
+const MX_LON_MIN = -118.6;
+const MX_LON_MAX = -86.5;
+
+function resolveAgebSql(lat: string, lon: string): string {
+  return `
+SELECT json_agg(row_to_json(r)) FROM (
+  SELECT
+    cvegeo,
+    NULLIF(TRIM(ambito), '') AS ambito,
+    (cve_ent || cve_mun) AS cve_mun
+  FROM ageb_polygons
+  WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326))
+  LIMIT 1
+) r;
+`;
+}
+
+interface RawResolveAgebRow {
+  cvegeo: string;
+  ambito: string | null;
+  cve_mun: string;
+}
+
+export function resolveAgebHandler(
+  c: Context,
+  config: ApiServerConfig,
+): Response {
+  const lat = c.req.query("lat") ?? "";
+  const lon = c.req.query("lon") ?? "";
+  if (!COORD_LAT_RE.test(lat)) {
+    throw new HttpError(
+      `lat inválida "${lat}". Debe ser un decimal (p.ej. 19.4326).`,
+      400,
+      "validation.lat",
+    );
+  }
+  if (!COORD_LON_RE.test(lon)) {
+    throw new HttpError(
+      `lon inválida "${lon}". Debe ser un decimal (p.ej. -99.1332).`,
+      400,
+      "validation.lon",
+    );
+  }
+  const latN = Number(lat);
+  const lonN = Number(lon);
+  if (
+    latN < MX_LAT_MIN ||
+    latN > MX_LAT_MAX ||
+    lonN < MX_LON_MIN ||
+    lonN > MX_LON_MAX
+  ) {
+    throw new HttpError(
+      `(${lat}, ${lon}) cae fuera de México.`,
+      400,
+      "validation.out_of_bounds",
+    );
+  }
+
+  const rows = runJsonQuery<RawResolveAgebRow[]>(
+    config,
+    resolveAgebSql(lat, lon),
+  );
+  if (rows.length === 0) {
+    throw new HttpError(
+      `Ningún AGEB del Marco Geoestadístico contiene el punto (${lat}, ${lon}).`,
+      404,
+      "resolve.no_ageb",
+    );
+  }
+  const row = rows[0]!;
+  const result: ResolveAgebResult = {
+    lat: latN,
+    lon: lonN,
+    cvegeo: row.cvegeo,
+    ambito:
+      row.ambito === "Urbana" || row.ambito === "Rural" ? row.ambito : null,
+    cve_mun: row.cve_mun,
+  };
+  // Polygons are static between Marco Geoestadístico releases — long cache.
+  c.header("Cache-Control", "public, max-age=86400");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
