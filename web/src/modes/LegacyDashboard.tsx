@@ -1,6 +1,5 @@
 import { useEntidades } from "../api/queries";
 import { useUiStore } from "../store";
-import { useUrlSync } from "../useUrlSync";
 import { NationalTreemap } from "../charts/NationalTreemap";
 import { SectorGradeMatrix } from "../charts/SectorGradeMatrix";
 import { TopSectoresBar } from "../charts/TopSectoresBar";
@@ -23,7 +22,6 @@ import { SearchBar } from "../components/SearchBar";
  *     top sectores · scatter · salud cobertura
  */
 export function LegacyDashboard() {
-  useUrlSync();
   const entidad = useUiStore((s) => s.entidad);
   const { data: entidadesData } = useEntidades();
   const entidadNombre = entidadesData?.entidades.find(
