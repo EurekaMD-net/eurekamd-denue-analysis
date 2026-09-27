@@ -102,7 +102,8 @@ describe("runSql argv + stdin transport", () => {
     expect(pgopts).toBe(
       "-c statement_timeout=25000 -c default_transaction_read_only=on -c work_mem=32MB -c jit=off",
     );
-    expect(child.args[child.args.indexOf("-U") + 1]).toBe("postgres");
+    // Audit #8: least-privilege denue_api by default, never the superuser.
+    expect(child.args[child.args.indexOf("-U") + 1]).toBe("denue_api");
     expect(envArg(child.args, "PGAPPNAME")).toMatch(/^denue-[0-9a-f-]{36}$/);
     child.finish("");
     await p;
@@ -200,6 +201,22 @@ describe("cancellation", () => {
     expect(cancels[0]!.sql()).toContain(`application_name = '${tag}'`);
   });
 
+  it("cancels as the role that ran the query, never the superuser", async () => {
+    const userOf = (args: string[]) => args[args.indexOf("-U") + 1];
+    const ac1 = new AbortController();
+    const ac2 = new AbortController();
+    const p1 = runSql(SQL, { ...OPTS, signal: ac1.signal });
+    const p2 = runSql(SQL, { ...OPTS, signal: ac2.signal, user: "denue_sage" });
+    await waitForSpawns(2);
+    ac1.abort();
+    ac2.abort();
+    await Promise.allSettled([p1, p2]);
+    const cancels = cancelChildren();
+    expect(cancels).toHaveLength(2);
+    expect(userOf(cancels[0]!.args)).toBe("denue_api");
+    expect(userOf(cancels[1]!.args)).toBe("denue_sage");
+  });
+
   it("wall-clock timeout (statement_timeout + 5s) kills and cancels", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const p = runSql(SQL, { ...OPTS, timeoutMs: 1000 });
@@ -259,6 +276,7 @@ describe("runJsonSync (boot resolvers)", () => {
     expect(file).toBe("docker");
     expect(args.join(" ")).not.toContain("secret_table");
     expect(args.slice(-2)).toEqual(["-f", "-"]);
+    expect(args[args.indexOf("-U") + 1]).toBe("denue_api");
     expect(envArg(args, "PGOPTIONS")).toContain(
       "default_transaction_read_only=on",
     );

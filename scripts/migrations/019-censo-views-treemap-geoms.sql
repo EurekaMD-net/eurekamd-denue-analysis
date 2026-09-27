@@ -256,6 +256,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_treemap_entidad_unique
   ON mv_national_treemap(entidad);
 
 GRANT SELECT ON mv_national_treemap TO denue_sage;
+-- The API reads this as denue_api (scripts/api-role.sql, audit #8); guarded
+-- so the migration still applies before that role exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_api') THEN
+    GRANT SELECT ON mv_national_treemap TO denue_api;
+  END IF;
+END$$;
 
 UPDATE ageb_polygons
 SET geom = ST_Multi(ST_CollectionExtract(ST_MakeValid(geom), 3))

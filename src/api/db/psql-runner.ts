@@ -18,6 +18,12 @@
  *    thrown as a generic HttpError: no SQL and no stderr in the message.
  *    The raw stderr rides on the error's `stderr` field for server-side
  *    classification only (see isRelationMissingError in analytics.ts).
+ *
+ * Audit finding #8: every call logs in as the least-privilege denue_api
+ * role by default (scripts/api-role.sql: SELECT on the relations the API
+ * reads, DML on the Sage thread tables only), never the postgres
+ * superuser, so a SQL-building bug cannot reach other projects' data or
+ * COPY ... TO PROGRAM. The Sage gate passes its own `user`.
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -32,7 +38,7 @@ export interface RunSqlOptions {
   readOnly?: boolean;
   /** Server-side statement_timeout in ms. The client is killed 5 s later. Default 25000. */
   timeoutMs?: number;
-  /** Database role for `psql -U`. Default "postgres". */
+  /** Database role for `psql -U`. Default "denue_api" (scripts/api-role.sql). */
   user?: string;
   /** Aborting kills the client and cancels the backend. */
   signal?: AbortSignal;
@@ -54,6 +60,8 @@ const SETTING_RE = /^[a-z_]+=[A-Za-z0-9_.]+$/;
 const ROLE_RE = /^[a-z_][a-z0-9_]*$/;
 
 export const UPSTREAM_ERROR_MESSAGE = "Upstream query failed";
+/** Least-privilege login role for API queries (scripts/api-role.sql). */
+const API_DB_ROLE = "denue_api";
 
 export type PsqlHttpError = HttpError & { stderr?: string };
 
@@ -88,7 +96,7 @@ export function psqlArgv(opts: RunSqlOptions, appName: string): string[] {
   } catch {
     throw new HttpError("invalid dbContainer", 500, "config.bad_container");
   }
-  const user = opts.user ?? "postgres";
+  const user = opts.user ?? API_DB_ROLE;
   if (!ROLE_RE.test(user)) throw new Error(`unsafe psql user "${user}"`);
   return [
     "exec",
@@ -137,14 +145,19 @@ function release(): void {
 
 /**
  * Fire-and-forget pg_cancel_backend for a tagged session. Runs outside the
- * semaphore (a full queue must not block cancellation) as postgres, which
- * may cancel any backend. The tag is `denue-<uuid>`, safe to inline.
+ * semaphore (a full queue must not block cancellation) as the same role
+ * that ran the query: a non-superuser may cancel its own role's backends,
+ * but not another role's. The tag is `denue-<uuid>`, safe to inline.
  */
-function cancelBackend(container: string, appName: string): void {
+function cancelBackend(
+  container: string,
+  appName: string,
+  user: string | undefined,
+): void {
   const sql = `SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE application_name = '${appName}';\n`;
   const child = spawn(
     "docker",
-    psqlArgv({ container, timeoutMs: 5_000 }, `${appName}-cancel`),
+    psqlArgv({ container, timeoutMs: 5_000, user }, `${appName}-cancel`),
     { stdio: ["pipe", "ignore", "ignore"] },
   );
   child.on("error", (err) => log(`${appName} cancel failed: ${err.message}`));
@@ -191,7 +204,7 @@ async function execTagged(
         if (settled) return;
         log(`${appName} ${reason}; killing client and cancelling backend`);
         child.kill("SIGKILL");
-        cancelBackend(opts.container, appName);
+        cancelBackend(opts.container, appName, opts.user);
         finish(upstreamError(code));
       };
       const onAbort = (): void => killAndCancel("aborted", "postgres.error");

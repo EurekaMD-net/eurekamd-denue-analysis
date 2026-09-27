@@ -33,5 +33,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_smm_unique
   ON mv_sinba_morbidity_municipal(cve_mun, anio);
 
 GRANT SELECT ON mv_sinba_morbidity_municipal TO denue_sage;
+-- The API reads this as denue_api (scripts/api-role.sql, audit #8); guarded
+-- so the migration still applies before that role exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_api') THEN
+    GRANT SELECT ON mv_sinba_morbidity_municipal TO denue_api;
+  END IF;
+END$$;
 
 COMMIT;

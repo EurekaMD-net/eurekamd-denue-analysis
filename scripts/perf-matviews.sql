@@ -247,3 +247,17 @@ FROM sinba_morbidity_municipal;
 -- UNIQUE index enables REFRESH MATERIALIZED VIEW CONCURRENTLY.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_smm_unique
   ON mv_sinba_morbidity_municipal(cve_mun, anio);
+
+-- The API reads these as denue_api (scripts/api-role.sql, audit #8). DROP +
+-- CREATE above loses the ACL, so re-grant; guarded so this file still runs
+-- before that role exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_api') THEN
+    GRANT SELECT ON mv_sector_grade_matrix TO denue_api;
+    GRANT SELECT ON mv_national_treemap TO denue_api;
+    GRANT SELECT ON mv_delitos_municipal_yearly TO denue_api;
+    GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_api;
+    GRANT SELECT ON mv_sinba_morbidity_municipal TO denue_api;
+  END IF;
+END$$;

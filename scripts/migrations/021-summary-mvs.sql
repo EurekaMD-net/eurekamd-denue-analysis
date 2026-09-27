@@ -60,6 +60,14 @@ REVOKE ALL ON mv_sector_summary FROM anon, authenticated, trustr_app;
 REVOKE ALL ON mv_estrato_por_entidad FROM anon, authenticated, trustr_app;
 GRANT SELECT ON mv_sector_summary TO service_role, denue_sage;
 GRANT SELECT ON mv_estrato_por_entidad TO service_role, denue_sage;
+-- The API reads this as denue_api (scripts/api-role.sql, audit #8); guarded
+-- so the migration still applies before that role exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_api') THEN
+    GRANT SELECT ON mv_sector_summary TO denue_api;
+  END IF;
+END$$;
 
 COMMIT;
 
