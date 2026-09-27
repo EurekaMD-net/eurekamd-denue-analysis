@@ -166,6 +166,36 @@ function agebOfMunicipioSql(cveMun: string): string {
 }
 
 /**
+ * `cve_mun` range predicate for the municipios of one entidad (audit #134).
+ * `LEFT(col, 2) = 'NN'` cannot use a btree on the column; the half-open
+ * range selects the same 5-digit keys and can. entidad pre-validated by
+ * ENTIDAD_RE (01-32), so the upper bound is at most '33'.
+ */
+function entidadCveMunRangeSql(column: string, entidad: string): string {
+  const next = String(Number(entidad) + 1).padStart(2, "0");
+  return `${column} >= '${entidad}' AND ${column} < '${next}'`;
+}
+
+/**
+ * Wrap a one-cell `SELECT json_...;` statement as a scalar subquery so
+ * several of them fold into one `json_build_object(...)` round-trip
+ * (audit #103: one psql spawn + one PG backend per request, not 2-8).
+ */
+function scalarSubquery(sql: string): string {
+  return `(${sql.trim().replace(/;$/, "")})`;
+}
+
+// Audit #140: SINBA morbidity is read from its mat-view (unique on
+// (cve_mun, anio)); the view re-aggregates ~141k raw rows with regex
+// filters per call (~200 ms). The view stays as the relation-missing
+// fallback: load-sinba.ts drops sinba_ec_raw CASCADE, which takes the MV
+// with it until scripts/migrations/018-mv-sinba-morbidity.sql is re-run.
+const SINBA_MORBIDITY_MV = "mv_sinba_morbidity_municipal";
+const SINBA_MORBIDITY_VIEW = "sinba_morbidity_municipal";
+type SinbaMorbidityRel =
+  typeof SINBA_MORBIDITY_MV | typeof SINBA_MORBIDITY_VIEW;
+
+/**
  * Detect whether a postgres error is the "relation does not exist"
  * fingerprint (psql code 42P01). Used by analytics handlers to fall
  * back from a missing mat-view to the live aggregation. We test the
@@ -240,20 +270,38 @@ export async function runJsonQueryMvFirst<T>(
 // resolver falls back to the static constant `RISK_DEFAULT_CURRENT_ANO`,
 // so the service still starts and risk-summary still serves.
 //
-// "Fully reported" = COUNT(DISTINCT mes) = 12 across all municipios for
+// "Fully reported" = 12 distinct months across all municipios for
 // that year. Partial years (e.g. 2026 with only Q1 reported) intentionally
 // do NOT win — comparing partial 2026 vs full 2020 baseline produces
 // misleading change percentages. Operator can still pass `?ano=2026`
 // explicitly when they want partial-year data.
+//
+// Audit #133: GROUP BY ano + COUNT(DISTINCT mes) walked all 31.6M index
+// entries and spilled ~665 MB to temp (10.7 s, gating listen() at boot).
+// The recursive CTE below is a loose index scan on
+// idx_sesnsp_delitos_municipal_ano_mes: it visits each distinct (ano, mes)
+// pair once (~150 index probes, ~2-4 ms), then counts months per year.
 // ---------------------------------------------------------------------------
 
 const CURRENT_RISK_ANO_LIVE_SQL = `
+WITH RECURSIVE am(ano, mes) AS (
+  (SELECT ano, mes FROM sesnsp_delitos_municipal ORDER BY ano, mes LIMIT 1)
+  UNION ALL
+  SELECT n.ano, n.mes
+  FROM am, LATERAL (
+    SELECT s.ano, s.mes
+    FROM sesnsp_delitos_municipal s
+    WHERE (s.ano, s.mes) > (am.ano, am.mes)
+    ORDER BY s.ano, s.mes
+    LIMIT 1
+  ) n
+)
 SELECT json_build_array(MAX(ano)) FROM (
   SELECT ano
-  FROM sesnsp_delitos_municipal
+  FROM am
   WHERE ano <= EXTRACT(YEAR FROM NOW())::int
   GROUP BY ano
-  HAVING COUNT(DISTINCT mes) = 12
+  HAVING COUNT(*) = 12
 ) t;
 `;
 
@@ -465,7 +513,7 @@ WITH e_counts AS (
 clues_counts AS (
   SELECT cve_mun, COUNT(*)::bigint AS unidades_clues
   FROM clues
-  WHERE LEFT(cve_mun, 2) = '${entidad}'
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)}
   GROUP BY cve_mun
 )
 SELECT json_agg(row_to_json(t) ORDER BY t.establecimientos DESC) FROM (
@@ -636,7 +684,7 @@ WITH cur AS (
   SELECT cve_mun, robo_negocio, homicidio_doloso, extorsion,
          patrimoniales, violentos, total_delitos
   FROM mv_delitos_municipal_yearly
-  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)} AND ano = ${currentAno}
     -- Audit C1-coherence round-1 closure 2026-05-10: SESNSP publishes
     -- catch-all rows where MUN3 = '998' (federal-grain) or '999'
     -- (state-grain "no especificado"). They have no censo_municipios
@@ -647,7 +695,7 @@ WITH cur AS (
 baseline AS (
   SELECT cve_mun, total_delitos AS total_baseline
   FROM mv_delitos_municipal_yearly
-  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)} AND ano = ${baselineAno}
     AND cve_mun !~ '99[89]$'
 )
 SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
@@ -703,7 +751,7 @@ WITH cur AS (
     COALESCE(SUM(count) FILTER (WHERE bien_juridico = 'La vida y la Integridad corporal'), 0)::bigint AS violentos,
     SUM(count)::bigint AS total_delitos
   FROM sesnsp_delitos_municipal
-  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${currentAno}
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)} AND ano = ${currentAno}
     -- Audit C1-coherence round-1 closure 2026-05-10: same catch-all
     -- filter as the MV path. See riskSummaryMvSql for details.
     AND cve_mun !~ '99[89]$'
@@ -712,7 +760,7 @@ WITH cur AS (
 baseline AS (
   SELECT cve_mun, SUM(count)::bigint AS total_baseline
   FROM sesnsp_delitos_municipal
-  WHERE LEFT(cve_mun, 2) = '${entidad}' AND ano = ${baselineAno}
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)} AND ano = ${baselineAno}
     AND cve_mun !~ '99[89]$'
   GROUP BY cve_mun
 )
@@ -893,13 +941,16 @@ export async function riskTrendHandler(
     );
   }
 
-  const series = await runJson<RawRiskTrendPoint[]>(riskTrendSql(cveMun), {
-    container: config.dbContainer,
-  });
-  const meta = await runJson<RawMunicipioMeta[]>(municipioMetaSql(cveMun), {
-    container: config.dbContainer,
-  });
-  const metaRow = meta[0] ?? null;
+  // Audit #103: series + meta in one statement (one round-trip, not two).
+  const payload = await runJson<{
+    series: RawRiskTrendPoint[] | null;
+    meta: RawMunicipioMeta[] | null;
+  }>(
+    `SELECT json_build_object('series', ${scalarSubquery(riskTrendSql(cveMun))}, 'meta', ${scalarSubquery(municipioMetaSql(cveMun))});`,
+    { container: config.dbContainer },
+  );
+  const series = payload.series ?? [];
+  const metaRow = payload.meta?.[0] ?? null;
 
   const result: RiskTrendResult = {
     cve_mun: cveMun,
@@ -943,6 +994,9 @@ interface RawLocustAgebRow {
 
 function locustAgebSql(cveMun: string): string {
   // cveMun pre-validated by CVE_MUN_RE — exactly 5 digits, never a quote.
+  // Audit #134: half-open cvegeo range instead of LEFT(cvegeo, 5) so the
+  // cvegeo btree is usable (1.98 s -> ~2-6 ms for 09007/09015).
+  const next = String(Number(cveMun) + 1).padStart(5, "0");
   return `
 SELECT json_agg(row_to_json(t) ORDER BY t.cvegeo) FROM (
   SELECT c.cvegeo,
@@ -951,7 +1005,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.cvegeo) FROM (
          r.grado  AS grado_rezago_ageb
   FROM censo_ageb c
   LEFT JOIN coneval_grs_ageb r ON r.cvegeo = c.cvegeo
-  WHERE LEFT(c.cvegeo, 5) = '${cveMun}'
+  WHERE c.cvegeo >= '${cveMun}' AND c.cvegeo < '${next}'
   ORDER BY c.cvegeo
 ) t;
 `;
@@ -970,13 +1024,16 @@ export async function locustAgebHandler(
     );
   }
 
-  const rows = await runJson<RawLocustAgebRow[]>(locustAgebSql(cveMun), {
-    container: config.dbContainer,
-  });
-  const meta = await runJson<RawMunicipioMeta[]>(municipioMetaSql(cveMun), {
-    container: config.dbContainer,
-  });
-  const metaRow = meta[0] ?? null;
+  // Audit #103: rows + meta in one statement (one round-trip, not two).
+  const payload = await runJson<{
+    agebs: RawLocustAgebRow[] | null;
+    meta: RawMunicipioMeta[] | null;
+  }>(
+    `SELECT json_build_object('agebs', ${scalarSubquery(locustAgebSql(cveMun))}, 'meta', ${scalarSubquery(municipioMetaSql(cveMun))});`,
+    { container: config.dbContainer },
+  );
+  const rows = payload.agebs ?? [];
+  const metaRow = payload.meta?.[0] ?? null;
 
   const result: LocustAgebResult = {
     cve_mun: cveMun,
@@ -1001,6 +1058,20 @@ export async function locustAgebHandler(
 // surface: a current-ano resolver at boot + mat-view-first reads with a
 // live aggregation fallback against `inegi_edr_defunciones_raw`.
 // ---------------------------------------------------------------------------
+
+// Audit #133: the resolver reads the mat-view first (~3 ms) and only
+// falls back to this ~1 s parallel scan of the raw table when the MV is
+// missing or yields nothing. Same filters as mv_mortalidad_municipal_yearly,
+// so both paths agree on which year is "primary".
+const CURRENT_MORTALITY_ANO_MV_SQL = `
+SELECT json_build_array(MAX(ano)) FROM (
+  SELECT ano
+  FROM mv_mortalidad_municipal_yearly
+  GROUP BY ano
+  HAVING SUM(total_defunciones) >= 100000
+) t
+WHERE ano <= EXTRACT(YEAR FROM NOW())::int;
+`;
 
 const CURRENT_MORTALITY_ANO_LIVE_SQL = `
 SELECT json_build_array(MAX(ano)) FROM (
@@ -1035,8 +1106,10 @@ export function resolveCurrentMortalityAno(config: ApiServerConfig): {
   ano: number;
   source: "data" | "fallback";
 } {
-  const fromLive = tryResolveAno(config, CURRENT_MORTALITY_ANO_LIVE_SQL);
-  if (fromLive !== null) return { ano: fromLive, source: "data" };
+  const fromData =
+    tryResolveAno(config, CURRENT_MORTALITY_ANO_MV_SQL) ??
+    tryResolveAno(config, CURRENT_MORTALITY_ANO_LIVE_SQL);
+  if (fromData !== null) return { ano: fromData, source: "data" };
   return { ano: MORTALITY_DEFAULT_CURRENT_ANO, source: "fallback" };
 }
 
@@ -1107,7 +1180,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
     END                                                AS tasa_infantil_per_1k
   FROM mv_mortalidad_municipal_yearly m
   LEFT JOIN censo_municipios cm USING (cve_mun)
-  WHERE LEFT(m.cve_mun, 2) = '${entidad}' AND m.ano = ${ano}
+  WHERE ${entidadCveMunRangeSql("m.cve_mun", entidad)} AND m.ano = ${ano}
 ) t
   )
 );
@@ -1340,17 +1413,21 @@ export async function mortalityTrendHandler(
   // Audit C2 (2026-05-05): mat-view-first read with live aggregation
   // fallback so a fresh DB without `scripts/perf-matviews.sql` still
   // serves trend (same M1 pattern as mortality-summary).
-  const series = await runJsonQueryMvFirst<RawMortalityTrendPoint[]>(
+  // Audit #103: series + meta fold into one statement per path, so each
+  // request is one round-trip (two only when the MV is missing).
+  // Audit C1: meta SQL returns json_agg([]) — match riskTrendHandler's shape.
+  const withMeta = (seriesSql: string): string =>
+    `SELECT json_build_object('series', ${scalarSubquery(seriesSql)}, 'meta', ${scalarSubquery(mortalityTrendMetaSql(cveMun))});`;
+  const payload = await runJsonQueryMvFirst<{
+    series: RawMortalityTrendPoint[] | null;
+    meta: RawMortalityTrendMeta[] | null;
+  }>(
     config,
-    mortalityTrendSql(cveMun),
-    mortalityTrendLiveSql(cveMun),
+    withMeta(mortalityTrendSql(cveMun)),
+    withMeta(mortalityTrendLiveSql(cveMun)),
   );
-  // Audit C1: meta SQL now returns json_agg([]) — match riskTrendHandler's shape.
-  const metaRows = await runJson<RawMortalityTrendMeta[]>(
-    mortalityTrendMetaSql(cveMun),
-    { container: config.dbContainer },
-  );
-  const meta = metaRows[0] ?? null;
+  const series = payload.series ?? [];
+  const meta = payload.meta?.[0] ?? null;
 
   const result: MortalityTrendResult = {
     cve_mun: cveMun,
@@ -1960,6 +2037,33 @@ SELECT json_build_array(COUNT(*)) FROM (
 `;
 }
 
+interface RawAgebDetailPayload {
+  id: RawAgebDetailIdentity[] | null;
+  loc_meta: RawAgebDetailLocMeta[] | null;
+  summary: RawAgebDetailEstabSummary[] | null;
+  top_sectors: RawAgebDetailTopSector[] | null;
+  clues_sample: RawAgebDetailClues[] | null;
+  clues_count: number[] | null;
+  census: RawAgebCensusRow[] | null;
+  rezago: RawAgebRezagoRow[] | null;
+}
+
+function agebDetailSql(cvegeo: string): string {
+  // cvegeo pre-validated by CVEGEO_RE.
+  return `
+SELECT json_build_object(
+  'id', ${scalarSubquery(agebIdentitySql(cvegeo))},
+  'loc_meta', ${scalarSubquery(agebLocMetaSql(cvegeo))},
+  'summary', ${scalarSubquery(agebEstabSummarySql(cvegeo))},
+  'top_sectors', ${scalarSubquery(agebTopSectorsSql(cvegeo, 10))},
+  'clues_sample', ${scalarSubquery(agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP))},
+  'clues_count', ${scalarSubquery(agebCluesCountSql(cvegeo))},
+  'census', ${scalarSubquery(agebCensusSql(cvegeo))},
+  'rezago', ${scalarSubquery(agebRezagoSql(cvegeo))}
+);
+`;
+}
+
 /**
  * GET /analytics/ageb-detail?cvegeo=NNNNNNNNNNNNN
  *
@@ -1981,13 +2085,17 @@ export async function agebDetailHandler(
     );
   }
 
-  // Identity must run first — it gates the 404 response. Awaiting it before
-  // the fan-out means a non-existent AGEB never spawns the 7 detail queries.
-  const idRows = await runJson<RawAgebDetailIdentity[]>(
-    agebIdentitySql(cvegeo),
-    { container: config.dbContainer },
-  );
-  const id = idRows[0];
+  // Audit #103: identity + the 7 detail sub-queries run as ONE statement
+  // (one psql spawn, one PG backend) instead of 1 blocking + 7 parallel.
+  // Every key is json_agg-shaped, so an empty sub-result arrives as null.
+  // A null `id` means the cvegeo is not in ageb_polygons -> 404; the detail
+  // sub-queries for a missing AGEB are empty index probes.
+  // v0.2.4-B: censo_ageb may miss rural AGEBs not in RESAGEBURB urbana.
+  // v0.2.6: CONEVAL Grado de Rezago Social ~95% urban AGEB coverage.
+  const payload = await runJson<RawAgebDetailPayload>(agebDetailSql(cvegeo), {
+    container: config.dbContainer,
+  });
+  const id = payload.id?.[0];
   if (!id) {
     throw new HttpError(
       `AGEB no encontrada: cvegeo "${cvegeo}".`,
@@ -1995,82 +2103,13 @@ export async function agebDetailHandler(
       "ageb.not_found",
     );
   }
-
-  // v0.2.4-A audit W4 (2026-05-06): fan out 7 detail queries via Promise.all.
-  // Order MUST match the test mock queue — each `mockExec.mockReturnValueOnce`
-  // entry corresponds to one position in this array. Don't reorder without
-  // re-aligning the test seeders. Per-position numbering is repeated inline
-  // so a reorder triggers a comment conflict, not a silent test drift.
-  // v0.2.4-B: censo_ageb may miss rural AGEBs not in RESAGEBURB urbana.
-  // v0.2.6: CONEVAL Grado de Rezago Social ~95% urban AGEB coverage.
-  // W4 follow-up: shared AbortController so a Promise.all rejection aborts
-  // the in-flight siblings: the runner kills each docker CLI and fires
-  // pg_cancel_backend for its tagged session (killing the CLI alone leaves
-  // the backend running).
-  const ac = new AbortController();
-  let parallelResults: [
-    RawAgebDetailLocMeta[],
-    RawAgebDetailEstabSummary[],
-    RawAgebDetailTopSector[],
-    RawAgebDetailClues[],
-    number[] | null,
-    RawAgebCensusRow[],
-    RawAgebRezagoRow[],
-  ];
-  try {
-    parallelResults = await Promise.all([
-      // 1. locMeta
-      runJson<RawAgebDetailLocMeta[]>(agebLocMetaSql(cvegeo), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-      // 2. summary
-      runJson<RawAgebDetailEstabSummary[]>(agebEstabSummarySql(cvegeo), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-      // 3. sectors
-      runJson<RawAgebDetailTopSector[]>(agebTopSectorsSql(cvegeo, 10), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-      // 4. cluesSample
-      runJson<RawAgebDetailClues[]>(
-        agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP),
-        {
-          container: config.dbContainer,
-          signal: ac.signal,
-        },
-      ),
-      // 5. cluesCount
-      runJson<number[] | null>(agebCluesCountSql(cvegeo), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-      // 6. census
-      runJson<RawAgebCensusRow[]>(agebCensusSql(cvegeo), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-      // 7. rezago
-      runJson<RawAgebRezagoRow[]>(agebRezagoSql(cvegeo), {
-        container: config.dbContainer,
-        signal: ac.signal,
-      }),
-    ]);
-  } catch (err) {
-    ac.abort();
-    throw err;
-  }
-  const [
-    locMeta,
-    summaryRows,
-    sectors,
-    cluesSample,
-    cluesCountRows,
-    censusRows,
-    rezagoRows,
-  ] = parallelResults;
+  const locMeta = payload.loc_meta ?? [];
+  const summaryRows = payload.summary ?? [];
+  const sectors = payload.top_sectors ?? [];
+  const cluesSample = payload.clues_sample ?? [];
+  const cluesCountRows = payload.clues_count;
+  const censusRows = payload.census ?? [];
+  const rezagoRows = payload.rezago ?? [];
   const cluesCount = Array.isArray(cluesCountRows)
     ? Number(cluesCountRows[0] ?? 0)
     : 0;
@@ -2552,6 +2591,7 @@ function opportunityByAgebSql(
   orderBy: OpportunityAgebOrderBy,
   limit: number,
   rezagoFilter: RezagoGrado[],
+  sinbaRel: SinbaMorbidityRel,
 ): string {
   // Validation upstream guarantees `scianColumn` is one of 5 known columns,
   // `scianCodes` are all `\d{2,6}`, and `rezagoFilter` entries are all from
@@ -2622,13 +2662,15 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
   LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
   LEFT JOIN coneval_grs_ageb cga ON cga.cvegeo = a.cvegeo
   -- v0.2.7: muni-level SINBA morbidity. Same value broadcasts to every AGEB
-  -- in the muni. Subquery cap at most-recent year so multi-year SINBA loads
-  -- don't double-count. 2023 is the latest publicly available SINBA bulk.
+  -- in the muni. Most-recent year only so multi-year SINBA loads don't
+  -- double-count. 2023 is the latest publicly available SINBA bulk.
+  -- Audit #140: DISTINCT ON over the MV, not a MAX() subquery over the view.
   LEFT JOIN (
-    SELECT cve_mun, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio
-    FROM sinba_morbidity_municipal
-    WHERE anio = (SELECT MAX(anio) FROM sinba_morbidity_municipal WHERE cve_mun = '${cveMun}')
-      AND cve_mun = '${cveMun}'
+    SELECT DISTINCT ON (cve_mun)
+      cve_mun, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio
+    FROM ${sinbaRel}
+    WHERE cve_mun = '${cveMun}'
+    ORDER BY cve_mun, anio DESC
   ) smm ON true
   WHERE a.cve_ent = '${cveMun.slice(0, 2)}' AND a.cve_mun = '${cveMun.slice(2)}'
   ${rezagoWhere}ORDER BY ${orderExpr}, a.cvegeo
@@ -2687,9 +2729,26 @@ export async function opportunityByAgebHandler(
   );
   const rezagoFilter = parseRezagoGradoFilter(c.req.query("rezago_grado"));
 
-  const rows = await runJson<RawOpportunityAgebRow[]>(
-    opportunityByAgebSql(cveMun, column, codes, orderBy, limit, rezagoFilter),
-    { container: config.dbContainer },
+  const rows = await runJsonQueryMvFirst<RawOpportunityAgebRow[]>(
+    config,
+    opportunityByAgebSql(
+      cveMun,
+      column,
+      codes,
+      orderBy,
+      limit,
+      rezagoFilter,
+      SINBA_MORBIDITY_MV,
+    ),
+    opportunityByAgebSql(
+      cveMun,
+      column,
+      codes,
+      orderBy,
+      limit,
+      rezagoFilter,
+      SINBA_MORBIDITY_VIEW,
+    ),
   );
   const result: OpportunityByAgebResult = {
     cve_mun: cveMun,
@@ -4768,7 +4827,7 @@ SELECT json_agg(row_to_json(t)) FROM (
 // warm for muni-heavy states (Oaxaca 570 munis); ~200ms for CDMX (16
 // munis). Cache-Control sets max-age=300, so per-entidad responses warm
 // quickly across users. The DISTINCT ON on `sinba_latest` is load-bearing
-// (sinba_morbidity_municipal keys on (cve_mun, anio)); the DISTINCT ON on
+// (mv_sinba_morbidity_municipal keys on (cve_mun, anio)); the DISTINCT ON on
 // cnbv_latest / sedatu_latest is defensive forward-compat (today both
 // source matviews have UNIQUE(cve_mun); the projection is a no-op until
 // they ingest multi-year history).
@@ -4805,7 +4864,7 @@ interface RawLocustMuniRow {
   sedatu_acciones_total: number | string | null;
 }
 
-function locustMuniSql(entidad: string): string {
+function locustMuniSql(entidad: string, sinbaRel: SinbaMorbidityRel): string {
   return `
 WITH denue_agg AS (
   SELECT
@@ -4819,7 +4878,7 @@ WITH denue_agg AS (
 clues_agg AS (
   SELECT cve_mun, COUNT(*)::bigint AS unidades_clues
   FROM clues
-  WHERE LEFT(cve_mun, 2) = '${entidad}'
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)}
   GROUP BY cve_mun
 ),
 ce2024_totals AS (
@@ -4836,8 +4895,8 @@ ce2024_totals AS (
 sinba_latest AS (
   SELECT DISTINCT ON (cve_mun)
     cve_mun, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio
-  FROM sinba_morbidity_municipal
-  WHERE LEFT(cve_mun, 2) = '${entidad}'
+  FROM ${sinbaRel}
+  WHERE ${entidadCveMunRangeSql("cve_mun", entidad)}
   ORDER BY cve_mun, anio DESC
 ),
 cnbv_latest AS (
@@ -4918,9 +4977,11 @@ export async function locustMuniHandler(
       "validation.entidad",
     );
   }
-  const rows = await runJson<RawLocustMuniRow[]>(locustMuniSql(entidad), {
-    container: config.dbContainer,
-  });
+  const rows = await runJsonQueryMvFirst<RawLocustMuniRow[]>(
+    config,
+    locustMuniSql(entidad, SINBA_MORBIDITY_MV),
+    locustMuniSql(entidad, SINBA_MORBIDITY_VIEW),
+  );
   const num = (v: number | string | null | undefined): number | null =>
     v === null || v === undefined ? null : Number(v);
   const result: LocustMuniResult = {

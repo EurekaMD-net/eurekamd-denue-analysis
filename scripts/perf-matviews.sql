@@ -217,3 +217,28 @@ CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_mmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_yearly(cve_mun, ano);
+
+-- =============================================================================
+-- mv_sinba_morbidity_municipal — SINBA chronic-disease morbidity per
+-- (cve_mun, anio). Audit #140 (2026-09-26): the sinba_morbidity_municipal
+-- view re-aggregates ~141k sinba_ec_raw rows with regex filters per read
+-- (~200 ms); locust-muni and opportunity-by-ageb read this MV instead and
+-- fall back to the view when it is missing. Built FROM the view so the
+-- definition lives only in scripts/load-sinba.ts. load-sinba.ts drops
+-- sinba_ec_raw CASCADE, which drops this MV: re-create it after every
+-- SINBA reload (scripts/migrations/018-mv-sinba-morbidity.sql).
+-- =============================================================================
+DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;
+CREATE MATERIALIZED VIEW mv_sinba_morbidity_municipal AS
+SELECT
+  cve_mun,
+  anio,
+  casos_dm2_promedio,
+  casos_hta_promedio,
+  casos_obesidad_promedio,
+  clues_reportando
+FROM sinba_morbidity_municipal;
+
+-- UNIQUE index enables REFRESH MATERIALIZED VIEW CONCURRENTLY.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_smm_unique
+  ON mv_sinba_morbidity_municipal(cve_mun, anio);
