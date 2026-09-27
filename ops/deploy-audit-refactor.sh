@@ -22,7 +22,7 @@ M=$MAIN/scripts/migrations
 UNIT=denue-analyzer
 PORT=3030
 PSQL=(docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1)
-PSQL_RO=(docker exec supabase-db psql -U postgres -d postgres -tA -c "SET default_transaction_read_only=on" -c "SET statement_timeout='20s'" -c)
+PSQL_RO=(docker exec supabase-db psql -U postgres -d postgres -qtA -c "SET default_transaction_read_only=on" -c "SET statement_timeout='20s'" -c)
 
 log()  { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32mOK\033[0m  %s\n' "$*"; }
