@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "./store";
 import { SUPABASE_TOKEN_KEY_RE } from "./components/LoginGate";
@@ -8,6 +9,7 @@ vi.mock("./lib/supabase", () => ({
   supabase: {
     auth: {
       signOut: vi.fn().mockResolvedValue({ error: null }),
+      stopAutoRefresh: vi.fn().mockResolvedValue(undefined),
     },
   },
 }));
@@ -106,6 +108,46 @@ describe("store signOut (full flow)", () => {
     expect(
       supabase.auth.signOut as ReturnType<typeof vi.fn>,
     ).toHaveBeenCalledOnce();
+  });
+
+  it("removes the stored session when the server revoke fails (audit #192)", async () => {
+    const { supabase } = await import("./lib/supabase");
+    const signOutMock = supabase.auth.signOut as ReturnType<typeof vi.fn>;
+    const stopMock = supabase.auth.stopAutoRefresh as ReturnType<typeof vi.fn>;
+    signOutMock.mockClear();
+    stopMock.mockClear();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Real auth-js returns {error} for BOTH global and local scope on a
+    // network failure and leaves the token in storage; the mock does too.
+    signOutMock.mockResolvedValue({ error: new Error("network down") });
+    window.localStorage.setItem("sb-ref-auth-token", "{\"refresh_token\":\"r\"}");
+    window.localStorage.setItem("sb-ref-auth-token-code-verifier", "v");
+    window.localStorage.setItem("unrelated-key", "keep");
+    try {
+      await useUiStore.getState().signOut();
+      expect(window.localStorage.getItem("sb-ref-auth-token")).toBeNull();
+      expect(
+        window.localStorage.getItem("sb-ref-auth-token-code-verifier"),
+      ).toBeNull();
+      expect(window.localStorage.getItem("unrelated-key")).toBe("keep");
+      expect(stopMock).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      signOutMock.mockResolvedValue({ error: null });
+      warn.mockRestore();
+      window.localStorage.clear();
+    }
+  });
+
+  it("removes every Sage thread index from localStorage (audit #197)", async () => {
+    window.localStorage.setItem("denue_sage_threads:user-1", "[]");
+    window.localStorage.setItem("denue_sage_threads:user-2", "[]");
+    window.localStorage.setItem("unrelated-key", "keep");
+    await useUiStore.getState().signOut();
+    expect(window.localStorage.getItem("denue_sage_threads:user-1")).toBeNull();
+    expect(window.localStorage.getItem("denue_sage_threads:user-2")).toBeNull();
+    expect(window.localStorage.getItem("unrelated-key")).toBe("keep");
+    window.localStorage.clear();
   });
 });
 

@@ -1,12 +1,28 @@
+import { memo, useMemo } from "react";
 import ReactECharts from "../lib/echarts-core";
 import { useTopSectorsByEntidad } from "../api/queries";
 import { ChartCard } from "./ChartCard";
 import { COLOR, ECHARTS_BASE, ECHARTS_AXIS_DARK } from "./theme";
+import { escapeHtml } from "../lib/escape-html";
 
 interface Props {
   entidad: string | null;
   entidadNombre?: string;
 }
+
+// Module scope so the memoized option keeps one formatter identity.
+export const topSectoresTooltipFormatter = (p: {
+  name: string;
+  value: number;
+}) =>
+  `<b>${escapeHtml(p.name)}</b><br/>${p.value.toLocaleString("es-MX")} establecimientos`;
+
+const compactCountLabel = (v: number) =>
+  v >= 1_000_000
+    ? `${(v / 1_000_000).toFixed(1)}M`
+    : v >= 1_000
+      ? `${(v / 1_000).toFixed(0)}k`
+      : String(v);
 
 /**
  * Top 10 SCIAN sectors in the selected entidad. Horizontal bars, sorted
@@ -14,61 +30,62 @@ interface Props {
  * never-applied mv_sector_summary mat-view by hitting /analytics/top-sectors
  * which aggregates directly via the indexed sector_actividad_id column.
  */
-export function TopSectoresBar({ entidad, entidadNombre }: Props) {
+export const TopSectoresBar = memo(function TopSectoresBar({
+  entidad,
+  entidadNombre,
+}: Props) {
   const { data, isLoading, isError, error } = useTopSectorsByEntidad(
     entidad,
     10,
   );
 
-  const sectors = data?.sectors ?? [];
-  // ECharts bars render bottom-to-top; reverse so #1 is at top
-  const labels = sectors.map((s) => `${s.scian} · ${s.name}`).reverse();
-  const values = sectors.map((s) => s.count).reverse();
+  // Memoized on the data so an unrelated parent render does not hand
+  // ReactECharts a new notMerge option.
+  const option = useMemo(() => {
+    const sectors = data?.sectors ?? [];
+    // ECharts bars render bottom-to-top; reverse so #1 is at top
+    const labels = sectors.map((s) => `${s.scian} · ${s.name}`).reverse();
+    const values = sectors.map((s) => s.count).reverse();
 
-  const option = {
-    ...ECHARTS_BASE,
-    grid: { left: 220, right: 32, top: 8, bottom: 24 },
-    tooltip: {
-      ...ECHARTS_BASE.tooltip,
-      formatter: (p: { name: string; value: number }) =>
-        `<b>${p.name}</b><br/>${p.value.toLocaleString("es-MX")} establecimientos`,
-    },
-    xAxis: {
-      type: "value",
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: {
-        ...ECHARTS_AXIS_DARK.axisLabel,
-        formatter: (v: number) =>
-          v >= 1_000_000
-            ? `${(v / 1_000_000).toFixed(1)}M`
-            : v >= 1_000
-              ? `${(v / 1_000).toFixed(0)}k`
-              : String(v),
+    return {
+      ...ECHARTS_BASE,
+      grid: { left: 220, right: 32, top: 8, bottom: 24 },
+      tooltip: {
+        ...ECHARTS_BASE.tooltip,
+        formatter: topSectoresTooltipFormatter,
       },
-    },
-    yAxis: {
-      type: "category",
-      data: labels,
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: {
-        ...ECHARTS_AXIS_DARK.axisLabel,
-        fontFamily:
-          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        fontSize: 10,
-        width: 200,
-        overflow: "truncate",
+      xAxis: {
+        type: "value",
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: {
+          ...ECHARTS_AXIS_DARK.axisLabel,
+          formatter: compactCountLabel,
+        },
       },
-    },
-    series: [
-      {
-        type: "bar",
-        data: values,
-        itemStyle: { color: COLOR.accent, borderRadius: [0, 2, 2, 0] },
-        emphasis: { itemStyle: { color: "#67e8f9" } }, // cyan-300
-        barMaxWidth: 18,
+      yAxis: {
+        type: "category",
+        data: labels,
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: {
+          ...ECHARTS_AXIS_DARK.axisLabel,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 10,
+          width: 200,
+          overflow: "truncate",
+        },
       },
-    ],
-  };
+      series: [
+        {
+          type: "bar",
+          data: values,
+          itemStyle: { color: COLOR.accent, borderRadius: [0, 2, 2, 0] },
+          emphasis: { itemStyle: { color: "#67e8f9" } }, // cyan-300
+          barMaxWidth: 18,
+        },
+      ],
+    };
+  }, [data]);
 
   const subtitle = entidadNombre
     ? `entidad: ${entidadNombre}`
@@ -95,4 +112,4 @@ export function TopSectoresBar({ entidad, entidadNombre }: Props) {
       />
     </ChartCard>
   );
-}
+});

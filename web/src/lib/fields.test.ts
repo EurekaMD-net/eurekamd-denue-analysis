@@ -13,6 +13,11 @@ import {
   isNumeric,
   type EndpointId,
 } from "./fields";
+// The backend response contract, read as text so the test can check the
+// catalog's column names against the interfaces the handlers are typed to
+// (each handler builds its JSON as an object literal of that type, so an
+// alias rename in the SQL/handler has to change these interfaces too).
+import backendTypesSrc from "../../../src/api/types.ts?raw";
 
 describe("FIELD_CATALOG", () => {
   it("has unique ids", () => {
@@ -299,5 +304,138 @@ describe("type predicates", () => {
     expect(isNumeric("numeric_continuous")).toBe(true);
     expect(isNumeric("numeric_pct")).toBe(true);
     expect(isNumeric("temporal")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backend contract (audit X-web-fields-contract, 2026-09-26). See
+// docs/AUDIT-2026-09-26-FIELDS-CONTRACT.md for the field-by-field table.
+// ---------------------------------------------------------------------------
+
+/** Backend Result interface + row interface for each Locust endpoint. */
+const ENDPOINT_CONTRACT: Record<EndpointId, { result: string; row: string }> = {
+  "national-treemap": {
+    result: "NationalTreemapResult",
+    row: "NationalTreemapEntry",
+  },
+  municipios: {
+    result: "MunicipiosAnalyticsResult",
+    row: "MunicipioAnalyticsRow",
+  },
+  "top-sectors": { result: "TopSectorsResult", row: "TopSectorRow" },
+  "risk-summary": { result: "RiskSummaryResult", row: "RiskSummaryRow" },
+  "mortality-summary": {
+    result: "MortalitySummaryResult",
+    row: "MortalitySummaryRow",
+  },
+  "locust-muni": { result: "LocustMuniResult", row: "LocustMuniRow" },
+  "locust-estado": { result: "LocustEstadoResult", row: "LocustEstadoRow" },
+  "locust-ageb": { result: "LocustAgebResult", row: "LocustAgebRow" },
+};
+
+/** Top-level `name: type` members of `export interface <name> { ... }`. */
+function backendInterface(name: string): Map<string, string> {
+  const m = backendTypesSrc.match(
+    new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`),
+  );
+  if (!m) throw new Error(`interface ${name} not found in src/api/types.ts`);
+  const members = new Map<string, string>();
+  for (const line of m[1]!.split("\n")) {
+    const k = line.match(/^ {2}([A-Za-z_][A-Za-z0-9_]*)\??:\s*(.+?);\s*$/);
+    if (k) members.set(k[1]!, k[2]!);
+  }
+  return members;
+}
+
+describe("backend contract (src/api/types.ts)", () => {
+  it("every ENDPOINTS rowsKey is the row array of the backend Result type", () => {
+    for (const ep of Object.values(ENDPOINTS)) {
+      const { result, row } = ENDPOINT_CONTRACT[ep.id];
+      expect(
+        backendInterface(result).get(ep.rowsKey),
+        `endpoint "${ep.id}" rowsKey "${ep.rowsKey}" is not ${result}.${ep.rowsKey}: ${row}[]`,
+      ).toBe(`${row}[]`);
+    }
+  });
+
+  it("every catalog column is a key of its endpoint's backend row type", () => {
+    for (const f of FIELD_CATALOG) {
+      for (const [ep, col] of Object.entries(f.endpoints)) {
+        const { row } = ENDPOINT_CONTRACT[ep as EndpointId];
+        expect(
+          backendInterface(row).has(col!),
+          `field "${f.id}" reads "${col}" on "${ep}", but ${row} has no such key`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("the contract parser actually sees the backend keys (guards a vacuous pass)", () => {
+    const muni = backendInterface("LocustMuniRow");
+    expect(muni.size).toBeGreaterThan(20);
+    expect(muni.has("pct_pea")).toBe(true);
+    expect(muni.has("not_a_column")).toBe(false);
+  });
+});
+
+describe("catalog labels match what the backend computes", () => {
+  const desc = (id: string) => findField(id)!.description;
+
+  it("SEDATU monto is housing financing (INFONAVIT, banca…), not subsidies", () => {
+    const f = findField("sedatu.monto_total")!;
+    expect(f.label).not.toMatch(/subsidi/i);
+    expect(f.description).not.toMatch(/subsidi/i);
+    expect(f.description).toMatch(/financiamientos a la vivienda/);
+  });
+
+  it("CNBV fields are bank housing credit, not commercial (business) credit", () => {
+    for (const id of ["cnbv.monto_total", "cnbv.pct_femenino"]) {
+      expect(findField(id)!.label).not.toMatch(/comercial/i);
+      expect(desc(id)).not.toMatch(/comercial/i);
+      expect(desc(id)).toMatch(/vivienda/);
+    }
+    expect(findField("cnbv.monto_total")!.label).toMatch(/vivienda/);
+  });
+
+  it("SINBA fields cite SIS (SSA/IMSS-Bienestar), not 'SUS'", () => {
+    for (const id of [
+      "sinba.casos_dm2_promedio",
+      "sinba.casos_hta_promedio",
+      "sinba.casos_obesidad_promedio",
+    ]) {
+      expect(desc(id)).not.toMatch(/\bSUS\b/);
+      expect(desc(id)).toMatch(/SIS/);
+    }
+  });
+
+  it("units the backend returns are stated", () => {
+    // ce2024_municipal.valor_agregado_censal_bruto is INEGI A131A (mdp).
+    expect(desc("ce2024.valor_agregado")).toMatch(/millones de pesos/);
+    // calibrators_enigh_state.ingreso_corriente_mediana = weighted median
+    // of ENIGH ing_cor, which is quarterly household income.
+    expect(desc("enigh.ingreso_p50")).toMatch(/trimestral por hogar/);
+    // sict_traffic_by_municipio.tdpa_total = SUM(tdpa) over stations.
+    expect(desc("sict.tdpa_total")).toMatch(/^Suma del TDPA/);
+  });
+
+  it("psinder is 'sin afiliación' to any institution, not only public", () => {
+    expect(desc("censo.pct_sin_cobertura_salud")).not.toMatch(/pública\)/);
+    expect(desc("censo.pct_sin_cobertura_salud")).toMatch(/público ni privado/);
+  });
+
+  it("SESNSP / EDR periods name the year the backend actually resolves", () => {
+    // risk-summary defaults to the latest year with 12 reported months;
+    // mortality-summary to the latest bulk-loaded year of occurrence.
+    expect(desc("sesnsp.homicidio_doloso")).toMatch(/último año completo/);
+    expect(desc("sesnsp.homicidio_doloso")).toMatch(/^Carpetas/);
+    expect(desc("sesnsp.total_delitos")).toMatch(/último año completo/);
+    expect(desc("edr.total_defunciones")).toMatch(/residencia/);
+    for (const id of [
+      "sesnsp.homicidio_doloso",
+      "sesnsp.total_delitos",
+      "edr.total_defunciones",
+    ]) {
+      expect(desc(id)).not.toMatch(/año actual/);
+    }
   });
 });

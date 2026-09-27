@@ -1,5 +1,6 @@
+import { useMemo } from "react";
 import type { MapLayerSpec } from "../lib/map-layers";
-import { cleanSamples, formatCompact, quantileBreaks } from "../lib/quantiles";
+import { cleanSamples, formatCompact, quantile } from "../lib/quantiles";
 
 /**
  * 3×3 bivariate color matrix legend (Joshua Stevens palette). Renders
@@ -12,7 +13,13 @@ import { cleanSamples, formatCompact, quantileBreaks } from "../lib/quantiles";
  * /analytics/layers/values response, keyed by polygon ID). When `values`
  * is provided, the legend shows real numeric breakpoints per layer. When
  * absent (loading state or no data), it falls back to bin-index labels.
+ *
+ * Audit #174: nothing colours the map points by layer value yet (the
+ * circle layer is a fixed colour), so every variant says so and the
+ * legend reads as a distribution summary of the picked layers.
  */
+export const LEGEND_SCOPE_NOTE = "Distribución de capas (no colorea el mapa)";
+
 export interface BivariateLegendProps {
   layers: MapLayerSpec[];
   /**
@@ -49,14 +56,18 @@ interface LayerDomain {
   n: number;
 }
 
-function layerDomain(
+/**
+ * Audit #175: one clean+sort per layer; the tertile breaks are read off
+ * the already-sorted sample (quantileBreaks would re-clean and re-sort).
+ */
+export function layerDomain(
   values: BivariateLegendProps["values"],
   layerId: string,
 ): LayerDomain {
   const samples = samplesForLayer(values, layerId);
   const clean = cleanSamples(samples);
   return {
-    breaks: quantileBreaks(samples, 3),
+    breaks: [quantile(clean, 1 / 3), quantile(clean, 2 / 3)],
     min: clean.length > 0 ? clean[0]! : NaN,
     max: clean.length > 0 ? clean[clean.length - 1]! : NaN,
     n: clean.length,
@@ -64,22 +75,24 @@ function layerDomain(
 }
 
 export function BivariateLegend({ layers, values }: BivariateLegendProps) {
+  // Audit #175: MapMode re-renders on every point click / map load /
+  // basemap toggle; recompute (and re-sort 81k AGEB samples) only when
+  // the picked layers or the values payload change.
+  const domains = useMemo(
+    () => layers.map((l) => layerDomain(values, l.id)),
+    [layers, values],
+  );
   if (layers.length === 0) return null;
   if (layers.length === 1) {
-    return (
-      <SingleScaleLegend
-        layer={layers[0]!}
-        domain={layerDomain(values, layers[0]!.id)}
-      />
-    );
+    return <SingleScaleLegend layer={layers[0]!} domain={domains[0]!} />;
   }
   if (layers.length === 2) {
     return (
       <TwoScaleLegend
         a={layers[0]!}
         b={layers[1]!}
-        domainA={layerDomain(values, layers[0]!.id)}
-        domainB={layerDomain(values, layers[1]!.id)}
+        domainA={domains[0]!}
+        domainB={domains[1]!}
       />
     );
   }
@@ -88,10 +101,18 @@ export function BivariateLegend({ layers, values }: BivariateLegendProps) {
       a={layers[0]!}
       b={layers[1]!}
       c={layers[2]!}
-      domainA={layerDomain(values, layers[0]!.id)}
-      domainB={layerDomain(values, layers[1]!.id)}
-      domainC={layerDomain(values, layers[2]!.id)}
+      domainA={domains[0]!}
+      domainB={domains[1]!}
+      domainC={domains[2]!}
     />
+  );
+}
+
+function ScopeNote() {
+  return (
+    <span className="font-mono text-[8px] text-amber-400">
+      {LEGEND_SCOPE_NOTE}
+    </span>
   );
 }
 
@@ -107,6 +128,7 @@ function SingleScaleLegend({
       <span className="font-mono text-[10px] text-slate-300">
         {layer.label}
       </span>
+      <ScopeNote />
       <div className="flex h-3 w-32 overflow-hidden rounded">
         <div className="flex-1" style={{ background: "#0d9488" }} />
         <div className="flex-1" style={{ background: "#65a30d" }} />
@@ -151,6 +173,7 @@ function TwoScaleLegend({
       <span className="font-mono text-[10px] text-slate-300">
         {a.label} × {b.label}
       </span>
+      <ScopeNote />
       <div className="flex items-end gap-1">
         <div
           className="font-mono text-[8px] text-slate-500"
@@ -217,24 +240,21 @@ function ThreeScaleLegend({
     <div className="flex flex-col gap-1 rounded border border-slate-800 bg-slate-900 p-2">
       <span className="font-mono text-[10px] text-slate-300">Trivariada</span>
       <div className="grid grid-cols-3 gap-1 font-mono text-[9px]">
-        <span className="text-rose-400">R: {a.label}</span>
-        <span className="text-emerald-400">G: {b.label}</span>
-        <span className="text-sky-400">B: {c.label}</span>
+        <span className="text-rose-400">{a.label}</span>
+        <span className="text-emerald-400">{b.label}</span>
+        <span className="text-sky-400">{c.label}</span>
       </div>
-      <span className="font-mono text-[8px] text-slate-500">
-        Cada componente RGB del punto codifica un layer (alto valor = canal
-        saturado).
-      </span>
+      <ScopeNote />
       {hasData && (
         <div className="mt-1 flex flex-col gap-0.5 font-mono text-[8px] text-slate-500">
           <span>
-            R · {a.label}: {formatBinThresholds(domainA)}
+            {a.label}: {formatBinThresholds(domainA)}
           </span>
           <span>
-            G · {b.label}: {formatBinThresholds(domainB)}
+            {b.label}: {formatBinThresholds(domainB)}
           </span>
           <span>
-            B · {c.label}: {formatBinThresholds(domainC)}
+            {c.label}: {formatBinThresholds(domainC)}
           </span>
         </div>
       )}

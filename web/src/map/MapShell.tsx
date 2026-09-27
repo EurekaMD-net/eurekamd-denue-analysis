@@ -51,6 +51,76 @@ export function extractCleeFromFeature(feature: unknown): string | null {
 }
 
 /**
+ * Audit #166: builds the MapLibre transformRequest around a token GETTER,
+ * not a token value, so a Supabase TOKEN_REFRESHED only swaps what the
+ * getter returns and the map instance survives (pan/zoom, cached tiles,
+ * deck.gl overlay). Injects Authorization: Bearer <jwt> on every tile
+ * fetch hitting our backend. Other requests (basemap tiles to Carto)
+ * pass through unchanged. Audit C C1 fix: was sending JWT under the
+ * X-Api-Key header — backend's bearer auth path never saw it, every
+ * tile 401'd.
+ * 2026-05-04: tile URLs are absolute (must be — MapLibre calls
+ * new Request(url)), so match by pathname. Same-origin guard via
+ * window.location.origin so we don't accidentally inject auth into a
+ * third-party basemap CDN that happens to have /api/ in its path.
+ */
+type TileRequest = { url: string; headers?: Record<string, string> };
+
+export function createTransformRequest(
+  getToken: () => string | null,
+): (url: string) => TileRequest {
+  return (url): TileRequest => {
+    let isOurApi = false;
+    try {
+      const parsed = new URL(url);
+      isOurApi =
+        parsed.origin === window.location.origin &&
+        parsed.pathname.startsWith("/api/");
+    } catch {
+      // Non-absolute URL — basemap relative paths or unusual MapLibre
+      // resource lookups. Pass through untouched.
+      isOurApi = false;
+    }
+    if (!isOurApi) return { url };
+    const accessToken = getToken();
+    if (!accessToken) {
+      // No session = no point firing the request. Backend would 401
+      // every tile and the user would see a blank map with no
+      // signal. The next tile request after LoginGate restores a
+      // session reads the fresh token through the getter.
+      if (import.meta.env.DEV) {
+        console.warn("[map] skipping tile fetch — no active session");
+      }
+      return { url, headers: {} };
+    }
+    return {
+      url,
+      headers: { Authorization: `Bearer ${accessToken}` },
+    };
+  };
+}
+
+/**
+ * Audit #166: viewport snapshot taken just before a basemap toggle tears
+ * the map down, so the recreated map opens where the user was instead of
+ * snapping back to MEXICO_CENTER.
+ */
+export function snapshotView(
+  map: Pick<MapInstance, "getCenter" | "getZoom">,
+): { center: [number, number]; zoom: number } {
+  const c = map.getCenter();
+  return { center: [c.lng, c.lat], zoom: map.getZoom() };
+}
+
+/**
+ * Audit #195: static attribution rendered by React in place of
+ * MapLibre's AttributionControl, which inserts the third-party style's
+ * attribution strings through innerHTML (maplibre-gl <=6.4.0
+ * GHSA-jrc7-96c5-q579).
+ */
+export const MAP_ATTRIBUTION = "© CARTO © OpenStreetMap";
+
+/**
  * MapLibre canvas + DENUE MVT vector source + density layers.
  *
  * Two render modes stacked:
@@ -62,7 +132,8 @@ export function extractCleeFromFeature(feature: unknown): string | null {
  * and force MapLibre to refetch tiles. Basemap toggle (positron/dark)
  * tears down + recreates the map instance to swap the style cleanly,
  * because re-applying setStyle without preserving data layers is fragile
- * across MapLibre versions.
+ * across MapLibre versions. The viewport is carried across the rebuild
+ * (audit #166).
  */
 export function MapShell({
   basemap,
@@ -78,6 +149,14 @@ export function MapShell({
   // accessToken() function reference would otherwise stay stable
   // forever and miss refreshes).
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
+  // Audit #166: transformRequest reads the token through this ref, so a
+  // token refresh does not recreate the map.
+  const tokenRef = useRef(accessToken);
+  tokenRef.current = accessToken;
+  // Audit #166: viewport saved when the map is torn down (basemap toggle).
+  const viewRef = useRef<{ center: [number, number]; zoom: number } | null>(
+    null,
+  );
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
 
@@ -105,52 +184,19 @@ export function MapShell({
       mapRef.current.remove();
       mapRef.current = null;
     }
+    const view = viewRef.current;
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: BASEMAP_STYLES[basemap],
-      center: [MEXICO_CENTER.lon, MEXICO_CENTER.lat],
-      zoom: MEXICO_CENTER.zoom,
+      center: view?.center ?? [MEXICO_CENTER.lon, MEXICO_CENTER.lat],
+      zoom: view?.zoom ?? MEXICO_CENTER.zoom,
       maxZoom: 17,
       minZoom: 3,
-      attributionControl: { compact: true },
-      // Inject Authorization: Bearer <jwt> on every tile fetch hitting
-      // our backend. Other requests (basemap tiles to Carto) pass
-      // through unchanged. Audit C C1 fix: was sending JWT under the
-      // X-Api-Key header — backend's bearer auth path never saw it,
-      // every tile 401'd.
-      // 2026-05-04: tile URLs are absolute (must be — MapLibre calls
-      // new Request(url)), so match by pathname. Same-origin guard via
-      // window.location.origin so we don't accidentally inject auth
-      // into a third-party basemap CDN that happens to have /api/ in
-      // its path.
-      transformRequest: (url, _resourceType) => {
-        let isOurApi = false;
-        try {
-          const parsed = new URL(url);
-          isOurApi =
-            parsed.origin === window.location.origin &&
-            parsed.pathname.startsWith("/api/");
-        } catch {
-          // Non-absolute URL — basemap relative paths or unusual MapLibre
-          // resource lookups. Pass through untouched.
-          isOurApi = false;
-        }
-        if (!isOurApi) return { url };
-        if (!accessToken) {
-          // No session = no point firing the request. Backend would 401
-          // every tile and the user would see a blank map with no
-          // signal. Better to skip until LoginGate restores a session,
-          // which bumps the dep array and recreates the map with auth.
-          if (import.meta.env.DEV) {
-            console.warn("[map] skipping tile fetch — no active session");
-          }
-          return { url, headers: {} };
-        }
-        return {
-          url,
-          headers: { Authorization: `Bearer ${accessToken}` },
-        };
-      },
+      // Audit #195: no AttributionControl (innerHTML sink for the
+      // third-party style's attribution); MAP_ATTRIBUTION is rendered
+      // statically below instead.
+      attributionControl: false,
+      transformRequest: createTransformRequest(() => tokenRef.current),
     });
     mapRef.current = map;
 
@@ -188,11 +234,13 @@ export function MapShell({
     });
 
     return () => {
-      mapRef.current?.remove();
+      if (mapRef.current) {
+        viewRef.current = snapshotView(mapRef.current);
+        mapRef.current.remove();
+      }
       mapRef.current = null;
     };
-  }, [basemap, accessToken, onMapLoad, onPointClick]);
-  // ^ accessToken change forces re-create so transformRequest closes over fresh token
+  }, [basemap, onMapLoad, onPointClick]);
 
   // Filter changes: rebuild the source URL without remounting the map,
   // and shift the layer zoom ranges so dots are visible immediately
@@ -231,7 +279,14 @@ export function MapShell({
     applyFilterZoomRanges(map, { entidad, sector: effectiveSector });
   }, [entidad, effectiveSector]);
 
-  return <div ref={containerRef} className="h-full w-full" />;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" />
+      <div className="pointer-events-none absolute bottom-0 right-0 bg-slate-950/70 px-1 font-mono text-[9px] text-slate-400">
+        {MAP_ATTRIBUTION}
+      </div>
+    </div>
+  );
 }
 
 function isFiltered(filters: {

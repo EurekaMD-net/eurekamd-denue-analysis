@@ -13,9 +13,16 @@
  * key `sb-<projectref>-auth-token`. Auto-refresh is on so a logged-in
  * tab survives the JWT exp boundary (~1 hour) without forcing the
  * user to re-enter the password.
+ *
+ * Auth only (audit #179): the app calls nothing but `supabase.auth.*`
+ * (data goes through our own API), and createClient() also bundled
+ * PostgREST, Storage, Realtime and Functions (~740 KB of source). The
+ * AuthClient below is built the way createClient() built it, so the
+ * storage key and request headers are unchanged and existing sessions
+ * survive the switch.
  */
 
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { AuthClient } from "@supabase/supabase-js";
 
 // Self-hosted Supabase reachable via Caddy at db.mycommit.net.
 const DEFAULT_SUPABASE_URL = "https://db.mycommit.net";
@@ -35,14 +42,22 @@ const SUPABASE_ANON_KEY =
   (import.meta.env["VITE_SUPABASE_ANON_KEY"] as string | undefined) ??
   DEFAULT_SUPABASE_ANON_KEY;
 
-export const supabase: SupabaseClient = createClient(
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY,
-  {
-    auth: {
-      autoRefreshToken: true,
-      persistSession: true,
-      detectSessionInUrl: false,
-    },
-  },
+// createClient() normalises the URL with a trailing slash before
+// resolving `auth/v1` against it and deriving the storage key.
+const baseUrl = new URL(
+  SUPABASE_URL.endsWith("/") ? SUPABASE_URL : `${SUPABASE_URL}/`,
 );
+
+export const supabase: { auth: InstanceType<typeof AuthClient> } = {
+  auth: new AuthClient({
+    url: new URL("auth/v1", baseUrl).href,
+    headers: {
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      apikey: SUPABASE_ANON_KEY,
+    },
+    storageKey: `sb-${baseUrl.hostname.split(".")[0]}-auth-token`,
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: false,
+  }),
+};

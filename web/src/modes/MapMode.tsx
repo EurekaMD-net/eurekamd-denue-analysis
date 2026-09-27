@@ -118,8 +118,8 @@ export function MapMode() {
   };
 
   // Fire the layers/values request when 1–3 layers are picked. The data
-  // joins client-side onto the visible polygon set in MapShell (or, in
-  // the demo's current scaffold, populates the legend tally only).
+  // feeds the legend's distribution summary only; nothing joins it onto
+  // the map yet (audit #174).
   const layerValues = useLayerValues(
     grain,
     activePickedLayers.map((l) => l.id),
@@ -249,10 +249,16 @@ export function MapMode() {
 
         {activePickedLayers.length > 0 && (
           <div className="border-t border-slate-800 px-3 py-2">
-            <BivariateLegend
-              layers={activePickedLayers}
-              values={layerValues.data?.values}
-            />
+            {grain === "ageb" && entidad === null ? (
+              <div className="font-mono text-[10px] text-amber-400">
+                Elige una entidad para ver capas por AGEB
+              </div>
+            ) : (
+              <BivariateLegend
+                layers={activePickedLayers}
+                values={layerValues.data?.values}
+              />
+            )}
           </div>
         )}
 

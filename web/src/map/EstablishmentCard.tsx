@@ -24,10 +24,10 @@ export function EstablishmentCard({ clee, onClose }: Props) {
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["establishment", clee],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const res = await apiFetch(
         `/establishment/${encodeURIComponent(clee ?? "")}`,
-        {},
+        { signal },
         accessToken,
       );
       const body: unknown = await res.json();

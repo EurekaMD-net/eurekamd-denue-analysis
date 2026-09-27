@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useUiStore } from "../store";
 import { supabase } from "../lib/supabase";
+import { SUPABASE_TOKEN_KEY_RE } from "../lib/auth-storage";
 import type { Session } from "@supabase/supabase-js";
 
 interface Props {
@@ -23,11 +24,9 @@ interface Props {
  * pre-creates accounts via Supabase Studio or
  * `POST /auth/v1/admin/users` with the service-role key.
  */
-// supabase-js v2 stores its session under a key matching `sb-<ref>-auth-token`.
-// We match the family so we don't have to hardcode the project ref (it
-// changes per Supabase instance for sell-time deployments). Exported so
-// tests can pin the exact pattern (Phase 2 audit R5).
-export const SUPABASE_TOKEN_KEY_RE = /^sb-.+-auth-token$/;
+// Moved to lib/auth-storage so store.signOut can use it without a
+// store <-> LoginGate import cycle (audit #192). Re-exported for tests.
+export { SUPABASE_TOKEN_KEY_RE };
 
 export function LoginGate({ children }: Props) {
   const session = useUiStore((s) => s.session);

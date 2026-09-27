@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import ReactECharts from "../lib/echarts-core";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../api/client";
+import { useMunicipiosAnalytics } from "../api/queries";
 import { useUiStore } from "../store";
 import { FieldPicker } from "../components/FieldPicker";
 import { FilterControls } from "../components/FilterPanel";
@@ -16,20 +17,16 @@ import {
   type FieldDef,
 } from "../lib/fields";
 import { LOCUST_PRESETS, type LocustPreset } from "../lib/presets";
+import { escapeHtml } from "../lib/escape-html";
 
 type AxisSlot = "x" | "y" | "z";
 
 interface AxisState {
   field: FieldDef | null;
-  /** Drill breadcrumb (geo or SCIAN). Each click descends one level. */
-  geoLevel: 0 | 1 | 2; // 0 = nacional, 1 = estado, 2 = muni
-  scianLevel: 2 | 3 | 4 | 5 | 6;
 }
 
 const INITIAL_AXIS: AxisState = {
   field: null,
-  geoLevel: 1,
-  scianLevel: 2,
 };
 
 /**
@@ -57,13 +54,16 @@ export function LocustMode() {
   >([]);
   const [perCapita, setPerCapita] = useState(false);
   // AGEB-grain endpoints (`locust-ageb`) are scoped to one municipio, not
-  // a whole entidad. `cveMun` holds that selection. It's cleared whenever
-  // the store's `entidad` changes — a muni from the previous entidad is
-  // not valid under the new one.
-  const [cveMun, setCveMun] = useState<string | null>(null);
-  useEffect(() => {
-    setCveMun(null);
-  }, [entidad]);
+  // a whole entidad. The selection is stored with the entidad it belongs
+  // to and only applies while that entidad is selected — a muni from the
+  // previous entidad is not valid under the new one. Deriving it (rather
+  // than clearing it in an effect) means no render ever pairs the new
+  // entidad with the old muni, so no stale request is sent.
+  const [munSel, setMunSel] = useState<{
+    ent: string | null;
+    mun: string | null;
+  }>({ ent: null, mun: null });
+  const cveMun = munSel.ent === entidad ? munSel.mun : null;
 
   const applyPreset = (preset: LocustPreset) => {
     setXAxis({ ...INITIAL_AXIS, field: findField(preset.x) ?? null });
@@ -84,10 +84,7 @@ export function LocustMode() {
     if (slot === "x") {
       const prevId = xAxis.field?.id;
       const fieldChanged = next.field?.id !== prevId;
-      const drillChanged =
-        next.geoLevel !== xAxis.geoLevel ||
-        next.scianLevel !== xAxis.scianLevel;
-      if (fieldChanged || drillChanged) {
+      if (fieldChanged) {
         setFilterPins([]);
       }
       // Clear Y/Z that don't span any endpoint with the new X.
@@ -211,6 +208,13 @@ export function LocustMode() {
     (isPerCapitaCandidate(yAxis.field) || isPerCapitaCandidate(zAxis.field));
   const perCapitaActive = perCapita && perCapitaEligible;
 
+  // Stable so the memoized chart does not re-render on unrelated state.
+  const onCellPin = useCallback((label: string, value: string) => {
+    setFilterPins((pins) =>
+      pins.some((p) => p.value === value) ? pins : [...pins, { label, value }],
+    );
+  }, []);
+
   return (
     <div className="flex h-full bg-slate-950 text-slate-100">
       {/* Left rail: axis panel + filter pins */}
@@ -224,7 +228,6 @@ export function LocustMode() {
           slot="x"
           axis={xAxis}
           onOpen={() => setPickerOpen("x")}
-          onDrill={(dir) => setAxis("x", drill(xAxis, dir))}
           onClear={() => setAxis("x", INITIAL_AXIS)}
         />
         <AxisRow
@@ -233,7 +236,6 @@ export function LocustMode() {
           disabled={!xAxis.field}
           disabledHint="Elige X primero"
           onOpen={() => setPickerOpen("y")}
-          onDrill={(dir) => setAxis("y", drill(yAxis, dir))}
           onClear={() => setAxis("y", INITIAL_AXIS)}
         />
         <AxisRow
@@ -242,7 +244,6 @@ export function LocustMode() {
           disabled={!zSlotEnabled}
           disabledHint="Elige X e Y primero"
           onOpen={() => setPickerOpen("z")}
-          onDrill={(dir) => setAxis("z", drill(zAxis, dir))}
           onClear={() => setAxis("z", INITIAL_AXIS)}
         />
 
@@ -317,8 +318,7 @@ export function LocustMode() {
               <MunicipioSelect
                 entidad={entidad}
                 cveMun={cveMun}
-                onChange={setCveMun}
-                accessToken={accessToken}
+                onChange={(mun) => setMunSel({ ent: entidad, mun })}
               />
             </>
           )}
@@ -387,13 +387,12 @@ export function LocustMode() {
               xAxis={xAxis}
               yAxis={yAxis}
               zAxis={zAxis}
-              dataset={dataset}
+              data={dataset.data}
+              isLoading={dataset.isLoading}
+              isError={dataset.isError}
               filterPins={filterPins}
               perCapita={perCapitaActive}
-              onCellPin={(label, value) => {
-                if (filterPins.some((p) => p.value === value)) return;
-                setFilterPins([...filterPins, { label, value }]);
-              }}
+              onCellPin={onCellPin}
             />
           </div>
         )}
@@ -424,30 +423,12 @@ function pickerContextHint(
   return null;
 }
 
-function drill(axis: AxisState, dir: "down" | "up"): AxisState {
-  const field = axis.field;
-  if (!field) return axis;
-  const isGeo =
-    field.grain === "estado" ||
-    field.grain === "muni" ||
-    field.grain === "ageb";
-  if (isGeo) {
-    const cur = axis.geoLevel;
-    const next = dir === "down" ? Math.min(2, cur + 1) : Math.max(0, cur - 1);
-    return { ...axis, geoLevel: next as 0 | 1 | 2 };
-  }
-  const cur = axis.scianLevel;
-  const next = dir === "down" ? Math.min(6, cur + 1) : Math.max(2, cur - 1);
-  return { ...axis, scianLevel: next as 2 | 3 | 4 | 5 | 6 };
-}
-
 interface AxisRowProps {
   slot: AxisSlot;
   axis: AxisState;
   disabled?: boolean;
   disabledHint?: string;
   onOpen: () => void;
-  onDrill: (dir: "down" | "up") => void;
   onClear: () => void;
 }
 
@@ -457,7 +438,6 @@ function AxisRow({
   disabled = false,
   disabledHint,
   onOpen,
-  onDrill,
   onClear,
 }: AxisRowProps) {
   return (
@@ -500,23 +480,6 @@ function AxisRow({
           <span className="font-mono text-[9px] text-slate-500">
             {axis.field.source} · {axis.field.grain}
           </span>
-          <div className="flex-1" />
-          <button
-            type="button"
-            onClick={() => onDrill("up")}
-            className="rounded border border-slate-800 px-1 font-mono text-[10px] text-slate-400 hover:border-slate-600 hover:text-slate-200"
-            title="drill up"
-          >
-            −
-          </button>
-          <button
-            type="button"
-            onClick={() => onDrill("down")}
-            className="rounded border border-slate-800 px-1 font-mono text-[10px] text-slate-400 hover:border-slate-600 hover:text-slate-200"
-            title="drill down"
-          >
-            +
-          </button>
         </div>
       )}
     </div>
@@ -526,7 +489,8 @@ function AxisRow({
 /**
  * Municipio picker for AGEB-grain X-anchors. The `locust-ageb` endpoint
  * is scoped to one municipio; this dropdown supplies that `cve_mun`. The
- * municipio list itself comes from `/analytics/municipios?entidad=` — so
+ * municipio list itself comes from `/analytics/municipios?entidad=` via the
+ * shared `useMunicipiosAnalytics` query (one cache entry, zod-validated) — so
  * the control is inert until an entidad is chosen (the parent only
  * renders it when X's active endpoint `needsCveMun`, and shows a separate
  * "elige entidad" hint when entidad is still null).
@@ -535,28 +499,12 @@ function MunicipioSelect({
   entidad,
   cveMun,
   onChange,
-  accessToken,
 }: {
   entidad: string | null;
   cveMun: string | null;
   onChange: (v: string | null) => void;
-  accessToken: string | null;
 }) {
-  const munis = useQuery({
-    queryKey: ["municipios-list", entidad],
-    queryFn: async () => {
-      const res = await apiFetch(
-        `/analytics/municipios?entidad=${entidad}`,
-        {},
-        accessToken,
-      );
-      return res.json() as Promise<{
-        municipios: Array<{ cve_mun: string; municipio: string | null }>;
-      }>;
-    },
-    enabled: accessToken !== null && entidad !== null,
-    staleTime: 10 * 60 * 1000,
-  });
+  const munis = useMunicipiosAnalytics(entidad);
 
   if (entidad === null) {
     return (
@@ -703,10 +651,13 @@ function useLocustDataset(
   const path = endpoint ? endpoint.path({ entidad, cveMun }) : null;
 
   return useQuery({
-    queryKey: ["locust", endpointId, entidad, cveMun, xField?.id, yField?.id],
-    queryFn: async () => {
+    // The path fully determines the response, so it is the whole key:
+    // field changes on one endpoint and entidad changes on the national
+    // endpoints are cache hits.
+    queryKey: ["locust", path],
+    queryFn: async ({ signal }) => {
       if (!path) throw new Error("no endpoint for X");
-      const res = await apiFetch(path, {}, accessToken);
+      const res = await apiFetch(path, { signal }, accessToken);
       return res.json() as Promise<unknown>;
     },
     enabled:
@@ -728,40 +679,69 @@ interface ChartProps {
   xAxis: AxisState;
   yAxis: AxisState;
   zAxis: AxisState;
-  dataset: ReturnType<typeof useLocustDataset>;
+  data: unknown;
+  isLoading: boolean;
+  isError: boolean;
   filterPins: FilterPin[];
   /** When true, Y and Z numeric_count fields are projected per 1,000 hab. */
   perCapita: boolean;
   onCellPin: (label: string, value: string) => void;
 }
 
-function LocustChart({
+// Memoized: the option (with its formatter closure) and onEvents are
+// rebuilt only when the chart inputs change, so opening the picker or
+// other parent state changes do not trigger setOption / event rebinding.
+const LocustChart = memo(function LocustChart({
   chartType,
   xAxis,
   yAxis,
   zAxis,
-  dataset,
+  data,
+  isLoading,
+  isError,
   filterPins,
   perCapita,
   onCellPin,
 }: ChartProps) {
-  if (dataset.isLoading) {
+  const allRows = useMemo(
+    () => extractRows(data, xAxis, yAxis, zAxis, { perCapita }),
+    [data, xAxis, yAxis, zAxis, perCapita],
+  );
+  const rows = useMemo(
+    () => applyFilterPins(allRows, filterPins),
+    [allRows, filterPins],
+  );
+  const option = useMemo(
+    () =>
+      buildEChartsOption(chartType, rows, xAxis, yAxis, zAxis, { perCapita }),
+    [chartType, rows, xAxis, yAxis, zAxis, perCapita],
+  );
+  const xLabel = xAxis.field?.label ?? null;
+  const onEvents = useMemo(
+    () => ({
+      click: (e: { name?: string }) => {
+        if (xLabel && e?.name) {
+          onCellPin(xLabel, e.name);
+        }
+      },
+    }),
+    [xLabel, onCellPin],
+  );
+
+  if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-slate-500">
         cargando…
       </div>
     );
   }
-  if (dataset.isError) {
+  if (isError) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-red-400">
         error de carga
       </div>
     );
   }
-  const allRows = extractRows(dataset.data, xAxis, yAxis, zAxis, {
-    perCapita,
-  });
   if (allRows.length === 0) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-slate-500">
@@ -769,7 +749,6 @@ function LocustChart({
       </div>
     );
   }
-  const rows = applyFilterPins(allRows, filterPins);
   if (rows.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-6 font-mono text-xs text-slate-500">
@@ -784,23 +763,18 @@ function LocustChart({
     );
   }
 
-  const option = buildEChartsOption(chartType, rows, xAxis, yAxis, zAxis, {
-    perCapita,
-  });
+  // key remounts on a type switch and notMerge replaces the option, so
+  // a switch to treemap does not leave the previous grid/axes drawn.
   return (
     <ReactECharts
+      key={chartType}
       style={{ height: "100%", width: "100%" }}
       option={option}
-      onEvents={{
-        click: (e: { name?: string }) => {
-          if (xAxis.field && e?.name) {
-            onCellPin(xAxis.field.label, e.name);
-          }
-        },
-      }}
+      notMerge
+      onEvents={onEvents}
     />
   );
-}
+});
 
 /**
  * Apply x-axis filter pins as an inclusion set. With no pins, returns
@@ -1014,9 +988,14 @@ export function buildEChartsOption(
           seriesName?: string;
           name?: string;
           value?: unknown;
-          data?: { value?: unknown };
+          data?: { value?: unknown; z?: unknown };
         }
-      | Array<{ seriesName?: string; name?: string; value?: unknown }>,
+      | Array<{
+          seriesName?: string;
+          name?: string;
+          value?: unknown;
+          data?: { value?: unknown; z?: unknown };
+        }>,
   ): string => {
     const fmt = (n: unknown): string => {
       if (typeof n !== "number" || !Number.isFinite(n)) return "—";
@@ -1031,16 +1010,17 @@ export function buildEChartsOption(
       ? single.value[1]
       : (single.value ??
         (single as { data?: { value?: unknown } }).data?.value);
-    const zLabel = zAxisName
-      ? `<br/>${zAxisName}: ${fmt((single as { value?: unknown[] }).value?.[2])}`
-      : "";
-    return `<b>${name}</b><br/>${yAxisName}: ${fmt(v)}${zLabel}`;
+    // Every chart type stores z on its data item (scatter's value[2] is
+    // the same number), so one read covers bar, line, treemap and scatter.
+    const zLabel = zAxisName ? `<br/>${zAxisName}: ${fmt(single.data?.z)}` : "";
+    return `<b>${escapeHtml(name)}</b><br/>${yAxisName}: ${fmt(v)}${zLabel}`;
   };
 
   if (chartType === "bar") {
     const data = rows.map((p) => ({
       name: String(p.x),
       value: p.y,
+      z: p.z,
       itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
     }));
     return {
@@ -1089,7 +1069,9 @@ export function buildEChartsOption(
           type: "scatter",
           symbolSize: zAxis.field ? 10 : 6,
           data: rows.map((p) => ({
+            name: String(p.x),
             value: [p.x, p.y, p.z],
+            z: p.z,
             itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
           })),
           itemStyle: { color: palette[0] },
@@ -1107,6 +1089,7 @@ export function buildEChartsOption(
           data: rows.map((p) => ({
             name: String(p.x),
             value: p.y,
+            z: p.z,
             itemStyle: zRange ? { color: colorForZ(p.z, zRange) } : undefined,
           })),
         },
@@ -1130,7 +1113,13 @@ export function buildEChartsOption(
       nameTextStyle: baseAxisLabel,
       axisLabel: baseAxisLabel,
     },
-    series: [{ type: "line", data: rows.map((p) => p.y), smooth: true }],
+    series: [
+      {
+        type: "line",
+        data: rows.map((p) => ({ value: p.y, z: p.z })),
+        smooth: true,
+      },
+    ],
   };
 }
 
