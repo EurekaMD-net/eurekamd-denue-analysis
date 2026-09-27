@@ -3,6 +3,7 @@ import type { Session } from "@supabase/supabase-js";
 import type { QueryClient } from "@tanstack/react-query";
 import { supabase } from "./lib/supabase";
 import { clearAllThreadIndexes } from "./lib/sage-threads-store";
+import { removeStoredSupabaseSession } from "./lib/auth-storage";
 
 export type Mode = "map" | "locust";
 
@@ -113,15 +114,18 @@ export const useUiStore = create<UiState>((set, get) => ({
     // session is already null). Cheaper than gating the listener.
     // Audit #192: a failed /logout (network, 5xx) returns {error} and
     // leaves the refresh token in localStorage, so the next reload or
-    // TOKEN_REFRESHED would restore the session. scope 'local' always
-    // removes the stored session without a network call.
+    // TOKEN_REFRESHED would restore the session. Another auth-js call
+    // does not help: scope 'local' still POSTs /logout and skips
+    // _removeSession() on the same error. So stop the refresh ticker and
+    // delete the stored session ourselves.
     const { error } = await supabase.auth.signOut();
     if (error) {
       console.warn(
         "[auth] server-side sign-out failed; cleared the local session only",
         error.message,
       );
-      await supabase.auth.signOut({ scope: "local" });
+      await supabase.auth.stopAutoRefresh();
+      removeStoredSupabaseSession();
     }
   },
 

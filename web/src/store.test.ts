@@ -9,6 +9,7 @@ vi.mock("./lib/supabase", () => ({
   supabase: {
     auth: {
       signOut: vi.fn().mockResolvedValue({ error: null }),
+      stopAutoRefresh: vi.fn().mockResolvedValue(undefined),
     },
   },
 }));
@@ -109,17 +110,33 @@ describe("store signOut (full flow)", () => {
     ).toHaveBeenCalledOnce();
   });
 
-  it("falls back to a local-scope signOut when the server revoke fails (audit #192)", async () => {
+  it("removes the stored session when the server revoke fails (audit #192)", async () => {
     const { supabase } = await import("./lib/supabase");
     const signOutMock = supabase.auth.signOut as ReturnType<typeof vi.fn>;
+    const stopMock = supabase.auth.stopAutoRefresh as ReturnType<typeof vi.fn>;
     signOutMock.mockClear();
+    stopMock.mockClear();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    signOutMock.mockResolvedValueOnce({ error: new Error("network down") });
-    await useUiStore.getState().signOut();
-    expect(signOutMock).toHaveBeenCalledTimes(2);
-    expect(signOutMock).toHaveBeenLastCalledWith({ scope: "local" });
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    // Real auth-js returns {error} for BOTH global and local scope on a
+    // network failure and leaves the token in storage; the mock does too.
+    signOutMock.mockResolvedValue({ error: new Error("network down") });
+    window.localStorage.setItem("sb-ref-auth-token", "{\"refresh_token\":\"r\"}");
+    window.localStorage.setItem("sb-ref-auth-token-code-verifier", "v");
+    window.localStorage.setItem("unrelated-key", "keep");
+    try {
+      await useUiStore.getState().signOut();
+      expect(window.localStorage.getItem("sb-ref-auth-token")).toBeNull();
+      expect(
+        window.localStorage.getItem("sb-ref-auth-token-code-verifier"),
+      ).toBeNull();
+      expect(window.localStorage.getItem("unrelated-key")).toBe("keep");
+      expect(stopMock).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      signOutMock.mockResolvedValue({ error: null });
+      warn.mockRestore();
+      window.localStorage.clear();
+    }
   });
 
   it("removes every Sage thread index from localStorage (audit #197)", async () => {
