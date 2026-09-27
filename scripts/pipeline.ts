@@ -84,8 +84,16 @@ function parseArgs(): {
     estados = estadosArg
       .replace("--estados=", "")
       .split(",")
-      .map((s) => s.trim().padStart(2, "0") as EstadoClave)
-      .filter((s) => s in ESTADOS);
+      .map((s) => s.trim().padStart(2, "0") as EstadoClave);
+    // An unknown clave used to be filtered out silently; if every clave was
+    // unknown the empty list made the orchestrator run all 32 estados.
+    const invalid = estados.filter((s) => !(s in ESTADOS));
+    if (invalid.length > 0) {
+      console.error(
+        `❌ Clave(s) de estado inválida(s): ${invalid.join(", ")}. Válidas: 01-32`,
+      );
+      process.exit(1);
+    }
   }
 
   const concurrencyArg = args.find((a) => a.startsWith("--concurrency="));
