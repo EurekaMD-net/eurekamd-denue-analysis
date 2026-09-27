@@ -365,6 +365,78 @@ describe("readExtractorOutput()", () => {
   it("lanza error si el archivo no existe", () => {
     expect(() => readExtractorOutput("/ruta/inexistente.json")).toThrow();
   });
+
+  // Same bytes the paginator writes: "[\n", records joined by ",\n", "\n]".
+  const paginatorFormat = (records: DenueRawRecord[]): string =>
+    "[\n" + records.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
+
+  it("lee el formato del paginator (un registro por línea)", () => {
+    const records = [
+      BASE_RECORD,
+      { ...BASE_RECORD, CLEE: "B", Nombre: "línea\ncon salto, coma y ]" },
+      { ...BASE_RECORD, CLEE: "C" },
+    ];
+    writeFileSync(tmpFile, paginatorFormat(records));
+    expect(readExtractorOutput(tmpFile)).toEqual(records);
+  });
+
+  it("lee un array vacío del paginator", () => {
+    writeFileSync(tmpFile, "[\n\n]");
+    expect(readExtractorOutput(tmpFile)).toEqual([]);
+    writeFileSync(tmpFile, "[\n]");
+    expect(readExtractorOutput(tmpFile)).toEqual([]);
+  });
+
+  it("tolera CRLF, líneas en blanco y el último registro sin coma", () => {
+    const a = JSON.stringify(BASE_RECORD);
+    const b = JSON.stringify({ ...BASE_RECORD, CLEE: "B" });
+    writeFileSync(tmpFile, `\r\n[\r\n${a},\r\n\r\n${b}\r\n]\r\n`);
+    const result = readExtractorOutput(tmpFile);
+    expect(result.map((r) => r.CLEE)).toEqual([BASE_RECORD.CLEE, "B"]);
+  });
+
+  // readLinesSync reads 1 MB chunks: place a multi-byte char so it straddles
+  // byte 1<<20 exactly (a plain buf.toString() per chunk would corrupt it).
+  it.each([
+    ["Ñ (2 bytes) a 1 byte del límite", "Ñ", 1],
+    ["emoji (4 bytes) a 1 byte del límite", "😀", 1],
+    ["emoji (4 bytes) a 2 bytes del límite", "😀", 2],
+    ["emoji (4 bytes) a 3 bytes del límite", "😀", 3],
+  ])("decodifica UTF-8 que cruza el límite de chunk de 1 MB: %s", (_label, ch, before) => {
+    const head = '[\n{"CLEE":"A","Nombre":"';
+    const pad = "x".repeat((1 << 20) - before - Buffer.byteLength(head));
+    const nombre = pad + ch + "fin";
+    writeFileSync(tmpFile, head + nombre + '"}\n]');
+    expect(Buffer.byteLength(head + pad)).toBe((1 << 20) - before);
+    const result = readExtractorOutput(tmpFile);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.Nombre).toBe(nombre);
+  });
+
+  it("lanza error con número de línea si un registro está malformado", () => {
+    const a = JSON.stringify(BASE_RECORD);
+    writeFileSync(tmpFile, `[\n${a},\n{"CLEE": "roto",\n${a}\n]`);
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/línea 3/);
+  });
+
+  it("lanza error si el array del paginator no cierra (archivo truncado)", () => {
+    writeFileSync(tmpFile, `[\n${JSON.stringify(BASE_RECORD)},\n`);
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/no cierra el array/);
+  });
+
+  it("lanza error si hay contenido después del cierre", () => {
+    writeFileSync(tmpFile, `[\n${JSON.stringify(BASE_RECORD)}\n]\n{}`);
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/después del cierre/);
+  });
+
+  it("lanza 'no contiene un array JSON' para un objeto o un archivo vacío", () => {
+    writeFileSync(tmpFile, JSON.stringify({ not: "an array" }, null, 2));
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/no contiene un array JSON/);
+    writeFileSync(tmpFile, JSON.stringify({ not: "an array" }));
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/no contiene un array JSON/);
+    writeFileSync(tmpFile, "");
+    expect(() => readExtractorOutput(tmpFile)).toThrow(/no contiene un array JSON/);
+  });
 });
 
 // ---------------------------------------------------------------------------

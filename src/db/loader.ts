@@ -6,10 +6,11 @@
  * Esto permite recargar el mismo archivo sin duplicar registros.
  */
 
-import { readFileSync } from "fs";
+import { closeSync, openSync, readFileSync, readSync } from "fs";
 import { execFileSync } from "child_process";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { StringDecoder } from "string_decoder";
 import { assertSafeContainer } from "../api/handlers/_safe-container.js";
 import type { DenueRawRecord } from "../extractor/types.js";
 
@@ -387,11 +388,95 @@ export async function updateGeometry(
 // ---------------------------------------------------------------------------
 // Función de utilidad: leer JSON del extractor desde disco
 // ---------------------------------------------------------------------------
-export function readExtractorOutput(filePath: string): DenueRawRecord[] {
-  const raw = readFileSync(filePath, "utf-8");
-  const data = JSON.parse(raw) as unknown;
-  if (!Array.isArray(data)) {
-    throw new Error(`El archivo ${filePath} no contiene un array JSON`);
+/**
+ * Yields the file's lines (without "\n") reading 1 MB chunks, so no single
+ * string ever holds the whole file. V8 caps a string at ~536 M chars
+ * (ERR_STRING_TOO_LONG); Estado de México's raw file is ~563 M chars.
+ */
+function* readLinesSync(filePath: string): Generator<string> {
+  const fd = openSync(filePath, "r");
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    let n: number;
+    while ((n = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      pending += decoder.write(buf.subarray(0, n));
+      let start = 0;
+      let nl: number;
+      while ((nl = pending.indexOf("\n", start)) !== -1) {
+        yield pending.slice(start, nl);
+        start = nl + 1;
+      }
+      pending = pending.slice(start);
+    }
+    pending += decoder.end();
+    if (pending.length > 0) yield pending;
+  } finally {
+    closeSync(fd);
   }
-  return data as DenueRawRecord[];
+}
+
+/**
+ * Reads the paginator's output: "[" line, one JSON.stringify'd record per line
+ * separated by ",\n", then a "]" line. Parsed line by line (see readLinesSync).
+ * A compact file whose first line is not exactly "[" (e.g. `[{...},{...}]`, the
+ * test fixtures) is parsed as a whole document — the paginator never writes one.
+ * The file must be the paginator format (one record per line) or a compact
+ * single-line array; pretty-printed arrays (JSON.stringify(arr, null, 2)) are
+ * not supported.
+ */
+export function readExtractorOutput(filePath: string): DenueRawRecord[] {
+  const notArray = () =>
+    new Error(`El archivo ${filePath} no contiene un array JSON`);
+  const records: DenueRawRecord[] = [];
+  let state: "start" | "body" | "end" = "start";
+  let compact: string[] | null = null;
+  let lineNo = 0;
+
+  for (const rawLine of readLinesSync(filePath)) {
+    lineNo++;
+    if (compact) {
+      compact.push(rawLine);
+      continue;
+    }
+    const line = rawLine.trim();
+    if (line === "") continue;
+    if (state === "start") {
+      if (line === "[") state = "body";
+      else if (line.startsWith("[")) compact = [rawLine];
+      else throw notArray();
+      continue;
+    }
+    if (state === "end") {
+      throw new Error(
+        `El archivo ${filePath} tiene contenido después del cierre del array (línea ${lineNo})`,
+      );
+    }
+    if (line === "]") {
+      state = "end";
+      continue;
+    }
+    const json = line.endsWith(",") ? line.slice(0, -1) : line;
+    try {
+      records.push(JSON.parse(json) as DenueRawRecord);
+    } catch (err) {
+      throw new Error(
+        `El archivo ${filePath} tiene un registro JSON inválido en la línea ${lineNo}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  if (compact) {
+    const data = JSON.parse(compact.join("\n")) as unknown;
+    if (!Array.isArray(data)) throw notArray();
+    return data as DenueRawRecord[];
+  }
+  if (state === "start") throw notArray();
+  if (state === "body") {
+    throw new Error(
+      `El archivo ${filePath} no cierra el array JSON (archivo truncado, ${lineNo} líneas)`,
+    );
+  }
+  return records;
 }

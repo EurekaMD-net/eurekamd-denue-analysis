@@ -5,6 +5,10 @@
  *   npx tsx scripts/load.ts --file=/ruta/al/archivo.json
  *   npx tsx scripts/load.ts --file=/ruta/al/archivo.json --batch=50
  *
+ * El archivo debe estar en el formato del paginator (un registro por línea) o
+ * ser un array compacto en una sola línea; los arrays pretty-printed
+ * (JSON.stringify(arr, null, 2)) no se soportan.
+ *
  * Variables de entorno requeridas:
  *   SUPABASE_URL         — ej. http://localhost:8100
  *   SUPABASE_SERVICE_KEY — JWT service_role de Supabase
