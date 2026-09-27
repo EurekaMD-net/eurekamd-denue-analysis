@@ -307,7 +307,11 @@ to `Content-Security-Policy`, then validate, reload and commit again.
   Do not roll back the revokes, which are a security fix. If an outside
   consumer breaks, grant that one relation explicitly.
 - Required by step 10 (c) for #110 (and P02 step 4, the old 644 `.env`):
-  rotate `SUPABASE_JWT_SECRET` in `/opt/supabase/.env`. This
+  set a new `JWT_SECRET` in `/opt/supabase/.env`, then re-sign both
+  `ANON_KEY` and `SERVICE_ROLE_KEY` there with it. Those are the three
+  names `/opt/supabase/docker-compose.yml` reads. `SUPABASE_JWT_SECRET` is
+  the name in the app `.env` files, and setting it in `/opt/supabase/.env`
+  rotates nothing. This
   reissues the anon and service keys for **every** app on the instance.
   Rollback: none once keys are reissued, so plan it with every app owner.
 - Optional later (P03): add `GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}/auth/v1`
@@ -361,10 +365,29 @@ Any role on the instance, and any Sage user before this deploy, could read
 it, and it bypasses RLS for every project there. A service_role JWT
 re-signed with an unchanged JWT secret leaves the leaked one valid, so
 this is the JWT-secret rotation in section P, which reissues the anon and
-service keys for every app. Regenerate the secret and SERVICE_ROLE_KEY in
-`/opt/supabase/.env`, run `cd /opt/supabase && docker compose up -d`, then
-update each consumer's `SUPABASE_SERVICE_KEY` (and the copy that
-`notify_jarvis()` now reads) and restart each consumer.
+service keys for every app. In `/opt/supabase/.env`, set a new
+`JWT_SECRET`, re-sign `ANON_KEY` and `SERVICE_ROLE_KEY` with it, and run
+`cd /opt/supabase && docker compose up -d`. Then each app owner updates
+that app's copies of the JWT secret, the service key and the anon key
+(and the copy that `notify_jarvis()` now reads) and restarts it. DENUE has
+three:
+
+- `.env` `SUPABASE_JWT_SECRET` = the new `JWT_SECRET`. `scripts/serve.ts`
+  reads it for the HS256 bearer check, so while it is stale every /api
+  request with a user bearer gets 401.
+- `.env` `SUPABASE_SERVICE_KEY` = the new `SERVICE_ROLE_KEY`.
+- The web anon key = the new `ANON_KEY`. Vite bakes it in at build time
+  (`web/src/lib/supabase.ts`: `VITE_SUPABASE_ANON_KEY`, else
+  `DEFAULT_SUPABASE_ANON_KEY`), so while it is stale GoTrue rejects the
+  SPA's login and refresh calls. Update `DEFAULT_SUPABASE_ANON_KEY` in a
+  commit (a build-time `VITE_SUPABASE_ANON_KEY` would have to be repeated
+  on every later build), then rebuild.
+
+```
+cd /root/claude/projects/data-intelligence/denue-data-analysis && systemctl restart denue-analyzer && sleep 20 && systemctl is-active denue-analyzer && cd web && npm run build
+```
+
+Then re-run the P01 and P03 checks in step 11.
 Rollback: none once keys are reissued, so schedule it with every owner.
 
 ### Step 11: verification (read-only)
