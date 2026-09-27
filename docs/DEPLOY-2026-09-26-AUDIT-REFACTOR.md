@@ -441,10 +441,10 @@ Run the SQL checks read-only:
   `ls /root/claude/projects/data-intelligence/denue-data-analysis/web/dist/assets/*.map 2>/dev/null | wc -l` prints 0;
   `curl -sI https://uncharted.eurekamd.cloud/minisu-catalog/index.html | grep -i content-security`.
   On /map, the browser console shows no CSP report-only violations (tiles, glyphs, sprites, workers, login).
-- (P24/P25) Two Sage questions, then read `sage_turns_audit`. The Anthropic
-  Sage path cannot start its CLI on this host today (musl binary ENOENT, no
-  audit rows since 2026-05-11), so this check fails until that separate
-  issue is fixed.
+- (P24/P25) Two Sage questions, then read `sage_turns_audit`. Until the
+  Sage CLI fix under "Follow-ups outside the window" is live, the Anthropic
+  Sage path cannot start its CLI on this host (no audit rows since
+  2026-05-11), so this check fails.
 
 ### Standing rules after this deploy
 
@@ -470,6 +470,17 @@ Run the SQL checks read-only:
 
 ### Follow-ups outside the window
 
+- (Sage CLI) The Anthropic Sage path could not start its CLI on this host.
+  On linux, `@anthropic-ai/claude-agent-sdk` tries the
+  `claude-agent-sdk-linux-x64-musl` binary before the glibc
+  `claude-agent-sdk-linux-x64` one, and npm installs both. The musl binary
+  needs `/lib/ld-musl-x86_64.so.1`, which this glibc (Ubuntu) host does not
+  have, so the spawn fails with ENOENT and the SDK reports "native binary
+  not found". The commit that adds `src/api/sage/providers/claude-executable.ts`
+  fixes it: on a glibc linux host the provider passes the glibc binary as
+  `pathToClaudeCodeExecutable` (override: `SAGE_CLAUDE_EXECUTABLE`) and logs
+  `[sage] claude executable: <path>` once at start. Operator step:
+  `systemctl restart denue-analyzer`, then re-run the P24/P25 check in step 11.
 - (X-loaders-round2) Before d07e552, `scripts/extract.ts` printed a
   UUID-shaped DENUE_TOKEN example, and it is in git history. Compare it
   with `DENUE_TOKEN` in `.env`. If it matches, rotate the token at INEGI.

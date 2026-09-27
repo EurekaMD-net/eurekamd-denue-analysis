@@ -24,6 +24,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   },
 }));
 
+// The resolver probes the host's filesystem; pin its answer so the
+// assertion below checks the wiring, not this machine's layout.
+vi.mock("./claude-executable.js", () => ({
+  resolveClaudeExecutable: () => "/test/claude-agent-sdk-linux-x64/claude",
+}));
+
 // Spec pin: settingSources MUST be explicitly []. With it unset the SDK
 // loads the host user's ~/.claude/CLAUDE.md + rules + memory into every
 // call (omitted !== none). Discovered live 2026-07-12; do not remove.
@@ -46,6 +52,9 @@ describe("AnthropicProvider — SDK isolation (settingSources)", () => {
     });
     expect(mocks.capturedOptions).toHaveLength(1);
     expect(mocks.capturedOptions[0].settingSources).toEqual([]);
+    expect(mocks.capturedOptions[0].pathToClaudeCodeExecutable).toBe(
+      "/test/claude-agent-sdk-linux-x64/claude",
+    );
   });
 
   it("narrative call passes settingSources: []", async () => {
@@ -60,6 +69,9 @@ describe("AnthropicProvider — SDK isolation (settingSources)", () => {
     }
     expect(mocks.capturedOptions).toHaveLength(1);
     expect(mocks.capturedOptions[0].settingSources).toEqual([]);
+    expect(mocks.capturedOptions[0].pathToClaudeCodeExecutable).toBe(
+      "/test/claude-agent-sdk-linux-x64/claude",
+    );
   });
 });
 

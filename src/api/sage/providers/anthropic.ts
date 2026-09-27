@@ -57,6 +57,7 @@ import {
   type SageProvider,
   type UsageNormalized,
 } from "./provider.js";
+import { resolveClaudeExecutable } from "./claude-executable.js";
 
 interface AnthropicProviderConfig {
   /** Routing model id, e.g. "claude-sonnet-4-6". */
@@ -189,6 +190,13 @@ function estimatedUsage(
     model,
   };
 }
+
+// Resolved once: the SDK prefers the musl binary on linux, which cannot
+// start on this glibc host (see claude-executable.ts).
+const claudeExecutable = resolveClaudeExecutable();
+process.stderr.write(
+  `[sage] claude executable: ${claudeExecutable ?? "sdk-default"}\n`,
+);
 
 export class AnthropicProvider implements SageProvider {
   readonly name = "anthropic";
@@ -325,6 +333,7 @@ export class AnthropicProvider implements SageProvider {
       cwd: process.cwd(),
       thinking: { type: "disabled" },
       env: sdkEnv(),
+      pathToClaudeCodeExecutable: claudeExecutable,
     };
 
     const t0 = Date.now();
@@ -453,6 +462,7 @@ export class AnthropicProvider implements SageProvider {
       cwd: process.cwd(),
       thinking: { type: "disabled" },
       env: sdkEnv(),
+      pathToClaudeCodeExecutable: claudeExecutable,
     };
 
     const t0 = Date.now();
