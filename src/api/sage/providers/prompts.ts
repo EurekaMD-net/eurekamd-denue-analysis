@@ -61,7 +61,11 @@ export function buildRouterUserPrompt(
       sections.push(
         `- User: ${turn.question}\n  Route: ${turn.route.kind}${
           turn.route.endpoint_name ? ` (${turn.route.endpoint_name})` : ""
-        }\n  Result: ${rowCountLabel(turn.digest)} rows, columns: ${turn.digest.columns.join(", ")}\n  Narrative: ${turn.narrative.slice(0, 200)}${turn.narrative.length > 200 ? "…" : ""}`,
+        }\n  Result: ${rowCountLabel(turn.digest)} rows, columns: ${turn.digest.columns.join(", ")}\n  Narrative: ${turn.narrative.slice(0, 200)}${turn.narrative.length > 200 ? "…" : ""}${
+          turn.error
+            ? `\n  Error: ${turn.error.code}: ${turn.error.message}`
+            : ""
+        }`,
       );
     }
   }

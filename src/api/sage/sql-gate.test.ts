@@ -509,7 +509,11 @@ describe("executeGatedSql psql invocation", () => {
     });
     expect(res).toEqual({
       ok: false,
-      error: { code: "SQL_EXECUTION_ERROR", message: "permission_denied" },
+      error: {
+        code: "SQL_EXECUTION_ERROR",
+        message: "permission_denied",
+        detail: 'ERROR:  permission denied for table "secret_x"',
+      },
     });
     // An abort or client-side kill carries no stderr.
     mockRunSql.mockRejectedValueOnce(new Error("Upstream query failed"));

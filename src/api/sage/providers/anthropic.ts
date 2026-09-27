@@ -38,6 +38,7 @@ import {
 } from "./prompts.js";
 import {
   approximateTokens,
+  attachSageUsage,
   type NarrativeInput,
   type NarrativeStreamChunk,
   type RouteInput,
@@ -86,6 +87,27 @@ function totalInputTokens(u: SdkUsageShape | undefined): number {
     (u.cache_creation_input_tokens ?? 0) +
     (u.cache_read_input_tokens ?? 0)
   );
+}
+
+// A call that threw (timeout, client abort) before its result message:
+// estimate what it spent from the prompt and the text already streamed,
+// so the handler can still audit the cost (audit #83).
+function estimatedUsage(
+  model: string,
+  promptText: string,
+  outputChars: number,
+  t0: number,
+): UsageNormalized {
+  const inTok = approximateTokens(promptText);
+  const outTok = Math.ceil(outputChars / 4);
+  return {
+    input_tokens: inTok,
+    output_tokens: outTok,
+    cost_usd: fallbackPrice(model, inTok, outTok),
+    latency_ms: Date.now() - t0,
+    provider: "anthropic",
+    model,
+  };
 }
 
 export class AnthropicProvider implements SageProvider {
@@ -263,6 +285,18 @@ export class AnthropicProvider implements SageProvider {
           }
         }
       }
+    } catch (err) {
+      throw attachSageUsage(
+        err,
+        usage.latency_ms > 0
+          ? usage
+          : estimatedUsage(
+              this.routerModel,
+              ROUTER_SYSTEM_PROMPT + userPrompt,
+              0,
+              t0,
+            ),
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -364,6 +398,17 @@ export class AnthropicProvider implements SageProvider {
           }
         }
       }
+    } catch (err) {
+      throw attachSageUsage(
+        err,
+        usage ??
+          estimatedUsage(
+            this.narrativeModel,
+            NARRATIVE_SYSTEM_PROMPT + userPrompt,
+            emittedLen,
+            t0,
+          ),
+      );
     } finally {
       clearTimeout(timer);
     }

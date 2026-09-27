@@ -7,6 +7,8 @@ import {
   ROUTER_SYSTEM_PROMPT,
 } from "./prompts.js";
 import { SAGE_ENDPOINT_CATALOG } from "../endpoint-catalog.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { sageUsageOf } from "./provider.js";
 
 describe("buildSageProvider — factory", () => {
   beforeEach(() => {
@@ -170,5 +172,92 @@ describe("row cap is visible to the model (audit #87 follow-up)", () => {
     expect(ROUTER_SYSTEM_PROMPT).toContain("cut at 200 rows");
     expect(ROUTER_SYSTEM_PROMPT).toContain("COUNT(*)");
     expect(ROUTER_SYSTEM_PROMPT).not.toContain("max 5000");
+  });
+});
+
+describe("a failed turn reaches the next router prompt (audit #89)", () => {
+  it("renders the persisted error code and message", () => {
+    const prompt = buildRouterUserPrompt(
+      "¿y en 2023?",
+      [],
+      [
+        {
+          question: "q",
+          route: { kind: "sql", sql: "SELECT nope" },
+          digest: { columns: [], row_count: 0, first_5_rows: [] },
+          narrative: "",
+          error: { code: "SQL_EXECUTION_ERROR", message: "unknown_column" },
+        },
+      ],
+      "",
+    );
+    expect(prompt).toContain("Error: SQL_EXECUTION_ERROR: unknown_column");
+  });
+});
+
+describe("OpenAICompatibleProvider — usage survives a thrown call (audit #83)", () => {
+  const provider = new OpenAICompatibleProvider({
+    baseUrl: "https://llm.test/v1",
+    apiKey: "k",
+    routerModel: "r-m",
+    narrativeModel: "n-m",
+    pricing: { "r-m": { in: 1, out: 1 }, "n-m": { in: 1, out: 1 } },
+  });
+
+  it("a router fetch that times out carries an input estimate", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new DOMException("The operation timed out.", "TimeoutError"),
+    );
+    const err = await provider
+      .routeAndDraft({
+        question: "q",
+        endpoints: [],
+        history: [],
+        sql_schema_summary: "",
+      })
+      .catch((e: unknown) => e);
+    vi.restoreAllMocks();
+    expect((err as { name?: string }).name).toBe("TimeoutError");
+    const usage = sageUsageOf(err);
+    expect(usage).toMatchObject({ model: "r-m", output_tokens: 0 });
+    expect(usage!.input_tokens).toBeGreaterThan(0);
+  });
+
+  it("a narrative stream cut mid-way carries the text it had streamed", async () => {
+    const enc = new TextEncoder();
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        if (pulls++ === 0) {
+          ctrl.enqueue(
+            enc.encode(
+              'data: {"choices":[{"delta":{"content":"Hay 1234 unidades"}}]}\n',
+            ),
+          );
+        } else {
+          ctrl.error(new Error("socket hang up"));
+        }
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
+    const chunks: string[] = [];
+    const err = await (async () => {
+      for await (const c of provider.writeNarrativeStream({
+        question: "q",
+        route: { kind: "sql", sql: "SELECT 1" },
+        digest: { columns: [], row_count: 0, first_n_rows: [] },
+        history: [],
+      })) {
+        chunks.push(c.text);
+      }
+    })().catch((e: unknown) => e);
+    vi.restoreAllMocks();
+    expect(chunks).toEqual(["Hay 1234 unidades"]);
+    const usage = sageUsageOf(err);
+    expect(usage).toMatchObject({
+      model: "n-m",
+      output_tokens: Math.ceil("Hay 1234 unidades".length / 4),
+    });
+    expect(usage!.input_tokens).toBeGreaterThan(0);
   });
 });

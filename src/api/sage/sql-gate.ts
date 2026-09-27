@@ -44,6 +44,12 @@ export type SqlGateErrorCode =
 export interface SqlGateError {
   code: SqlGateErrorCode;
   message: string;
+  /**
+   * Verbatim psql stderr of an execution error. Server-side only: the
+   * handler writes it to sage_turns_audit.error_message and never sends
+   * it to the client or the LLM (audit #83).
+   */
+  detail?: string;
 }
 
 export interface SqlGateSuccess {
@@ -709,7 +715,11 @@ function runErrorToGateError(
   if (/canceling statement due to statement timeout/i.test(stderr)) {
     return { code: "SQL_TIMEOUT", message: timeoutMessage };
   }
-  return { code: "SQL_EXECUTION_ERROR", message: redactPgError(stderr) };
+  return {
+    code: "SQL_EXECUTION_ERROR",
+    message: redactPgError(stderr),
+    ...(stderr ? { detail: stderr } : {}),
+  };
 }
 
 // Map Postgres errors to opaque codes so schema/role internals never

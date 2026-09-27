@@ -13,9 +13,11 @@
  *   done   → terminal success
  */
 
+import { randomUUID } from "node:crypto";
 import type { Context } from "hono";
 import { AbortError } from "@anthropic-ai/claude-agent-sdk";
 import type { ApiServerConfig } from "../types.js";
+import type { AuthedUser } from "../middleware/bearer-auth.js";
 import {
   SAGE_ENDPOINT_CATALOG,
   SAGE_SQL_SCHEMA_SUMMARY,
@@ -29,18 +31,20 @@ import {
 } from "./dispatcher.js";
 import { executeGatedSql, DEFAULT_ROW_CAP } from "./sql-gate.js";
 import {
+  API_KEY_OWNER,
   appendAudit,
   appendTurn,
-  createThread,
   deleteThread,
   getThread,
   getThreadHead,
   type AuditEntry,
 } from "./thread-store.js";
-import type {
-  NarrativeInput,
-  RouteOutput,
-  PriorTurnDigest,
+import {
+  sageUsageOf,
+  type NarrativeInput,
+  type RouteOutput,
+  type PriorTurnDigest,
+  type UsageNormalized,
 } from "./providers/provider.js";
 import type { Hono } from "hono";
 
@@ -59,6 +63,20 @@ const MAX_ROW_CAP = 5000;
 // narrative digest still sees only its own 20 rows.
 const TABLE_ROW_CAP = DEFAULT_ROW_CAP;
 const TIMEOUT_MESSAGE = "La consulta tardó demasiado; intenta de nuevo.";
+// Strict UUID (audit #92): sage_threads.thread_id is a uuid column, so a
+// looser pattern let a cast error surface as a 500.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Cap on sage_turns_audit.error_message (raw PG text stays server-side).
+const AUDIT_ERROR_MAX = 500;
+
+/**
+ * The principal a thread belongs to (audit #11/#28): the JWT sub, or one
+ * shared owner for the X-Api-Key path, which carries no identity.
+ */
+function ownerOf(c: Context): string {
+  return (c.get("user") as AuthedUser | undefined)?.user_id ?? API_KEY_OWNER;
+}
 
 /**
  * Audit rows are written in the background (audit #208): a slow or failed
@@ -160,23 +178,38 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
       maxRows = body.max_rows;
     }
 
-    const existingThreadId =
-      body.thread_id && /^[0-9a-f-]{36}$/i.test(body.thread_id)
-        ? body.thread_id
-        : null;
-    const threadId =
-      existingThreadId ??
-      (await createThread({ dbContainer: config.dbContainer }));
+    // A present but malformed thread_id is an error, not a silent new
+    // thread (audit #92).
+    if (
+      body.thread_id !== undefined &&
+      body.thread_id !== null &&
+      (typeof body.thread_id !== "string" || !UUID_RE.test(body.thread_id))
+    ) {
+      return c.json({ error: "thread_id must be a UUID." }, 400);
+    }
+    const owner = ownerOf(c);
+    const existingThreadId = body.thread_id ?? null;
+    // A new thread's row is created by its first appendTurn (lazy
+    // creation, audit #82/#207), so a turn that dies leaves no empty row.
+    const threadId = existingThreadId ?? randomUUID();
 
     // One read gives both the cap check and the history window (audit
-    // #88/#208); a thread created by this request has neither.
+    // #88/#208); a thread created by this request has neither. A thread
+    // that is gone or belongs to someone else is a 404 (audit #11/#28/#82).
     const head = existingThreadId
       ? await getThreadHead(
           { dbContainer: config.dbContainer },
           existingThreadId,
+          owner,
           HISTORY_WINDOW,
         )
       : { turnCount: 0, lastTurns: [] };
+    if (!head) {
+      return c.json(
+        { error: "thread not found.", code: "THREAD_NOT_FOUND" },
+        404,
+      );
+    }
 
     // Reject when the thread is already at the cap so we don't pay LLM
     // cost for a turn we won't be able to persist.
@@ -200,6 +233,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
         numeric_stats: t.digest.numeric_stats,
       },
       narrative: t.narrative,
+      ...(t.error ? { error: t.error } : {}),
     }));
 
     // AbortController for the whole turn: SSE cancel() aborts it, which
@@ -224,6 +258,49 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           }
         };
 
+        // Audit rows are queued and written when the turn ends, after its
+        // thread row exists (lazy creation). Every failure branch queues
+        // one too, with error_code/error_message (audit #83/#207).
+        const audits: AuditEntry[] = [];
+        let stage: AuditEntry["call_kind"] | "persist" = "router";
+        const noUsage = (
+          model: string,
+          latency_ms: number,
+        ): UsageNormalized => ({
+          input_tokens: 0,
+          output_tokens: 0,
+          cost_usd: 0,
+          latency_ms,
+          provider: provider.name,
+          model,
+        });
+        const emptyDigest = { columns: [], row_count: 0, first_5_rows: [] };
+        // A failed route is persisted as a turn with its public error, so
+        // the next router pass sees it and the turn cap counts it (audit
+        // #89). A failed write is logged; the client still gets the error.
+        const persistFailedTurn = async (
+          routeRec: PriorTurnDigest["route"],
+          error: { code: string; message: string },
+        ) => {
+          try {
+            await appendTurn(
+              { dbContainer: config.dbContainer },
+              threadId,
+              owner,
+              {
+                question,
+                route: routeRec,
+                digest: emptyDigest,
+                narrative: "",
+                error,
+              },
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[sage] failed-turn write failed: ${msg}\n`);
+          }
+        };
+
         try {
           send("thread", { thread_id: threadId });
 
@@ -238,7 +315,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             abortCtrl.signal,
           );
           send("route", routerResult.output);
-          auditInBackground(config, {
+          audits.push({
             thread_id: threadId,
             call_kind: "router",
             provider: routerResult.usage.provider,
@@ -252,6 +329,12 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           send("usage", routerResult.usage);
 
           const route: RouteOutput = routerResult.output;
+          const routeRec: PriorTurnDigest["route"] = {
+            kind: route.kind,
+            endpoint_name:
+              route.kind === "endpoint" ? route.endpoint_name : undefined,
+            sql: route.kind === "sql" ? route.sql : undefined,
+          };
 
           // ----- 2. Execute the route --------------------------------
           let columns: string[] = [];
@@ -265,13 +348,28 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           };
 
           if (route.kind === "decline") {
+            // Persisted like any other turn (audit #89).
             send("narrative", { text: route.reasoning });
-            send("done", { turn_id: null });
+            stage = "persist";
+            const declined = await appendTurn(
+              { dbContainer: config.dbContainer },
+              threadId,
+              owner,
+              {
+                question,
+                route: routeRec,
+                digest: emptyDigest,
+                narrative: route.reasoning,
+              },
+            );
+            send("done", { turn_id: declined.turn_id });
             controller.close();
             return;
           }
 
           if (route.kind === "endpoint") {
+            stage = "dispatch";
+            const t0 = Date.now();
             const dispatched = await dispatchEndpoint(
               app,
               config.apiKey,
@@ -279,6 +377,28 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               abortCtrl.signal,
             );
             if (!dispatched.ok) {
+              audits.push({
+                thread_id: threadId,
+                call_kind: "dispatch",
+                provider: provider.name,
+                model: provider.routerModel,
+                prompt: {
+                  endpoint_name: route.endpoint_name,
+                  params: route.params,
+                },
+                output: null,
+                usage: noUsage(provider.routerModel, Date.now() - t0),
+                error_code: dispatched.code,
+                error_message:
+                  `${dispatched.status ? `HTTP ${dispatched.status}: ` : ""}${dispatched.message}`.slice(
+                    0,
+                    AUDIT_ERROR_MAX,
+                  ),
+              });
+              await persistFailedTurn(routeRec, {
+                code: dispatched.code,
+                message: dispatched.message,
+              });
               send("error", {
                 code: dispatched.code,
                 message: dispatched.message,
@@ -307,12 +427,33 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             // (default TABLE_ROW_CAP). One extra row is fetched so the
             // table can say whether the cap cut the result.
             const cap = maxRows ?? TABLE_ROW_CAP;
+            stage = "sql_gate";
+            const t0 = Date.now();
             const result = await executeGatedSql(route.sql, {
               dbContainer: config.dbContainer,
               rowCap: cap + 1,
               signal: abortCtrl.signal,
             });
             if (!result.ok) {
+              // The raw PG text (detail) goes to the audit only; the
+              // client and the persisted turn get the redacted message.
+              audits.push({
+                thread_id: threadId,
+                call_kind: "sql_gate",
+                provider: provider.name,
+                model: provider.routerModel,
+                prompt: { sql: route.sql },
+                output: null,
+                usage: noUsage(provider.routerModel, Date.now() - t0),
+                error_code: result.error.code,
+                error_message: (
+                  result.error.detail ?? result.error.message
+                ).slice(0, AUDIT_ERROR_MAX),
+              });
+              await persistFailedTurn(routeRec, {
+                code: result.error.code,
+                message: result.error.message,
+              });
               send("error", {
                 code: result.error.code,
                 message: result.error.message,
@@ -341,14 +482,10 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           if (chart) send("chart", chart);
 
           // ----- 4. Narrative stream ---------------------------------
+          stage = "narrative";
           const narrativeInput: NarrativeInput = {
             question,
-            route: {
-              kind: route.kind,
-              endpoint_name:
-                route.kind === "endpoint" ? route.endpoint_name : undefined,
-              sql: route.kind === "sql" ? route.sql : undefined,
-            },
+            route: routeRec,
             digest: digestForNarrative,
             history: priorTurns,
           };
@@ -366,7 +503,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           }
           send("narrative", { text: fullNarrative });
           if (narrativeUsage) {
-            auditInBackground(config, {
+            audits.push({
               thread_id: threadId,
               call_kind: "narrative",
               provider: narrativeUsage.provider,
@@ -381,17 +518,14 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           }
 
           // ----- 5. Persist the turn ---------------------------------
+          stage = "persist";
           const turnRec = await appendTurn(
             { dbContainer: config.dbContainer },
             threadId,
+            owner,
             {
               question,
-              route: {
-                kind: route.kind,
-                endpoint_name:
-                  route.kind === "endpoint" ? route.endpoint_name : undefined,
-                sql: route.kind === "sql" ? route.sql : undefined,
-              },
+              route: routeRec,
               digest: {
                 columns: digestForNarrative.columns,
                 row_count: digestForNarrative.row_count,
@@ -410,14 +544,40 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           // Any other abort is a provider timer: the SDK's AbortError
           // keeps name "Error", and the OpenAI path throws a DOMException
           // named "TimeoutError" (audit #90/#206).
-          if (!abortCtrl.signal.aborted) {
-            const isTimeout =
-              err instanceof AbortError ||
-              (err as { name?: string } | null)?.name === "TimeoutError";
+          const aborted = abortCtrl.signal.aborted;
+          const isTimeout =
+            err instanceof AbortError ||
+            (err as { name?: string } | null)?.name === "TimeoutError";
+          const message = err instanceof Error ? err.message : String(err);
+          const code = aborted
+            ? "SAGE_ABORTED"
+            : isTimeout
+              ? "SAGE_TIMEOUT"
+              : "SAGE_INTERNAL";
+          // Audit the failed stage with whatever usage the provider had
+          // spent (audit #83). A failed persist has no call to audit.
+          if (stage !== "persist") {
+            const model =
+              stage === "narrative"
+                ? provider.narrativeModel
+                : provider.routerModel;
+            const usage = sageUsageOf(err) ?? noUsage(model, 0);
+            audits.push({
+              thread_id: threadId,
+              call_kind: stage,
+              provider: usage.provider,
+              model: usage.model,
+              prompt: { question },
+              output: null,
+              usage,
+              error_code: code,
+              error_message: message.slice(0, AUDIT_ERROR_MAX),
+            });
+          }
+          if (!aborted) {
             if (isTimeout) {
               send("error", { code: "SAGE_TIMEOUT", message: TIMEOUT_MESSAGE });
             } else {
-              const message = err instanceof Error ? err.message : String(err);
               send("error", { code: "SAGE_INTERNAL", message });
             }
           }
@@ -426,6 +586,8 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           } catch {
             // already closed
           }
+        } finally {
+          for (const entry of audits) auditInBackground(config, entry);
         }
       },
       cancel() {
@@ -449,10 +611,20 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
 export function makeGetThreadHandler(config: ApiServerConfig) {
   return async (c: Context) => {
     const id = c.req.param("id") ?? "";
-    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    if (!UUID_RE.test(id)) {
       return c.json({ error: "thread_id must be a UUID." }, 400);
     }
-    const turns = await getThread({ dbContainer: config.dbContainer }, id);
+    const turns = await getThread(
+      { dbContainer: config.dbContainer },
+      id,
+      ownerOf(c),
+    );
+    if (!turns) {
+      return c.json(
+        { error: "thread not found.", code: "THREAD_NOT_FOUND" },
+        404,
+      );
+    }
     return c.json({ thread_id: id, turns });
   };
 }
@@ -460,10 +632,20 @@ export function makeGetThreadHandler(config: ApiServerConfig) {
 export function makeDeleteThreadHandler(config: ApiServerConfig) {
   return async (c: Context) => {
     const id = c.req.param("id") ?? "";
-    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    if (!UUID_RE.test(id)) {
       return c.json({ error: "thread_id must be a UUID." }, 400);
     }
-    await deleteThread({ dbContainer: config.dbContainer }, id);
+    const deleted = await deleteThread(
+      { dbContainer: config.dbContainer },
+      id,
+      ownerOf(c),
+    );
+    if (!deleted) {
+      return c.json(
+        { error: "thread not found.", code: "THREAD_NOT_FOUND" },
+        404,
+      );
+    }
     return c.json({ thread_id: id, deleted: true });
   };
 }

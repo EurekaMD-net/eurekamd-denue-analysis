@@ -2,7 +2,8 @@
 --
 -- sage_threads:        one row per multi-turn conversation; turns are an
 --                      append-only JSONB array (digests, not full results).
--- sage_turns_audit:    one row per LLM call (router OR narrative). Captures
+-- sage_turns_audit:    one row per LLM call (router OR narrative), plus one
+--                      per failed dispatch / SQL gate step. Captures
 --                      prompt, output, usage, latency, model. Op-readable
 --                      only — NOT exposed via API. Cost telemetry.
 --
@@ -19,6 +20,9 @@ CREATE TABLE IF NOT EXISTS sage_threads (
   turns        JSONB NOT NULL DEFAULT '[]'::jsonb,
   -- Free-form label users can set (defaults null = "untitled").
   label        TEXT,
+  -- Owner: JWT sub, or 'api-key' for the shared X-Api-Key. The API only
+  -- touches a thread whose owner_sub matches the caller (migration 024).
+  owner_sub    TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -26,11 +30,15 @@ CREATE TABLE IF NOT EXISTS sage_threads (
 CREATE INDEX IF NOT EXISTS idx_sage_threads_updated
   ON sage_threads (updated_at DESC);
 
+CREATE INDEX IF NOT EXISTS sage_threads_owner_idx
+  ON sage_threads (owner_sub);
+
 CREATE TABLE IF NOT EXISTS sage_turns_audit (
   turn_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   thread_id    UUID REFERENCES sage_threads(thread_id) ON DELETE CASCADE,
-  -- "router" (endpoint pick + SQL draft) OR "narrative" (prose writer).
-  call_kind    TEXT NOT NULL CHECK (call_kind IN ('router', 'narrative')),
+  -- "router" (endpoint pick + SQL draft), "narrative" (prose writer),
+  -- "dispatch" / "sql_gate" (a failed endpoint call or gated SQL run).
+  call_kind    TEXT NOT NULL CHECK (call_kind IN ('router', 'narrative', 'dispatch', 'sql_gate')),
   -- Provider + model used. Lets us correlate cost across provider swaps.
   provider     TEXT NOT NULL,
   model        TEXT NOT NULL,

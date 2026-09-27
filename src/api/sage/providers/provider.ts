@@ -73,6 +73,11 @@ export interface PriorTurnDigest {
     truncated?: boolean;
   };
   narrative: string;
+  /**
+   * Set on a turn whose route failed (dispatch or SQL gate): the public
+   * code + message, so the next router pass can self-correct (audit #89).
+   */
+  error?: { code: string; message: string };
 }
 
 export interface RouteInput {
@@ -157,6 +162,24 @@ export interface SageProvider {
 
   /** Best-effort token count for budgeting. */
   countTokens(text: string): number;
+}
+
+/**
+ * A provider call that throws (timeout, client abort, upstream error) has
+ * still spent tokens. Providers attach what they know to the error so the
+ * handler can audit it (audit #83); sageUsageOf reads it back.
+ */
+export function attachSageUsage(err: unknown, usage: UsageNormalized): unknown {
+  if (err !== null && typeof err === "object") {
+    const e = err as { sageUsage?: UsageNormalized };
+    e.sageUsage ??= usage;
+  }
+  return err;
+}
+
+export function sageUsageOf(err: unknown): UsageNormalized | null {
+  if (err === null || typeof err !== "object") return null;
+  return (err as { sageUsage?: UsageNormalized }).sageUsage ?? null;
 }
 
 /** Approximate token count (4 chars/token English baseline). */
