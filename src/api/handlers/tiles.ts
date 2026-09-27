@@ -18,6 +18,9 @@
  * on heatmap-only tiles below z9). Above that the tile is a LIMIT without
  * ORDER BY: whatever the scan meets first, so the sample is NOT
  * deterministic and adjacent tiles may come from different samples.
+ * Exception: unfiltered tiles below z9 read a fixed-rate block sample
+ * (TABLESAMPLE SYSTEM ... REPEATABLE), which is spread over the tile and
+ * the same for every request (see buildTile).
  *
  * Payload (audit #100): the only attribute the SPA reads is `clee`, on a
  * circle click. It is emitted only from the circle layer's minzoom up
@@ -62,6 +65,16 @@ const HEATMAP_CAP_BELOW_ZOOM = 9;
 const HEATMAP_TILE_FEATURE_CAP = 10_000;
 /** Unfiltered tiles below this zoom force a GiST index scan (audit #136). */
 const INDEX_SCAN_BELOW_ZOOM = 12;
+/**
+ * Unfiltered tiles below HEATMAP_CAP_BELOW_ZOOM read this percent of the
+ * table's blocks (index = z), sized so the densest tile at each zoom (the
+ * one holding CDMX) samples about 9-9.5k rows, under the 10k cap. Measured
+ * 2026-09-27 on 6.1M rows: z3 9,160 · z4 9,275 · z5 8,979 · z6 8,880 ·
+ * z7 9,324 · z8 9,438.
+ */
+const HEATMAP_SAMPLE_PERCENT = [
+  0.15, 0.15, 0.15, 0.15, 0.2, 0.25, 0.3, 0.55, 0.8,
+];
 
 // Audit #100: in-process LRU of finished tiles, keyed by z/x/y + filters.
 // Byte-capped; each entry is also charged a fixed overhead so a sweep of
@@ -312,7 +325,13 @@ async function buildTile(
   const tileEnv3857 = `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y})`;
   // Audit #52: prefilter with the same 64-px buffer ST_AsMVTGeom keeps, so
   // symbols that straddle a tile seam are drawn by both tiles.
-  const prefilterEnv3857 = `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y}, margin => ${MVT_BUFFER / MVT_EXTENT})`;
+  // Not on the world's first/last column: there the margin crosses the
+  // antimeridian, ST_Transform wraps it to +/-178 deg and the 4326 bbox
+  // inverts (2/0/1 became lon -88.6..178.6, missing almost all of Mexico).
+  const prefilterEnv3857 =
+    p.x > 0 && p.x < 2 ** p.z - 1
+      ? `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y}, margin => ${MVT_BUFFER / MVT_EXTENT})`
+      : tileEnv3857;
   // LIMIT without ORDER BY — the planner short-circuits the scan as soon
   // as TILE_FEATURE_CAP matching rows are found, so an unfiltered low-
   // zoom tile completes in ~400ms instead of 16s. The trade-off is that
@@ -329,12 +348,26 @@ async function buildTile(
   // 0.5 s warm, 5.5 s cold), and with bitmaps off alone it picks a Seq
   // Scan whose cost depends on where the (synchronized) scan starts (z9
   // CDMX: 0.18 s to a 20 s timeout). Disabling both leaves a plain GiST
-  // index scan that stops at the cap: 0.3-0.4 s warm at z9-z11, ~35 ms at
-  // the 10k heatmap cap. Filtered tiles keep the default BitmapAnd plan.
+  // index scan that stops at the cap: 0.3-0.4 s warm at z9-z11. Filtered
+  // tiles keep the default BitmapAnd plan.
+  //
+  // Below z9 the GiST scan is NOT used: LIMIT then returns the first rows
+  // in index order, which are bunched in one corner of a big tile (5/7/14
+  // held 0 points in CDMX). Those tiles are heatmap-only, so they read a
+  // fixed-rate block sample instead: spread over the whole tile, the same
+  // rate for every tile at a zoom (so density matches across seams), and
+  // REPEATABLE, so every tile at every zoom reads the same cached blocks.
+  // 5/7/14: 8,979 rows, 189 half-degree cells, 1,984 in CDMX; 70-470 ms
+  // warm, ~2 s on a cold cache. The cost is sparse areas: a tile with a few
+  // hundred rows keeps only its sampled share.
+  const sampleClause =
+    !filtered && p.z < HEATMAP_CAP_BELOW_ZOOM
+      ? ` TABLESAMPLE SYSTEM (${HEATMAP_SAMPLE_PERCENT[p.z]}) REPEATABLE (0)`
+      : ``;
   const sql =
     `WITH filtered AS (` +
     `  SELECT ${emitClee ? "clee, geom" : "geom"}` +
-    `  FROM establecimientos` +
+    `  FROM establecimientos${sampleClause}` +
     `  WHERE 1=1 ${filterClause}` +
     `    AND geom && ST_Transform(${prefilterEnv3857}, 4326)` +
     `  LIMIT ${cap}` +
@@ -352,7 +385,9 @@ async function buildTile(
     await runSql(sql, {
       container: config.dbContainer,
       maxBuffer: 50 * 1024 * 1024,
-      ...(!filtered && p.z < INDEX_SCAN_BELOW_ZOOM
+      ...(!filtered &&
+      p.z >= HEATMAP_CAP_BELOW_ZOOM &&
+      p.z < INDEX_SCAN_BELOW_ZOOM
         ? { extraSettings: ["enable_bitmapscan=off", "enable_seqscan=off"] }
         : {}),
     })

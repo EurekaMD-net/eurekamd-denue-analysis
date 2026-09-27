@@ -402,18 +402,43 @@ describe("tile payload + planner settings (audit #100 #136 #52)", () => {
     );
   });
 
-  it("unfiltered below z12 forces a GiST index scan; z12+ and filtered do not (#136)", async () => {
-    for (const path of ["/tiles/5/7/14.mvt", "/tiles/11/460/910.mvt"]) {
-      const { pgoptions } = await tileCall(path);
+  it("unfiltered z9-z11 forces a GiST index scan; z<9, z12+ and filtered do not (#136)", async () => {
+    for (const path of ["/tiles/9/115/227.mvt", "/tiles/11/460/910.mvt"]) {
+      const { pgoptions, sql } = await tileCall(path);
       expect(pgoptions).toMatch(/-c enable_bitmapscan=off/);
       expect(pgoptions).toMatch(/-c enable_seqscan=off/);
+      expect(sql).not.toMatch(/TABLESAMPLE/);
     }
     for (const path of [
+      "/tiles/5/7/14.mvt",
+      "/tiles/8/57/113.mvt",
       "/tiles/12/920/1820.mvt",
       "/tiles/10/230/455.mvt?entidad=09",
     ]) {
       const { pgoptions } = await tileCall(path);
       expect(pgoptions).not.toMatch(/enable_bitmapscan|enable_seqscan/);
+    }
+  });
+
+  it("unfiltered below z9 reads a spread block sample, not the first rows in GiST order (#136)", async () => {
+    // Live 2026-09-27, tile 5/7/14: forced GiST + LIMIT 10k covered 32
+    // half-degree cells with 0 points in CDMX; this sample covers 189
+    // cells with 1,984 in CDMX. The rate is fixed per zoom and REPEATABLE.
+    expect((await tileCall("/tiles/5/7/14.mvt")).sql).toMatch(
+      /FROM establecimientos TABLESAMPLE SYSTEM \(0\.25\) REPEATABLE \(0\) {2}WHERE 1=1 {5}AND geom && .*LIMIT 10000\)/,
+    );
+    expect((await tileCall("/tiles/8/57/113.mvt")).sql).toMatch(
+      /TABLESAMPLE SYSTEM \(0\.8\) REPEATABLE \(0\)/,
+    );
+    expect((await tileCall("/tiles/3/1/3.mvt")).sql).toMatch(
+      /TABLESAMPLE SYSTEM \(0\.15\) REPEATABLE \(0\)/,
+    );
+    for (const path of [
+      "/tiles/9/115/227.mvt",
+      "/tiles/5/7/14.mvt?sector=46",
+      "/tiles/4/3/7.mvt?entidad=09",
+    ]) {
+      expect((await tileCall(path)).sql).not.toMatch(/TABLESAMPLE/);
     }
   });
 
@@ -424,6 +449,23 @@ describe("tile payload + planner settings (audit #100 #136 #52)", () => {
     );
     expect(sql).toMatch(
       /ST_AsMVTGeom\(ST_Transform\(f\.geom, 3857\), ST_TileEnvelope\(10, 512, 512\), 4096, 64, true\)/,
+    );
+  });
+
+  it("no margin on the world's first/last tile column, where it wraps the bbox (#52)", async () => {
+    // Live: 2/0/1 with the margin transforms to lon -88.6..178.6 and
+    // returned 73 rows instead of ~9k (almost all of Mexico lost).
+    for (const [path, env] of [
+      ["/tiles/2/0/1.mvt", "ST_TileEnvelope(2, 0, 1)"],
+      ["/tiles/2/3/1.mvt", "ST_TileEnvelope(2, 3, 1)"],
+      ["/tiles/0/0/0.mvt", "ST_TileEnvelope(0, 0, 0)"],
+    ] as const) {
+      const { sql } = await tileCall(path);
+      expect(sql).toContain(`geom && ST_Transform(${env}, 4326)`);
+      expect(sql).not.toMatch(/margin/);
+    }
+    expect((await tileCall("/tiles/2/1/1.mvt")).sql).toContain(
+      "geom && ST_Transform(ST_TileEnvelope(2, 1, 1, margin => 0.015625), 4326)",
     );
   });
 });
