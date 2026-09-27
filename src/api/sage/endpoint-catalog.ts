@@ -396,6 +396,7 @@ mv_delitos_municipal_yearly(cve_mun, ano, robo_negocio, homicidio_doloso, extors
   -- 2026 is partial; for stable aggregates use ano < EXTRACT(YEAR FROM CURRENT_DATE)::int.
 mv_mortalidad_municipal_yearly(cve_mun, ano, total_defunciones, def_menores_1ano, def_circulatorio, def_neoplasias, def_endocrinas, def_externas)
 ce2024_municipal(cve_mun, cve_ent, sector, subsector, rama, subrama, clase, id_estrato, ue, personal_ocupado_total, valor_agregado_censal_bruto, ingresos_totales, remuneraciones, produccion_bruta_total)
+  -- Hierarchical: rows with clase IS NULL are subtotals (rama/subsector/sector/municipio; sector IS NULL = municipio total). Class-level queries must filter clase IS NOT NULL; never SUM across levels.
 sedatu_financing_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_organismo_code, top_organismo_nombre, pct_vivienda_nueva, pct_mejoramientos, pct_femenino, pct_credito_individual)
 cnbv_panorama_municipal(cve_mun, clave_municipio_num, nom_ent, nom_mun, rezago_social, poblacion_total, poblacion_adulta, sucursales_total, cajeros_total, tpv_total, cuentas_total, creditos_total, tx_tpv_total, remesas_mdd, periodo)
 cnbv_credito_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_intermediario_code, top_intermediario_nombre, top_intermediario_share, pct_vivienda_nueva, pct_femenino, pct_indigena, pct_economica, pct_popular, pct_tradicional, pct_media, pct_residencial, pct_residencial_plus)

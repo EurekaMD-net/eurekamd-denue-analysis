@@ -17,7 +17,10 @@ import {
   ENDPOINT_PATHS,
   DIGEST_ROWS_MAX_BYTES,
 } from "./dispatcher.js";
-import { SAGE_ENDPOINT_CATALOG } from "./endpoint-catalog.js";
+import {
+  SAGE_ENDPOINT_CATALOG,
+  SAGE_SQL_SCHEMA_SUMMARY,
+} from "./endpoint-catalog.js";
 import { createServer } from "../server.js";
 
 afterEach(() => {
@@ -366,5 +369,17 @@ describe("catalog ↔ server routes (audit #77)", () => {
       }
     }
     expect(bad).toEqual([]);
+  });
+});
+
+describe("SAGE_SQL_SCHEMA_SUMMARY — ce2024_municipal hierarchy hint", () => {
+  it("tells Sage that clase IS NULL rows are subtotals", () => {
+    const start = SAGE_SQL_SCHEMA_SUMMARY.indexOf("ce2024_municipal(");
+    expect(start).toBeGreaterThan(-1);
+    const block = SAGE_SQL_SCHEMA_SUMMARY.slice(start)
+      .split("\n")
+      .slice(0, 2)
+      .join("\n");
+    expect(block).toContain("clase IS NULL are subtotals");
   });
 });
