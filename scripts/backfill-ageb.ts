@@ -7,6 +7,17 @@
  * if added). Relevant columns: `cvegeo` (13-char national-unique key,
  * ENT(2)+MUN(3)+LOC(4)+AGEB(4)) + `geom` (Polygon, SRID 4326, GIST-indexed).
  *
+ * Polygon (re)load recipe (ageb/mun/ent/loc_polygons):
+ *   1. ogr2ogr the Marco Geoestadístico layer into public.<layer>_polygons.
+ *   2. Right after it, before anything else: ogr2ogr creates the table under
+ *      Supabase's default ACL (anon/authenticated/trustr_app get full write
+ *      through public PostgREST, audit #111), so strip it again:
+ *        docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+ *          -f - < scripts/migrations/002-grants-lockdown.sql
+ *      (for one table: ALTER TABLE ageb_polygons OWNER TO postgres;
+ *       REVOKE ALL ON ageb_polygons FROM anon, authenticated, trustr_app;)
+ *   3. Then run this backfill.
+ *
  * The 4-char `cve_ageb` is NOT national-unique (the same "001A" appears in
  * many localidades) — we always store the full 13-char CVEGEO so it joins
  * cleanly to Censo 2020 / CONEVAL data which is keyed by full CVEGEO.

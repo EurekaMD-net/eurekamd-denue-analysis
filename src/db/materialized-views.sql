@@ -74,8 +74,3 @@ WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS mv_estrato_por_entidad_pk
   ON mv_estrato_por_entidad (entidad, estrato);
-
--- Grant read access to the anon/authenticated roles (Supabase standard)
-GRANT SELECT ON mv_sector_summary TO anon, authenticated;
-GRANT SELECT ON mv_coverage TO anon, authenticated;
-GRANT SELECT ON mv_estrato_por_entidad TO anon, authenticated;
