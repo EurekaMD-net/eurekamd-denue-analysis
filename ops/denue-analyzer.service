@@ -9,9 +9,9 @@
 # binding to :3030 (overridable via API_PORT in .env). Caddy at
 # uncharted.eurekamd.cloud proxies /api/* to this port (see ops/Caddyfile.uncharted).
 #
-# tsx caches in /tmp/tsx-0/. After source edits, restart the service to pick
-# them up; the cache typically invalidates on its own, but in flaky cases
-# `rm -rf /tmp/tsx-0/ && systemctl restart denue-analyzer` is the hammer.
+# tsx caches in /tmp/tsx-0/, which PrivateTmp=yes (below) makes private to the
+# unit and empty on every start. After source edits, `systemctl restart
+# denue-analyzer` picks them up; deleting the host's /tmp/tsx-0/ does nothing.
 #
 # Logs: `journalctl -u denue-analyzer -f`
 
@@ -40,6 +40,25 @@ Environment=TZ=America/Mexico_City
 # TRUST_PROXY out of .env — EnvironmentFile would override this line.
 Environment=TRUST_PROXY=1
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Sandboxing. On the live VPS these lines live in the drop-in
+# /etc/systemd/system/denue-analyzer.service.d/hardening.conf.
+# ProtectSystem=full (not strict) and no ProtectHome: the service runs from
+# /root and the Claude Agent SDK writes ~/.claude, so strict or ProtectHome
+# would break Sage. full still makes /usr, /boot and /etc (incl. /etc/caddy)
+# read-only. PrivateTmp only means the tsx cache in /tmp starts empty on each
+# restart. The docker socket (AF_UNIX) still works, so the psql/Sage
+# `docker exec` path is unaffected; that socket is also why this still runs as
+# root until the DB access moves to a least-privileged pg role over TCP.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target
