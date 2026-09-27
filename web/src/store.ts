@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { Session } from "@supabase/supabase-js";
 import type { QueryClient } from "@tanstack/react-query";
 import { supabase } from "./lib/supabase";
+import { clearAllThreadIndexes } from "./lib/sage-threads-store";
 
 export type Mode = "map" | "locust";
 
@@ -44,7 +45,7 @@ export interface UiState {
 
   /**
    * Local cleanup: cancel TanStack queries, abort registered streams,
-   * drop session. Idempotent. Does NOT call `supabase.auth.signOut()`.
+   * drop session, clear the Sage thread index. Idempotent. Does NOT call `supabase.auth.signOut()`.
    * Used by `signOut()` (which adds the supabase RPC) AND by LoginGate's
    * cross-tab handler (which must NOT call signOut again — it already
    * ran in the other tab). RH-12.
@@ -97,6 +98,9 @@ export const useUiStore = create<UiState>((set, get) => ({
     get().abortRegistry.clear();
     // 3. Drop the session in the store so LoginGate re-shows.
     set({ session: null });
+    // 4. Forget the Sage question history so the next person on a shared
+    //    browser cannot read it from localStorage. Audit #197.
+    clearAllThreadIndexes();
   },
 
   signOut: async () => {
@@ -107,7 +111,18 @@ export const useUiStore = create<UiState>((set, get) => ({
     // a second time. That's safe — cleanupLocal is idempotent (the
     // abort registry is already empty, the cache is already cleared,
     // session is already null). Cheaper than gating the listener.
-    await supabase.auth.signOut();
+    // Audit #192: a failed /logout (network, 5xx) returns {error} and
+    // leaves the refresh token in localStorage, so the next reload or
+    // TOKEN_REFRESHED would restore the session. scope 'local' always
+    // removes the stored session without a network call.
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.warn(
+        "[auth] server-side sign-out failed; cleared the local session only",
+        error.message,
+      );
+      await supabase.auth.signOut({ scope: "local" });
+    }
   },
 
   entidad: null,

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "./store";
 import { SUPABASE_TOKEN_KEY_RE } from "./components/LoginGate";
@@ -106,6 +107,30 @@ describe("store signOut (full flow)", () => {
     expect(
       supabase.auth.signOut as ReturnType<typeof vi.fn>,
     ).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to a local-scope signOut when the server revoke fails (audit #192)", async () => {
+    const { supabase } = await import("./lib/supabase");
+    const signOutMock = supabase.auth.signOut as ReturnType<typeof vi.fn>;
+    signOutMock.mockClear();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    signOutMock.mockResolvedValueOnce({ error: new Error("network down") });
+    await useUiStore.getState().signOut();
+    expect(signOutMock).toHaveBeenCalledTimes(2);
+    expect(signOutMock).toHaveBeenLastCalledWith({ scope: "local" });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("removes every Sage thread index from localStorage (audit #197)", async () => {
+    window.localStorage.setItem("denue_sage_threads:user-1", "[]");
+    window.localStorage.setItem("denue_sage_threads:user-2", "[]");
+    window.localStorage.setItem("unrelated-key", "keep");
+    await useUiStore.getState().signOut();
+    expect(window.localStorage.getItem("denue_sage_threads:user-1")).toBeNull();
+    expect(window.localStorage.getItem("denue_sage_threads:user-2")).toBeNull();
+    expect(window.localStorage.getItem("unrelated-key")).toBe("keep");
+    window.localStorage.clear();
   });
 });
 
