@@ -424,6 +424,7 @@ export async function layersValuesHandler(
     `{"grain":${JSON.stringify(query.grain)},` +
     `"layers":${JSON.stringify(query.layers)},` +
     `"values":${values}}`;
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", "private, max-age=300");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.body(body, 200, { "content-type": "application/json" });
 }

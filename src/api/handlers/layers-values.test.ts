@@ -249,7 +249,9 @@ describe("GET /analytics/layers/values — query execution (audit P05/P08)", () 
     );
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/application\/json/);
-    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(res.headers.get("cache-control")).toBe("private, max-age=300");
+    // #26: auth-gated payload must not be stored by a shared cache.
+    expect(res.headers.get("vary")).toBe("Authorization, X-Api-Key");
     expect(await res.json()).toEqual({
       grain: "muni",
       layers: ["pobreza_pct", "irs_indice"],

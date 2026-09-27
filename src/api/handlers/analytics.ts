@@ -362,7 +362,7 @@ const NATIONAL_TREEMAP_SQL = `
 WITH entidad_counts AS (
   SELECT entidad, COUNT(*)::bigint AS establecimientos
   FROM establecimientos
-  WHERE entidad IS NOT NULL
+  WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
   GROUP BY entidad
 ),
 entidad_irs AS (
@@ -370,8 +370,12 @@ entidad_irs AS (
     LEFT(cve_mun, 2) AS entidad,
     irs_grado,
     COUNT(*)::int AS muns_with_grade,
-    ROW_NUMBER() OVER (PARTITION BY LEFT(cve_mun, 2) ORDER BY COUNT(*) DESC) AS rn
+    ROW_NUMBER() OVER (
+      PARTITION BY LEFT(cve_mun, 2)
+      ORDER BY COUNT(*) DESC, SUM(pob_total) DESC, irs_grado
+    ) AS rn
   FROM coneval_irs_municipal
+  WHERE irs_grado IS NOT NULL
   GROUP BY 1, 2
 ),
 entidad_pobreza AS (
@@ -423,7 +427,7 @@ export async function nationalTreemapHandler(
         r.pobreza_pct_promedio === null ? null : Number(r.pobreza_pct_promedio),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -474,7 +478,7 @@ export async function sectorGradeMatrixHandler(
       count: Number(r.count),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -565,7 +569,7 @@ export async function municipiosAnalyticsHandler(
       irs_indice: r.irs_indice === null ? null : Number(r.irs_indice),
     })),
   };
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", "private, max-age=300");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -613,19 +617,11 @@ export async function topSectorsByEntidadHandler(
       "validation.entidad",
     );
   }
-  const rawLimit = c.req.query("limit");
-  let limit = TOP_SECTORS_DEFAULT;
-  if (rawLimit !== undefined) {
-    const n = parseInt(rawLimit, 10);
-    if (!Number.isFinite(n) || n < 1 || n > TOP_SECTORS_MAX) {
-      throw new HttpError(
-        `limit inválido "${rawLimit}". Rango: 1..${TOP_SECTORS_MAX}`,
-        400,
-        "validation.limit",
-      );
-    }
-    limit = n;
-  }
+  const limit = parseLimit(
+    c.req.query("limit"),
+    TOP_SECTORS_DEFAULT,
+    TOP_SECTORS_MAX,
+  );
 
   const rows = await runJson<RawTopSectorRow[]>(topSectorsSql(entidad, limit), {
     container: config.dbContainer,
@@ -639,7 +635,7 @@ export async function topSectorsByEntidadHandler(
       count: Number(r.count),
     })),
   };
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", "private, max-age=300");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -818,6 +814,13 @@ export async function riskSummaryHandler(
     RISK_DEFAULT_BASELINE_ANO,
     "baseline_ano",
   );
+  if (baselineAno >= currentAno) {
+    throw new HttpError(
+      `baseline_ano (${baselineAno}) debe ser anterior a ano (${currentAno}).`,
+      400,
+      "validation.baseline_ano",
+    );
+  }
 
   // Mat-view first → falls back to live aggregation if the operator hasn't
   // run scripts/perf-matviews.sql yet. Same pattern as nationalTreemapHandler.
@@ -854,7 +857,7 @@ export async function riskSummaryHandler(
   // cache matches /analytics/municipios for the same "lightly more dynamic"
   // category; downstream caches still amortize but the worst-case staleness
   // window stays bounded.
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", "private, max-age=300");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -968,7 +971,7 @@ export async function riskTrendHandler(
       total: Number(p.total),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -1048,7 +1051,7 @@ export async function locustAgebHandler(
       grado_rezago_ageb: r.grado_rezago_ageb ?? null,
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -1300,7 +1303,7 @@ export async function mortalitySummaryHandler(
   };
   // Mortality data is annual + ~12-month lag — much less dynamic than risk
   // (monthly SESNSP). Match national-treemap's 1-hour cache.
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -1446,7 +1449,7 @@ export async function mortalityTrendHandler(
       def_externas: Number(p.def_externas),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -1649,7 +1652,7 @@ export async function stateCalibratorsHandler(
 
   const result: StateCalibratorsResult = { entidad, calibrators };
   // Calibrators change once per ENIGH wave (~biennial). 1-hour cache fits.
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -1761,7 +1764,7 @@ export async function agebsByMunicipioHandler(
   const orderBy = orderByRaw as AgebsOrderBy;
   const limitRaw = c.req.query("limit");
   let limit = AGEBS_DEFAULT_LIMIT;
-  if (limitRaw !== undefined) {
+  if (limitRaw !== undefined && limitRaw !== "") {
     const parsed = Number(limitRaw);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > AGEBS_MAX_LIMIT) {
       throw new HttpError(
@@ -1792,7 +1795,7 @@ export async function agebsByMunicipioHandler(
       clues: Number(r.clues ?? 0),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -2050,10 +2053,15 @@ interface RawAgebDetailPayload {
 
 function agebDetailSql(cvegeo: string): string {
   // cvegeo pre-validated by CVEGEO_RE.
+  // #59: a 9-char rural cvegeo is ENT+MUN+AGEB — it has no LOC segment, so
+  // slice(5, 9) would be the AGEB code colliding with an unrelated locality.
+  // A rural AGEB has no single containing locality: loc_meta stays null.
+  const locMeta =
+    cvegeo.length === 9 ? "NULL" : scalarSubquery(agebLocMetaSql(cvegeo));
   return `
 SELECT json_build_object(
   'id', ${scalarSubquery(agebIdentitySql(cvegeo))},
-  'loc_meta', ${scalarSubquery(agebLocMetaSql(cvegeo))},
+  'loc_meta', ${locMeta},
   'summary', ${scalarSubquery(agebEstabSummarySql(cvegeo))},
   'top_sectors', ${scalarSubquery(agebTopSectorsSql(cvegeo, 10))},
   'clues_sample', ${scalarSubquery(agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP))},
@@ -2230,7 +2238,7 @@ export async function agebDetailHandler(
       lon: Number(cl.lon ?? 0),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -2346,7 +2354,7 @@ export async function agebFarmaciaOpportunityHandler(
   }
   const limitRaw = c.req.query("limit");
   let limit = AGEB_FARMACIA_DEFAULT_LIMIT;
-  if (limitRaw !== undefined) {
+  if (limitRaw !== undefined && limitRaw !== "") {
     const parsed = Number(limitRaw);
     if (
       !Number.isInteger(parsed) ||
@@ -2383,7 +2391,7 @@ export async function agebFarmaciaOpportunityHandler(
       score_per_1k: r.score_per_1k == null ? null : Number(r.score_per_1k),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -2555,7 +2563,7 @@ function parseLimit(
   defaultLimit: number,
   maxLimit: number,
 ): number {
-  if (raw === undefined) return defaultLimit;
+  if (raw === undefined || raw === "") return defaultLimit;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxLimit) {
     throw new HttpError(
@@ -2780,7 +2788,7 @@ export async function opportunityByAgebHandler(
         r.casos_obesidad_muni == null ? null : Number(r.casos_obesidad_muni),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -2810,21 +2818,23 @@ function opportunityByColoniaSql(
   // smoke caught this — unit tests mock psql so the bug only surfaces live.
   const targetCountExpr = `SUM(CASE WHEN ${scianColumn} IN (${inList}) THEN 1 ELSE 0 END)`;
   const totalEstabExpr = `COUNT(*)`;
+  // #70: every numeric order carries a colonia tiebreak so LIMIT keeps a
+  // deterministic set of tied rows.
   const innerOrderExpr =
     orderBy === "score"
-      ? `(${totalEstabExpr}::numeric / NULLIF(${targetCountExpr}, 0)) DESC NULLS LAST`
+      ? `(${totalEstabExpr}::numeric / NULLIF(${targetCountExpr}, 0)) DESC NULLS LAST, UPPER(TRIM(colonia)) ASC`
       : orderBy === "target_count"
-        ? `${targetCountExpr} DESC`
+        ? `${targetCountExpr} DESC, UPPER(TRIM(colonia)) ASC`
         : orderBy === "total_estab"
-          ? `${totalEstabExpr} DESC`
+          ? `${totalEstabExpr} DESC, UPPER(TRIM(colonia)) ASC`
           : /* colonia */ "UPPER(TRIM(colonia)) ASC";
   const outerOrderExpr =
     orderBy === "score"
-      ? "(r.total_estab::numeric / NULLIF(r.target_count, 0)) DESC NULLS LAST"
+      ? "(r.total_estab::numeric / NULLIF(r.target_count, 0)) DESC NULLS LAST, r.colonia ASC"
       : orderBy === "target_count"
-        ? "r.target_count DESC"
+        ? "r.target_count DESC, r.colonia ASC"
         : orderBy === "total_estab"
-          ? "r.total_estab DESC"
+          ? "r.total_estab DESC, r.colonia ASC"
           : /* colonia */ "r.colonia ASC";
   return `
 SELECT json_agg(row_to_json(r) ORDER BY ${outerOrderExpr}) FROM (
@@ -2926,7 +2936,7 @@ export async function opportunityByColoniaHandler(
     total_returned: colonias.length,
     colonias,
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -2943,7 +2953,7 @@ function coloniasByMunicipioSql(
 ): string {
   const orderExpr =
     orderBy === "num_establecimientos"
-      ? "num_establecimientos DESC"
+      ? "num_establecimientos DESC, colonia ASC" // #70: tiebreak under LIMIT
       : /* colonia */ "colonia ASC";
   return `
 SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr}) FROM (
@@ -3019,7 +3029,7 @@ export async function coloniasByMunicipioHandler(
     total_returned: colonias.length,
     colonias,
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3116,7 +3126,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
         boticas: 0,
         droguerias: 0,
       };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3172,7 +3182,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
         total_licenciadas: 0,
         con_controlados: 0,
       };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3209,6 +3219,15 @@ export async function manzanasByAgebHandler(
       `cvegeo inválido "${cvegeo ?? ""}". Debe ser 13 chars (urbano) o 9 chars (rural), último char puede ser dígito o letra mayúscula.`,
       400,
       "validation.cvegeo",
+    );
+  }
+  // #73: censo_manzana.cvegeo_ageb is always the 13-char urban key, so a
+  // 9-char rural AGEB could only ever return a misleading empty 200.
+  if (cvegeo.length === 9) {
+    throw new HttpError(
+      `cvegeo "${cvegeo}" es un AGEB rural: los datos por manzana solo existen para AGEBs urbanas (13 chars).`,
+      400,
+      "validation.cvegeo_rural_no_manzanas",
     );
   }
 
@@ -3270,7 +3289,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
     total_returned: manzanas.length,
     manzanas,
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3340,7 +3359,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
     total_returned: colonias.length,
     colonias,
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3353,8 +3372,9 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
  * GET /analytics/airports-by-municipio?cve_mun=NNNNN
  *
  * Surface SCT/AFAC airport-operations data per municipio. Returns the
- * airport(s) in the muni with March 2026 flights, recent 3-yr average
- * (2024/2025/2026), 2019 pre-pandemic baseline, and growth-rate. Munis
+ * airport(s) in the muni with March flights for the latest loaded year
+ * (`latest_ano`, resolved from the data), the 3-yr average ending there,
+ * 2019 pre-pandemic baseline, and growth-rate. Munis
  * without an airport return an empty `airports` array (zero-row response,
  * not 404 — consistent with the rest of the analytics surface).
  *
@@ -3377,48 +3397,62 @@ export async function airportsByMunicipioHandler(
   }
 
   // One query returns the per-airport breakdown plus the muni-level summary
-  // shape via two CTEs. The view aeropuertos_movements_yearly is already
+  // shape via CTEs. The view aeropuertos_movements_yearly is already
   // deduped (same airport across operators is summed), so per-airport
-  // rollup is straightforward.
+  // rollup is straightforward. #72: the "current" year is MAX(ano) in the
+  // data, not a literal, so the next SCT load moves every window with it.
   const sql = `
-WITH per_airport AS (
+WITH latest AS (
+  SELECT MAX(ano) AS ano FROM aeropuertos_movements_yearly
+),
+per_airport AS (
   SELECT
     airport_name,
-    MAX(mar_flights) FILTER (WHERE ano = 2026)             AS f2026,
-    ROUND(AVG(mar_flights) FILTER (WHERE ano IN (2024,2025,2026))) AS recent_avg,
+    MAX(mar_flights) FILTER (WHERE ano = (SELECT ano FROM latest)) AS f_latest,
+    ROUND(AVG(mar_flights) FILTER (
+      WHERE ano BETWEEN (SELECT ano FROM latest) - 2 AND (SELECT ano FROM latest)
+    )) AS recent_avg,
     MAX(mar_flights) FILTER (WHERE ano = 2019)             AS f2019
   FROM aeropuertos_movements_yearly
   WHERE cve_mun = '${cveMun}'
   GROUP BY airport_name
 )
-SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC NULLS LAST), '[]'::json) FROM (
-  SELECT
-    airport_name,
-    COALESCE(f2026, 0)::INTEGER AS mar_flights_2026,
-    COALESCE(recent_avg, 0)::INTEGER AS mar_flights_recent_avg,
-    f2019::INTEGER AS mar_flights_2019,
-    CASE
-      WHEN f2019 IS NOT NULL AND f2019 > 0 AND f2026 IS NOT NULL
-      THEN ROUND((f2026 - f2019)::numeric * 100.0 / f2019, 1)
-      ELSE NULL
-    END AS pct_change_vs_2019
-  FROM per_airport
-) r;
+SELECT json_build_object(
+  'latest_ano', (SELECT ano FROM latest),
+  'airports', COALESCE((
+    SELECT json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC NULLS LAST) FROM (
+      SELECT
+        airport_name,
+        COALESCE(f_latest, 0)::INTEGER AS mar_flights_latest,
+        COALESCE(recent_avg, 0)::INTEGER AS mar_flights_recent_avg,
+        f2019::INTEGER AS mar_flights_2019,
+        CASE
+          WHEN f2019 IS NOT NULL AND f2019 > 0 AND f_latest IS NOT NULL
+          THEN ROUND((f_latest - f2019)::numeric * 100.0 / f2019, 1)
+          ELSE NULL
+        END AS pct_change_vs_2019
+      FROM per_airport
+    ) r
+  ), '[]'::json)
+);
 `;
 
-  const airports = await runJson<
-    Array<{
+  const payload = await runJson<{
+    latest_ano: number | null;
+    airports: Array<{
       airport_name: string;
-      mar_flights_2026: number;
+      mar_flights_latest: number;
       mar_flights_recent_avg: number;
       mar_flights_2019: number | null;
       pct_change_vs_2019: number | null;
-    }>
-  >(sql, { container: config.dbContainer });
+    }>;
+  }>(sql, { container: config.dbContainer });
+  const airports = payload.airports ?? [];
 
   const formatted: AirportInMunicipio[] = airports.map((a) => ({
     airport_name: a.airport_name,
-    mar_flights_2026: Number(a.mar_flights_2026 ?? 0),
+    mar_flights_latest: Number(a.mar_flights_latest ?? 0),
+    mar_flights_2026: Number(a.mar_flights_latest ?? 0),
     mar_flights_recent_avg: Number(a.mar_flights_recent_avg ?? 0),
     mar_flights_2019:
       a.mar_flights_2019 == null ? null : Number(a.mar_flights_2019),
@@ -3427,18 +3461,21 @@ SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC N
   }));
 
   // cve_ent: take from cve_mun (first 2 chars) — every cve_mun is shape-validated.
+  const numActive = formatted.filter((a) => a.mar_flights_latest > 0).length;
   const result: AirportsByMunicipioResult = {
     cve_mun: cveMun,
     cve_ent: cveMun.slice(0, 2),
-    num_airports_active_2026: formatted.filter((a) => a.mar_flights_2026 > 0)
-      .length,
+    latest_ano:
+      payload.latest_ano == null ? null : Number(payload.latest_ano),
+    num_airports_active_latest: numActive,
+    num_airports_active_2026: numActive,
     mar_flights_recent_avg: formatted.reduce(
       (s, a) => s + a.mar_flights_recent_avg,
       0,
     ),
     airports: formatted,
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3565,7 +3602,7 @@ SELECT json_build_object(
       vph_inter: r.vph_inter === null ? null : Number(r.vph_inter),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -3595,7 +3632,19 @@ export async function localityDetailHandler(
       "validation.cve_loc",
     );
   }
+  // #68: 9998/9999 are INEGI buckets ("Localidades de una/dos viviendas"),
+  // aggregates of many tiny places — not a locality.
+  const locCode = cveLoc.slice(5);
+  if (locCode === "9998" || locCode === "9999") {
+    throw new HttpError(
+      `localidad no encontrada para cve_loc="${cveLoc}" (9998/9999 agrupan localidades de 1-2 viviendas, no son una localidad).`,
+      404,
+      "locality.not_found",
+    );
+  }
 
+  // #118: filter on the raw (cve_mun, loc) columns so the censo_iter
+  // (cve_mun, loc) index applies; cve_loc is a concatenation no index matches.
   const sql = `
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT
@@ -3611,7 +3660,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
     vph_inter, vph_autom, vph_refri, vph_lavad, vph_pc, vph_cel, vph_tv, vph_snbien
   FROM censo_localidades
-  WHERE cve_loc = '${cveLoc}'
+  WHERE cve_mun = '${cveLoc.slice(0, 5)}' AND loc = '${locCode}'
 ) t;
 `;
   const rows = await runJson<Array<Record<string, string | number | null>>>(
@@ -3695,7 +3744,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       vph_snbien: num(r.vph_snbien),
     },
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -4618,7 +4667,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
     vivienda_credito_comercial: creditoComercialFromRow(r),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -4809,7 +4858,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     vivienda_financiamientos: viviendaFinanciamientosFromRow(r),
     vivienda_credito_comercial: creditoComercialFromRow(r),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -4918,11 +4967,9 @@ SELECT json_agg(row_to_json(t) ORDER BY t.denue_establecimientos DESC NULLS LAST
     cm.pobtot AS poblacion,
     cm.pea,
     cm.graproes,
-    CASE
-      WHEN cm.p_15ymas IS NOT NULL AND cm.p_15ymas > 0
-      THEN ROUND((cm.pea::numeric / cm.p_15ymas) * 100, 2)
-      ELSE NULL
-    END AS pct_pea,
+    -- #67: Censo PEA covers ages 12+, so the participation-rate basis is
+    -- p_12ymas (p_15ymas mixed age universes and overstated every muni).
+    ROUND(cm.pea::numeric / NULLIF(cm.p_12ymas, 0) * 100, 2) AS pct_pea,
     CASE
       WHEN cm.pobtot IS NOT NULL AND cm.pobtot > 0
       THEN ROUND((cm.psinder::numeric / cm.pobtot) * 100, 2)
@@ -5017,7 +5064,7 @@ export async function locustMuniHandler(
       sedatu_acciones_total: num(r.sedatu_acciones_total),
     })),
   };
-  c.header("Cache-Control", "public, max-age=300");
+  c.header("Cache-Control", "private, max-age=300");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -5085,7 +5132,7 @@ export async function locustEstadoHandler(
       enigh_pct_gasto_alimentos: num(r.enigh_pct_gasto_alimentos),
     })),
   };
-  c.header("Cache-Control", "public, max-age=3600");
+  c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
@@ -5094,7 +5141,7 @@ export async function locustEstadoHandler(
 // GET /resolve/ageb?lat=&lon= — point → AGEB resolution.
 //
 // Uncharted Lite Phase-2 dependency: colonia is a free-text label with no
-// geometry, so address validation must land on an AGEB polygon. ST_Contains
+// geometry, so address validation must land on an AGEB polygon. ST_Intersects
 // against ageb_polygons (81k MultiPolygons, GIST-indexed) resolves a
 // geocoded point to the 13-char (urban) / 9-char (rural) cvegeo plus the
 // 5-digit cve_mun the analytics endpoints key on.
@@ -5111,6 +5158,9 @@ const MX_LAT_MAX = 33.0;
 const MX_LON_MIN = -118.6;
 const MX_LON_MAX = -86.5;
 
+// #71: ST_Intersects includes the boundary, so a point on a shared AGEB edge
+// resolves (the Contains predicate excluded it -> 404); ORDER BY cvegeo makes
+// the pick between the touching AGEBs deterministic.
 function resolveAgebSql(lat: string, lon: string): string {
   return `
 SELECT json_agg(row_to_json(r)) FROM (
@@ -5119,7 +5169,8 @@ SELECT json_agg(row_to_json(r)) FROM (
     NULLIF(TRIM(ambito), '') AS ambito,
     (cve_ent || cve_mun) AS cve_mun
   FROM ageb_polygons
-  WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326))
+  WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326))
+  ORDER BY cvegeo
   LIMIT 1
 ) r;
 `;
@@ -5186,7 +5237,9 @@ export async function resolveAgebHandler(
     cve_mun: row.cve_mun,
   };
   // Polygons are static between Marco Geoestadístico releases — long cache.
-  c.header("Cache-Control", "public, max-age=86400");
+  // private (#26): the URL carries the caller's geocode, which must never be
+  // stored by a shared cache.
+  c.header("Cache-Control", "private, max-age=86400");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }

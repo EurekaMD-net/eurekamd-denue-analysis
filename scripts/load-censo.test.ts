@@ -157,6 +157,25 @@ describe("loadCenso (orchestration)", () => {
     expect(cpArgs[3]).toBe("supabase-db:/tmp/iter.csv");
   });
 
+  it("post-load creates the (cve_mun, loc) locality index censo_localidades needs (#118)", async () => {
+    stubHeader("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
+    mockExec
+      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // create
+      .mockReturnValueOnce("") // docker cp
+      .mockReturnValueOnce("COPY 195662\n") // \copy
+      .mockReturnValueOnce("") // rm /tmp/iter.csv
+      .mockReturnValueOnce("ALTER TABLE\nCREATE INDEX\n") // post-load
+      .mockReturnValueOnce("195662\n") // count censo_iter
+      .mockReturnValueOnce("2469\n"); // count censo_municipios
+    await loadCenso({ csvPath: "/tmp/iter.csv", dbContainer: "supabase-db" });
+    const postLoad = mockExec.mock.calls
+      .map((c) => (c[1] as string[]).at(-1) ?? "")
+      .find((sql) => sql.includes("CREATE OR REPLACE VIEW censo_municipios"));
+    expect(postLoad).toContain(
+      "CREATE INDEX idx_censo_iter_cve_mun_loc ON censo_iter(cve_mun, loc) WHERE loc <> '0000' AND mun <> '000';",
+    );
+  });
+
   it("cleans up the in-container temp file even when \\copy fails", async () => {
     stubHeader("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
     mockExec.mockImplementation((_bin: string, args: string[]) => {

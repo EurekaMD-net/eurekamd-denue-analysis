@@ -315,7 +315,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "Censo",
     grain: "muni",
     type: "numeric_pct",
-    description: "Población económicamente activa / pob ≥15 años.",
+    description: "Población económicamente activa / pob ≥12 años.",
     endpoints: { "locust-muni": "pct_pea" },
   },
   {

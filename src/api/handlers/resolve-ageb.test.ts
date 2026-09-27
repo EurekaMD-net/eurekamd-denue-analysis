@@ -48,7 +48,14 @@ describe("GET /resolve/ageb", () => {
     // point goes into ST_MakePoint as (lon, lat) — pin the order
     const sql = mockExec.mock.calls[0]![1].at(-1) as string;
     expect(sql).toContain("ST_MakePoint(-99.1332, 19.4326)");
-    expect(sql).toContain("ST_Contains");
+    // #71: boundary points must resolve (ST_Contains excludes the boundary)
+    // and the pick between two touching AGEBs must be deterministic.
+    expect(sql).toContain("ST_Intersects(geom, ST_SetSRID(ST_MakePoint(");
+    expect(sql).not.toContain("ST_Contains");
+    expect(sql).toMatch(/ORDER BY cvegeo\s+LIMIT 1/);
+    // #26: the URL carries the caller's geocode — never shared-cacheable.
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=86400");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
   it("passes rural 9-char cvegeos through and preserves ambito", async () => {

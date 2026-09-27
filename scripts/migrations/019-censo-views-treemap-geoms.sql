@@ -1,34 +1,33 @@
--- v0.2.10 — Censo 2020 wider variable surface + locality grain.
+-- 019: censo view repairs, deterministic national treemap, AGEB geometry
+-- repair (audit #59-#73/#118/#124 package P19, 2026-09-26).
 --
--- Apply once after Censo ITER is loaded:
---   docker exec -i supabase-db psql -U postgres -d postgres < scripts/migrate-censo-views.sql
+-- 1. censo_municipios gains p_12ymas as its LAST column (CREATE OR REPLACE
+--    can only append). /analytics/locust-muni now computes
+--    pct_pea = pea / p_12ymas: Censo PEA covers ages 12+ (#67).
+-- 2. censo_localidades: cve_mun is the raw censo_iter column and
+--    cve_loc = cve_mun || loc (no LPAD), so the new partial index serves
+--    localities-by-municipio / locality-detail instead of a Parallel Seq
+--    Scan over 195k rows (#118); INEGI's 9998/9999 "Localidades de una/dos
+--    viviendas" buckets are excluded (#68). Names and types are unchanged,
+--    so CREATE OR REPLACE keeps the denue_sage grant.
+-- 3. mv_national_treemap is rebuilt: only entidades 01-32 (a stray '50'
+--    made a 33rd tile) and a deterministic modal IRS grade
+--    (COUNT DESC, SUM(pob_total) DESC, irs_grado; NULL grade excluded) so a
+--    tie (Colima today) cannot flip between refreshes (#63/#124).
+-- 4. The 22 invalid ageb_polygons geometries (ring self-intersection) are
+--    repaired with ST_MakeValid, kept MultiPolygon (#71). Dry run
+--    2026-09-26: 22/22 valid non-empty MultiPolygons, max area delta 3e-17.
+-- 5. CREATE INDEX CONCURRENTLY runs last, outside the transaction (it
+--    cannot run inside one).
 --
--- Idempotent: CREATE OR REPLACE for both views. No data movement.
--- censo_iter raw has 287 cols; v0.2.x exposed 14 in censo_municipios. This
--- migration extends censo_municipios to ~50 cols (religion / language /
--- migration / assets / education detail / civil status / disability) and
--- adds censo_localidades (~193k rows, sub-municipal grain).
+-- The view bodies are copied verbatim from scripts/migrate-censo-views.sql
+-- and scripts/perf-matviews.sql (the canonical definitions) — edit those
+-- first and keep this file in sync.
 --
--- Coverage note: v0.2.10 ships 2 endpoints reading censo_localidades but
--- ZERO endpoints reading the new muni-level extended cols. Those cols are
--- staged for a future /analytics/municipio-detail handler — exposing them
--- without a handler is intentional (the schema migration is reversible
--- only via DROP+CREATE; better to land it once and consume incrementally).
---
--- INEGI suppression sentinel is 'N/D' (152 locality rows in 2020 ITER on
--- privacy-protected fields). Every numeric cast is wrapped:
---   NULLIF(NULLIF(col, ''), 'N/D')::int    -- counts
---   NULLIF(NULLIF(col, ''), 'N/D')::numeric -- ratios / averages
--- Without both NULLIFs the cast throws on the first sentinel row and the
--- view becomes unqueryable. Mirrors the v0.2.6 CONEVAL '*' precedent.
+-- Idempotent. Apply:
+--   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/migrations/019-censo-views-treemap-geoms.sql
 
--- =============================================================================
--- censo_municipios — extended (additive only; existing consumers unaffected)
--- =============================================================================
--- Filter loc='0000' AND mun<>'000' selects the 2,469 muni-rolled rows
--- (excludes the 32 entidad-rolled rows where mun='000' AND loc='0000').
--- All 6 existing analytics consumers SELECT explicit fields from cm — none
--- use SELECT *, so adding columns is a pure superset change.
+BEGIN;
 
 CREATE OR REPLACE VIEW censo_municipios AS
 SELECT
@@ -128,38 +127,6 @@ SELECT
 FROM censo_iter
 WHERE loc = '0000' AND mun <> '000';
 
--- =============================================================================
--- censo_localidades — locality-grain (v0.2.10 NEW)
--- =============================================================================
--- One row per (entidad, mun, loc) where loc is a real INEGI locality.
--- ~193k rows (vs 2,469 munis). Localities range from 1-pop ranchos to
--- 1.8M-pop cities. tamloc 1-14 size code (1=1-249, 14=1M+).
---
--- Key derivations (loc/mun/entidad in censo_iter are zero-padded text;
--- verified 2026-09-26: 0 unpadded rows, cve_mun = entidad||mun everywhere):
---   cve_loc = cve_mun || loc(4) — 9-char DGIS-style
---   cve_mun = censo_iter's generated cve_mun column — joins to
---             censo_municipios. Raw columns (not LPAD expressions) so the
---             idx_censo_iter_cve_mun_loc index serves lookups (audit #118:
---             the LPAD form seq-scanned all 195k rows, ~0.5 s per call).
---
--- Filter excludes the 2 rolled-up rows (loc='0000' AND mun<>'000' = muni
--- total; loc='0000' AND mun='000' = entidad total) and INEGI's 9998/9999
--- buckets ("Localidades de una/dos viviendas" — aggregates of many tiny
--- places, not localities; audit #68).
---
--- INEGI suppresses small localities for privacy: pobtot is always
--- emitted; derived fields (religion, language, assets) become 'N/D' when
--- the locality has fewer than ~50 households. Same NULLIF guards as muni.
---
--- Geocoded via censo_iter.{longitud,latitud,altitud} — these come as
--- numeric strings in the raw load. For localities with only 1-2 households
--- INEGI sometimes ships these as 'N/D' too. Cast guards apply.
-
--- CREATE OR REPLACE keeps grants (names and types are unchanged). Postgres
--- doesn't allow dropping or renaming columns on a replacement: add columns
--- only at the end of the SELECT; reach for DROP+CREATE only when removing or
--- renaming, grep consumers first, and re-GRANT SELECT to denue_sage.
 CREATE OR REPLACE VIEW censo_localidades AS
 SELECT
   -- ─── Identity ───────────────────────────────────────────────────────────
@@ -239,117 +206,62 @@ SELECT
 FROM censo_iter
 WHERE loc <> '0000' AND mun <> '000' AND loc NOT IN ('9998', '9999');
 
--- =============================================================================
--- censo_entidades — state-grain (v0.2.10 follow-on, 2026-05-09)
--- =============================================================================
--- One row per entidad (32 rows). Censo ITER raw has 33 rolled rows where
--- mun='000' AND loc='0000' — 32 entidades plus a national-total row with
--- entidad='00' (nom_ent='Total nacional'). The national row is excluded
--- here; expose it via a separate /analytics/national-detail endpoint if
--- ever needed (out of scope this bundle).
---
--- Same demographic surface as censo_municipios. Drops muni-grain identity
--- (cve_mun, mun, nom_mun); adds cve_ent (=entidad) for clean joining.
--- nom_ent already lives at this grain — no append-at-end needed.
---
--- Suppression: entidad-grain rolls cover millions of households per row,
--- so 'N/D' essentially never fires. NULLIF guards still applied for
--- defensive parity with sibling views.
-
-CREATE OR REPLACE VIEW censo_entidades AS
+DROP MATERIALIZED VIEW IF EXISTS mv_national_treemap;
+CREATE MATERIALIZED VIEW mv_national_treemap AS
+WITH entidad_counts AS (
+  SELECT entidad, COUNT(*)::bigint AS establecimientos
+  FROM establecimientos
+  -- audit #124: only the 32 real entidades (a stray '50' made a 33rd tile).
+  WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
+  GROUP BY entidad
+),
+entidad_irs AS (
+  SELECT
+    LEFT(cve_mun, 2) AS entidad,
+    irs_grado,
+    COUNT(*)::int AS muns_with_grade,
+    -- audit #63/#124: deterministic tiebreak (population, then name) so a
+    -- tied mode cannot flip between refreshes; NULL grade never wins.
+    ROW_NUMBER() OVER (
+      PARTITION BY LEFT(cve_mun, 2)
+      ORDER BY COUNT(*) DESC, SUM(pob_total) DESC, irs_grado
+    ) AS rn
+  FROM coneval_irs_municipal
+  WHERE irs_grado IS NOT NULL
+  GROUP BY 1, 2
+),
+entidad_pobreza AS (
+  SELECT
+    LEFT(cve_mun, 2) AS entidad,
+    ROUND(
+      SUM(pobreza_pct * COALESCE(poblacion, 0))::numeric
+      / NULLIF(SUM(COALESCE(poblacion, 0)), 0),
+      2
+    ) AS pobreza_pct_promedio
+  FROM coneval_pobreza_municipal
+  GROUP BY 1
+)
 SELECT
-  -- ─── Identity ───────────────────────────────────────────────────────────
-  entidad AS cve_ent,
-  entidad,
-  nom_ent,
+  ec.entidad,
+  ec.establecimientos,
+  ei.irs_grado AS modal_irs_grado,
+  ep.pobreza_pct_promedio
+FROM entidad_counts ec
+LEFT JOIN entidad_irs ei
+  ON ei.entidad = ec.entidad AND ei.rn = 1
+LEFT JOIN entidad_pobreza ep
+  ON ep.entidad = ec.entidad;
 
-  -- ─── Population ─────────────────────────────────────────────────────────
-  NULLIF(NULLIF(pobtot,    ''), 'N/D')::int     AS pobtot,
-  NULLIF(NULLIF(pobfem,    ''), 'N/D')::int     AS pobfem,
-  NULLIF(NULLIF(pobmas,    ''), 'N/D')::int     AS pobmas,
-  NULLIF(NULLIF(p_60ymas,  ''), 'N/D')::int     AS p_60ymas,
-  NULLIF(NULLIF(p_15ymas,  ''), 'N/D')::int     AS p_15ymas,
-  NULLIF(NULLIF(p_18ymas,  ''), 'N/D')::int     AS p_18ymas,
-  NULLIF(NULLIF(pea,       ''), 'N/D')::int     AS pea,
-  NULLIF(NULLIF(pocupada,  ''), 'N/D')::int     AS pocupada,
-  NULLIF(NULLIF(graproes,  ''), 'N/D')::numeric AS graproes,
-  NULLIF(NULLIF(tvivhab,   ''), 'N/D')::int     AS tvivhab,
-  NULLIF(NULLIF(tvivpar,   ''), 'N/D')::int     AS tvivpar,
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_treemap_entidad_unique
+  ON mv_national_treemap(entidad);
 
-  -- ─── Religion ───────────────────────────────────────────────────────────
-  NULLIF(NULLIF(pcatolica,  ''), 'N/D')::int    AS pcatolica,
-  NULLIF(NULLIF(pro_crieva, ''), 'N/D')::int    AS pro_crieva,
-  NULLIF(NULLIF(potras_rel, ''), 'N/D')::int    AS potras_rel,
-  NULLIF(NULLIF(psin_relig, ''), 'N/D')::int    AS psin_relig,
+GRANT SELECT ON mv_national_treemap TO denue_sage;
 
-  -- ─── Indigenous & Afro ──────────────────────────────────────────────────
-  NULLIF(NULLIF(p3ym_hli, ''), 'N/D')::int      AS p3ym_hli,
-  NULLIF(NULLIF(p3hlinhe, ''), 'N/D')::int      AS p3hlinhe,
-  NULLIF(NULLIF(p3hli_he, ''), 'N/D')::int      AS p3hli_he,
-  NULLIF(NULLIF(phog_ind, ''), 'N/D')::int      AS phog_ind,
-  NULLIF(NULLIF(pob_afro, ''), 'N/D')::int      AS pob_afro,
+UPDATE ageb_polygons
+SET geom = ST_Multi(ST_CollectionExtract(ST_MakeValid(geom), 3))
+WHERE NOT ST_IsValid(geom);
 
-  -- ─── Migration ──────────────────────────────────────────────────────────
-  NULLIF(NULLIF(pnacent,  ''), 'N/D')::int      AS pnacent,
-  NULLIF(NULLIF(pnacoe,   ''), 'N/D')::int      AS pnacoe,
-  NULLIF(NULLIF(pres2015, ''), 'N/D')::int      AS pres2015,
-  NULLIF(NULLIF(presoe15, ''), 'N/D')::int      AS presoe15,
+COMMIT;
 
-  -- ─── Education detail ───────────────────────────────────────────────────
-  NULLIF(NULLIF(p15ym_an,  ''), 'N/D')::int     AS p15ym_an,
-  NULLIF(NULLIF(p15ym_se,  ''), 'N/D')::int     AS p15ym_se,
-  NULLIF(NULLIF(p15pri_in, ''), 'N/D')::int     AS p15pri_in,
-  NULLIF(NULLIF(p15pri_co, ''), 'N/D')::int     AS p15pri_co,
-  NULLIF(NULLIF(p15sec_in, ''), 'N/D')::int     AS p15sec_in,
-  NULLIF(NULLIF(p15sec_co, ''), 'N/D')::int     AS p15sec_co,
-  NULLIF(NULLIF(p18ym_pb,  ''), 'N/D')::int     AS p18ym_pb,
-
-  -- ─── Civil status ───────────────────────────────────────────────────────
-  NULLIF(NULLIF(p12ym_solt, ''), 'N/D')::int    AS p12ym_solt,
-  NULLIF(NULLIF(p12ym_casa, ''), 'N/D')::int    AS p12ym_casa,
-  NULLIF(NULLIF(p12ym_sepa, ''), 'N/D')::int    AS p12ym_sepa,
-
-  -- ─── Disability summary ─────────────────────────────────────────────────
-  NULLIF(NULLIF(pcon_disc, ''), 'N/D')::int     AS pcon_disc,
-  NULLIF(NULLIF(pcon_limi, ''), 'N/D')::int     AS pcon_limi,
-  NULLIF(NULLIF(psind_lim, ''), 'N/D')::int     AS psind_lim,
-
-  -- ─── Health coverage ────────────────────────────────────────────────────
-  NULLIF(NULLIF(psinder,     ''), 'N/D')::int   AS psinder,
-  NULLIF(NULLIF(pder_ss,     ''), 'N/D')::int   AS pder_ss,
-  NULLIF(NULLIF(pder_imss,   ''), 'N/D')::int   AS pder_imss,
-  NULLIF(NULLIF(pder_iste,   ''), 'N/D')::int   AS pder_iste,
-  NULLIF(NULLIF(pder_segp,   ''), 'N/D')::int   AS pder_segp,
-  NULLIF(NULLIF(pder_imssb,  ''), 'N/D')::int   AS pder_imssb,
-  NULLIF(NULLIF(pafil_ipriv, ''), 'N/D')::int   AS pafil_ipriv,
-
-  -- ─── Household assets ───────────────────────────────────────────────────
-  NULLIF(NULLIF(vph_inter,  ''), 'N/D')::int    AS vph_inter,
-  NULLIF(NULLIF(vph_autom,  ''), 'N/D')::int    AS vph_autom,
-  NULLIF(NULLIF(vph_refri,  ''), 'N/D')::int    AS vph_refri,
-  NULLIF(NULLIF(vph_lavad,  ''), 'N/D')::int    AS vph_lavad,
-  NULLIF(NULLIF(vph_hmicro, ''), 'N/D')::int    AS vph_hmicro,
-  NULLIF(NULLIF(vph_moto,   ''), 'N/D')::int    AS vph_moto,
-  NULLIF(NULLIF(vph_bici,   ''), 'N/D')::int    AS vph_bici,
-  NULLIF(NULLIF(vph_radio,  ''), 'N/D')::int    AS vph_radio,
-  NULLIF(NULLIF(vph_tv,     ''), 'N/D')::int    AS vph_tv,
-  NULLIF(NULLIF(vph_pc,     ''), 'N/D')::int    AS vph_pc,
-  NULLIF(NULLIF(vph_telef,  ''), 'N/D')::int    AS vph_telef,
-  NULLIF(NULLIF(vph_cel,    ''), 'N/D')::int    AS vph_cel,
-  NULLIF(NULLIF(vph_stvp,   ''), 'N/D')::int    AS vph_stvp,
-  NULLIF(NULLIF(vph_spmvpi, ''), 'N/D')::int    AS vph_spmvpi,
-  NULLIF(NULLIF(vph_cvj,    ''), 'N/D')::int    AS vph_cvj,
-  NULLIF(NULLIF(vph_snbien, ''), 'N/D')::int    AS vph_snbien
-FROM censo_iter
-WHERE mun = '000' AND loc = '0000' AND entidad <> '00';
-
--- Smoke-tests (manual; run after applying):
---   SELECT cve_mun, pobtot, pcatolica, vph_inter FROM censo_municipios WHERE cve_mun='09015';
---   SELECT count(*) FROM censo_localidades;
---   SELECT cve_loc, nom_loc, pobtot, tamloc FROM censo_localidades
---     WHERE cve_mun='09015' ORDER BY pobtot DESC NULLS LAST LIMIT 10;
---   SELECT cve_loc, nom_loc, pobtot FROM censo_localidades
---     WHERE pcatolica IS NULL AND pobtot > 0 LIMIT 5;  -- N/D suppression hits
---   SELECT count(*), MIN(pobtot), MAX(pobtot) FROM censo_entidades;
---   SELECT cve_ent, nom_ent, pobtot, pcatolica, vph_inter FROM censo_entidades
---     WHERE cve_ent='09';  -- CDMX
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_censo_iter_cve_mun_loc
+  ON censo_iter(cve_mun, loc) WHERE loc <> '0000' AND mun <> '000';

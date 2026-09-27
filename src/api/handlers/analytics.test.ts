@@ -244,6 +244,13 @@ describe("GET /analytics/national-treemap", () => {
     expect(liveSql).toMatch(/coneval_irs_municipal/);
     expect(liveSql).toMatch(/coneval_pobreza_municipal/);
     expect(liveSql).toMatch(/ROW_NUMBER\(\) OVER/);
+    // #63/#124: deterministic modal grade on ties + only entidades 01-32,
+    // same as the mv_national_treemap DDL.
+    expect(liveSql).toContain(
+      "ORDER BY COUNT(*) DESC, SUM(pob_total) DESC, irs_grado",
+    );
+    expect(liveSql).toContain("WHERE irs_grado IS NOT NULL");
+    expect(liveSql).toContain("WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'");
   });
 });
 
@@ -544,6 +551,26 @@ describe("GET /analytics/top-sectors?entidad=", () => {
         })
       ).status,
     ).toBe(400);
+    // #21: shared parseLimit — parseInt used to accept these as 5 / 2.
+    for (const bad of ["5abc", "2.9", "10;DROP"]) {
+      const res = await app.request(
+        `/analytics/top-sectors?entidad=09&limit=${encodeURIComponent(bad)}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty limit as absent (#65)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/top-sectors?entidad=09&limit=", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    expect(args[args.length - 1]).toMatch(/LIMIT 10\b/);
   });
 
   it("uses indexed sector_actividad_id, not SUBSTR", async () => {
@@ -766,6 +793,19 @@ describe("GET /analytics/risk-summary", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("validation.ano");
+  });
+
+  it("rejects baseline_ano >= ano with 400 / validation.baseline_ano (#65)", async () => {
+    const app = createServer(CONFIG);
+    for (const q of ["ano=2020&baseline_ano=2025", "ano=2022&baseline_ano=2022"]) {
+      const res = await app.request(`/analytics/risk-summary?entidad=09&${q}`, {
+        headers: AUTH,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("validation.baseline_ano");
+    }
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it("rejects invalid baseline_ano with 400 / validation.baseline_ano", async () => {
@@ -1147,7 +1187,7 @@ describe("GET /analytics/locust-ageb", () => {
       pobtot_ageb: null,
       grado_rezago_ageb: null,
     });
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
   });
 
   it("inlines cve_mun verbatim and LEFT JOINs the two AGEB views", async () => {
@@ -2262,6 +2302,43 @@ describe("GET /analytics/ageb-detail", () => {
     expect(res.status).toBe(200);
   });
 
+  it("rural 9-char cvegeo: no containing-locality lookup, loc_name/loc_population null (#59)", async () => {
+    mockExec.mockReturnValueOnce(
+      agebDetailPayload({
+        id: [
+          {
+            cvegeo: "010020029",
+            cve_ent: "01",
+            cve_mun: "002",
+            cve_loc: "0000",
+            cve_ageb: "0029",
+            ambito: "Rural",
+            area_km2: "12.5",
+            centroid_lat: "22.1",
+            centroid_lon: "-102.3",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ],
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/ageb-detail?cvegeo=010020029", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AgebDetailResult;
+    expect(body.loc_name).toBeNull();
+    expect(body.loc_population).toBeNull();
+    const sql = mockExec.mock.calls[0]![1].at(-1) as string;
+    // slice(5, 9) of a rural key is the AGEB code ('0029'), which collides
+    // with an unrelated censo_iter locality — the query must not run.
+    expect(sql).toContain("'loc_meta', NULL,");
+    expect(sql).not.toContain("loc = '0029'");
+  });
+
   it("returns 404 when AGEB not in ageb_polygons", async () => {
     mockExec.mockReturnValueOnce(agebDetailPayload({ id: null }));
     const app = createServer(CONFIG);
@@ -3104,6 +3181,29 @@ describe("GET /analytics/opportunity-by-colonia (v0.2.5)", () => {
     }
   });
 
+  it("breaks numeric-order ties by colonia so LIMIT is deterministic (#70)", async () => {
+    const app = createServer(CONFIG);
+    for (const orderBy of ["score", "target_count", "total_estab"] as const) {
+      mockExec.mockClear();
+      mockExec.mockReturnValue(JSON.stringify([]));
+      await app.request(
+        `/analytics/opportunity-by-colonia?cve_mun=09015&target_scian=464111,464112&order_by=${orderBy}&limit=50`,
+        { headers: AUTH },
+      );
+      const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+      const sql = args?.[args.length - 1] ?? "";
+      const lines = sql.split("\n");
+      const outerLine = lines.find((l) =>
+        l.includes("json_agg(row_to_json(r) ORDER BY"),
+      );
+      const innerLine = lines.find((l) => /^\s*ORDER BY /.test(l));
+      expect(outerLine, `order_by=${orderBy}`).toContain(", r.colonia ASC)");
+      expect(innerLine, `order_by=${orderBy}`).toMatch(
+        /, UPPER\(TRIM\(colonia\)\) ASC$/,
+      );
+    }
+  });
+
   it("normalizes colonia case via UPPER+TRIM in SQL (collapse spelling drift)", async () => {
     mockExec.mockReturnValue(JSON.stringify([]));
     const app = createServer(CONFIG);
@@ -3248,6 +3348,19 @@ describe("GET /analytics/colonias-by-municipio (v0.2.5)", () => {
     expect(sql).toContain("UPPER(TRIM(colonia))");
     expect(sql).toContain("colonia IS NOT NULL");
     expect(sql).toContain("TRIM(colonia) != ''");
+  });
+
+  it("breaks num_establecimientos ties by colonia, inner and outer (#70)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/colonias-by-municipio?cve_mun=09014", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    const sql = args?.[args.length - 1] ?? "";
+    expect(
+      sql.match(/ORDER BY num_establecimientos DESC, colonia ASC/g),
+    ).toHaveLength(2);
   });
 
   it("respects MAX_LIMIT cap (201 → 400)", async () => {
@@ -3845,7 +3958,7 @@ describe("GET /analytics/licensed-pharmacies-by-municipio (v0.2.8)", () => {
       "/analytics/licensed-pharmacies-by-municipio?cve_mun=09015",
       { headers: AUTH },
     );
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
@@ -3975,6 +4088,30 @@ describe("GET /analytics/manzanas-by-ageb (v0.2.9)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400s a rural 9-char cvegeo instead of a silent empty 200 (#73)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=010020029",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.cvegeo_rural_no_manzanas");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty limit as absent, like ano= (#65)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/manzanas-by-ageb?cvegeo=0900700012475&limit=",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
+    expect(args?.[args.length - 1]).toMatch(/LIMIT 30\b/);
+  });
+
   it("returns manzanas ordered by pobtot by default", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
@@ -4066,7 +4203,7 @@ describe("GET /analytics/manzanas-by-ageb (v0.2.9)", () => {
       "/analytics/manzanas-by-ageb?cvegeo=0900700012475",
       { headers: AUTH },
     );
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
@@ -4177,7 +4314,9 @@ describe("GET /analytics/airports-by-municipio", () => {
   });
 
   it("returns empty airports array for muni without an airport", async () => {
-    mockExec.mockReturnValueOnce(JSON.stringify([]));
+    mockExec.mockReturnValueOnce(
+      JSON.stringify({ latest_ano: 2026, airports: [] }),
+    );
     const app = createServer(CONFIG);
     const res = await app.request(
       "/analytics/airports-by-municipio?cve_mun=09007",
@@ -4188,21 +4327,23 @@ describe("GET /analytics/airports-by-municipio", () => {
     expect(body.cve_mun).toBe("09007");
     expect(body.cve_ent).toBe("09");
     expect(body.airports).toEqual([]);
+    expect(body.latest_ano).toBe(2026);
+    expect(body.num_airports_active_latest).toBe(0);
     expect(body.num_airports_active_2026).toBe(0);
     expect(body.mar_flights_recent_avg).toBe(0);
   });
 
   it("returns full per-airport breakdown with growth rate vs 2019", async () => {
     mockExec.mockReturnValueOnce(
-      JSON.stringify([
+      JSON.stringify({ latest_ano: 2026, airports: [
         {
           airport_name: "CIUDAD DE MÉXICO/MEXICO CITY",
-          mar_flights_2026: 25606,
+          mar_flights_latest: 25606,
           mar_flights_recent_avg: 26139,
           mar_flights_2019: 37671,
           pct_change_vs_2019: -32.0,
         },
-      ]),
+      ] }),
     );
     const app = createServer(CONFIG);
     const res = await app.request(
@@ -4215,6 +4356,7 @@ describe("GET /analytics/airports-by-municipio", () => {
     expect(body.airports).toHaveLength(1);
     expect(body.airports[0]).toMatchObject({
       airport_name: "CIUDAD DE MÉXICO/MEXICO CITY",
+      mar_flights_latest: 25606,
       mar_flights_2026: 25606,
       mar_flights_recent_avg: 26139,
       mar_flights_2019: 37671,
@@ -4226,15 +4368,15 @@ describe("GET /analytics/airports-by-municipio", () => {
 
   it("handles new-airport case (no 2019 baseline) without dividing by zero", async () => {
     mockExec.mockReturnValueOnce(
-      JSON.stringify([
+      JSON.stringify({ latest_ano: 2026, airports: [
         {
           airport_name: "SANTA LUCÍA",
-          mar_flights_2026: 5925,
+          mar_flights_latest: 5925,
           mar_flights_recent_avg: 5493,
           mar_flights_2019: null,
           pct_change_vs_2019: null,
         },
-      ]),
+      ] }),
     );
     const app = createServer(CONFIG);
     const res = await app.request(
@@ -4249,22 +4391,22 @@ describe("GET /analytics/airports-by-municipio", () => {
 
   it("aggregates multi-airport munis (e.g. Monterrey + Del Norte)", async () => {
     mockExec.mockReturnValueOnce(
-      JSON.stringify([
+      JSON.stringify({ latest_ano: 2026, airports: [
         {
           airport_name: "MONTERREY",
-          mar_flights_2026: 10928,
+          mar_flights_latest: 10928,
           mar_flights_recent_avg: 9320,
           mar_flights_2019: 9058,
           pct_change_vs_2019: 20.6,
         },
         {
           airport_name: "DEL NORTE",
-          mar_flights_2026: 3157,
+          mar_flights_latest: 3157,
           mar_flights_recent_avg: 3157,
           mar_flights_2019: null,
           pct_change_vs_2019: null,
         },
-      ]),
+      ] }),
     );
     const app = createServer(CONFIG);
     const res = await app.request(
@@ -4279,7 +4421,9 @@ describe("GET /analytics/airports-by-municipio", () => {
   });
 
   it("composes SQL with ORDER BY recent_avg DESC + cve_mun literal interpolation", async () => {
-    mockExec.mockReturnValueOnce(JSON.stringify([]));
+    mockExec.mockReturnValueOnce(
+      JSON.stringify({ latest_ano: 2026, airports: [] }),
+    );
     const app = createServer(CONFIG);
     await app.request("/analytics/airports-by-municipio?cve_mun=23005", {
       headers: AUTH,
@@ -4289,8 +4433,44 @@ describe("GET /analytics/airports-by-municipio", () => {
     expect(sql).toContain("FROM aeropuertos_movements_yearly");
     expect(sql).toContain("WHERE cve_mun = '23005'");
     expect(sql).toMatch(/ORDER BY r\.mar_flights_recent_avg DESC NULLS LAST/);
+    // #72: the current year and 3-yr window come from MAX(ano), not literals.
+    expect(sql).toContain("SELECT MAX(ano) AS ano FROM aeropuertos_movements_yearly");
+    expect(sql).toContain(
+      "ano BETWEEN (SELECT ano FROM latest) - 2 AND (SELECT ano FROM latest)",
+    );
+    expect(sql).not.toMatch(/2026|2024|2025/);
     // No SQL-injection escape — the cve_mun is gated by CVE_MUN_RE before SQL composition
     expect(sql).not.toMatch(/'23005';.*--/);
+  });
+
+  it("reports the data's latest year, not a hardcoded 2026 (#72)", async () => {
+    mockExec.mockReturnValueOnce(
+      JSON.stringify({
+        latest_ano: 2027,
+        airports: [
+          {
+            airport_name: "CANCUN",
+            mar_flights_latest: 21000,
+            mar_flights_recent_avg: 20500,
+            mar_flights_2019: 17425,
+            pct_change_vs_2019: 20.5,
+          },
+        ],
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/airports-by-municipio?cve_mun=23005",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as AirportsByMunicipioResult;
+    expect(body.latest_ano).toBe(2027);
+    expect(body.num_airports_active_latest).toBe(1);
+    // Legacy names stay as aliases of the latest-year values.
+    expect(body.num_airports_active_2026).toBe(1);
+    expect(body.airports[0]?.mar_flights_latest).toBe(21000);
+    expect(body.airports[0]?.mar_flights_2026).toBe(21000);
   });
 });
 
@@ -4481,7 +4661,7 @@ describe("GET /analytics/localities-by-municipio (v0.2.10)", () => {
       "/analytics/localities-by-municipio?cve_mun=09007",
       { headers: AUTH },
     );
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
@@ -4617,7 +4797,7 @@ describe("GET /analytics/locality-detail (v0.2.10)", () => {
     mockExec.mockReturnValue(
       JSON.stringify([
         {
-          cve_loc: "090079999",
+          cve_loc: "090070123",
           cve_mun: "09007",
           entidad: "09",
           nom_loc: "Rancho El Pequeño",
@@ -4672,7 +4852,7 @@ describe("GET /analytics/locality-detail (v0.2.10)", () => {
     );
     const app = createServer(CONFIG);
     const res = await app.request(
-      "/analytics/locality-detail?cve_loc=090079999",
+      "/analytics/locality-detail?cve_loc=090070123",
       { headers: AUTH },
     );
     expect(res.status).toBe(200);
@@ -4702,7 +4882,23 @@ describe("GET /analytics/locality-detail (v0.2.10)", () => {
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
     expect(sql).toContain("FROM censo_localidades");
-    expect(sql).toContain("WHERE cve_loc = '220140001'");
+    // #118: sargable raw columns, not the concatenated cve_loc.
+    expect(sql).toContain("WHERE cve_mun = '22014' AND loc = '0001'");
+    expect(sql).not.toContain("WHERE cve_loc =");
+  });
+
+  it("404s INEGI 9998/9999 pseudo-localities without touching postgres (#68)", async () => {
+    const app = createServer(CONFIG);
+    for (const cveLoc of ["200679998", "200679999"]) {
+      const res = await app.request(
+        `/analytics/locality-detail?cve_loc=${cveLoc}`,
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { code?: string };
+      expect(body.code).toBe("locality.not_found");
+    }
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it("emits Cache-Control + Vary headers on success", async () => {
@@ -4767,7 +4963,7 @@ describe("GET /analytics/locality-detail (v0.2.10)", () => {
       "/analytics/locality-detail?cve_loc=090070001",
       { headers: AUTH },
     );
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
@@ -5149,7 +5345,7 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
     const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
       headers: AUTH,
     });
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
@@ -5525,7 +5721,7 @@ describe("GET /analytics/entidad-detail (v0.2.10)", () => {
     const res = await app.request("/analytics/entidad-detail?cve_ent=09", {
       headers: AUTH,
     });
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
@@ -8078,6 +8274,18 @@ describe("GET /analytics/locust-muni", () => {
     expect(sql).not.toContain("4659");
   });
 
+  it("computes pct_pea over p_12ymas, the Censo PEA age universe (#67)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-muni?entidad=09", { headers: AUTH });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "ROUND(cm.pea::numeric / NULLIF(cm.p_12ymas, 0) * 100, 2) AS pct_pea",
+    );
+    expect(sql).not.toContain("cm.p_15ymas");
+  });
+
   it("returns wide muni row joining every pre-aggregated source", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
@@ -8214,7 +8422,7 @@ describe("GET /analytics/locust-muni", () => {
     const res = await app.request("/analytics/locust-muni?entidad=09", {
       headers: AUTH,
     });
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=300");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 });
@@ -8273,7 +8481,7 @@ describe("GET /analytics/locust-estado", () => {
     const res = await app.request("/analytics/locust-estado", {
       headers: AUTH,
     });
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=3600");
     expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 

@@ -114,6 +114,8 @@ const POST_LOAD_SQL = `
 ALTER TABLE censo_iter ADD COLUMN cve_mun TEXT GENERATED ALWAYS AS (entidad || mun) STORED;
 CREATE INDEX idx_censo_iter_cve_mun ON censo_iter(cve_mun) WHERE loc = '0000';
 CREATE INDEX idx_censo_iter_level ON censo_iter(entidad, mun, loc);
+-- #118: serves censo_localidades lookups by cve_mun / (cve_mun, loc).
+CREATE INDEX idx_censo_iter_cve_mun_loc ON censo_iter(cve_mun, loc) WHERE loc <> '0000' AND mun <> '000';
 
 CREATE OR REPLACE VIEW censo_municipios AS
 SELECT

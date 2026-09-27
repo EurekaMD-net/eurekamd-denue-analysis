@@ -66,7 +66,8 @@ CREATE MATERIALIZED VIEW mv_national_treemap AS
 WITH entidad_counts AS (
   SELECT entidad, COUNT(*)::bigint AS establecimientos
   FROM establecimientos
-  WHERE entidad IS NOT NULL
+  -- audit #124: only the 32 real entidades (a stray '50' made a 33rd tile).
+  WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
   GROUP BY entidad
 ),
 entidad_irs AS (
@@ -74,11 +75,14 @@ entidad_irs AS (
     LEFT(cve_mun, 2) AS entidad,
     irs_grado,
     COUNT(*)::int AS muns_with_grade,
+    -- audit #63/#124: deterministic tiebreak (population, then name) so a
+    -- tied mode cannot flip between refreshes; NULL grade never wins.
     ROW_NUMBER() OVER (
       PARTITION BY LEFT(cve_mun, 2)
-      ORDER BY COUNT(*) DESC
+      ORDER BY COUNT(*) DESC, SUM(pob_total) DESC, irs_grado
     ) AS rn
   FROM coneval_irs_municipal
+  WHERE irs_grado IS NOT NULL
   GROUP BY 1, 2
 ),
 entidad_pobreza AS (
@@ -105,7 +109,8 @@ LEFT JOIN entidad_pobreza ep
 
 -- Audit W1-perf round-1 closure 2026-05-10: same posture as
 -- mv_sector_grade_matrix above — UNIQUE INDEX enables REFRESH
--- CONCURRENTLY. Verified: 33 rows / 33 unique entidades / 0 NULL.
+-- CONCURRENTLY. Verified: 33 rows / 33 unique entidades / 0 NULL
+-- (32 since the audit #124 entidad filter).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_treemap_entidad_unique
   ON mv_national_treemap(entidad);
 
