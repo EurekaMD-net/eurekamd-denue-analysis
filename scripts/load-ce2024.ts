@@ -252,6 +252,12 @@ CREATE INDEX idx_ce2024_mun_clase ON ce2024_municipal (clase);
 
 DROP INDEX IF EXISTS idx_ce2024_mun_estrato;
 CREATE INDEX idx_ce2024_mun_estrato ON ce2024_municipal (id_estrato);
+
+-- Audit #123: the per-entidad rollup lookup (sector IS NULL AND id_estrato
+-- IS NULL AND cve_ent = X) otherwise filters ~6.6k rows via the sector index.
+DROP INDEX IF EXISTS idx_ce2024_mun_ent_rollup;
+CREATE INDEX idx_ce2024_mun_ent_rollup ON ce2024_municipal (cve_ent)
+  WHERE sector IS NULL AND id_estrato IS NULL;
 `;
 
 /**

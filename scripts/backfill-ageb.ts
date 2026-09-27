@@ -16,7 +16,12 @@
  *          -f - < scripts/migrations/002-grants-lockdown.sql
  *      (for one table: ALTER TABLE ageb_polygons OWNER TO postgres;
  *       REVOKE ALL ON ageb_polygons FROM anon, authenticated, trustr_app;)
- *   3. Then run this backfill.
+ *   3. Re-create the cvegeo key (audit #120; ogr2ogr only makes the ogc_fid
+ *      PK and the GiST index, and an -append reload would otherwise
+ *      duplicate rows). If it fails on duplicates, the load doubled up:
+ *        CREATE UNIQUE INDEX IF NOT EXISTS <layer>_polygons_cvegeo_uq
+ *          ON <layer>_polygons (cvegeo);
+ *   4. Then run this backfill.
  *
  * The 4-char `cve_ageb` is NOT national-unique (the same "001A" appears in
  * many localidades) — we always store the full 13-char CVEGEO so it joins

@@ -121,15 +121,15 @@ describe("POST_LOAD_SQL", () => {
     expect(POST_LOAD_SQL).toMatch(/CREATE INDEX IF NOT EXISTS/);
   });
 
-  it("creates BOTH partial and non-partial cvegeo index (qa-audit C2)", () => {
-    // Partial: AGEB-level fast path. Non-partial: LEFT JOIN cab.cvegeo = a.cvegeo
-    // in agebFarmaciaOpportunitySql. Postgres planner doesn't always prove
-    // the partial index's predicate matches the LEFT JOIN, so the non-partial
-    // backup ensures the join is indexed regardless.
+  it("creates exactly one cvegeo index, the partial AGEB-level one (audit #141)", () => {
+    // The censo_ageb view's predicate implies the partial predicate, so it
+    // serves `cvegeo = X` and the agebFarmaciaOpportunitySql LEFT JOIN. The
+    // second idx_censo_ageb_raw_cvegeo duplicated it on live with 0 scans.
     expect(POST_LOAD_SQL).toMatch(
       /idx_censo_ageb_raw_cvegeo_ageb_only.*WHERE mza/s,
     );
-    expect(POST_LOAD_SQL).toMatch(/idx_censo_ageb_raw_cvegeo[^_]/);
+    expect(POST_LOAD_SQL).not.toMatch(/idx_censo_ageb_raw_cvegeo[^_]/);
+    expect(POST_LOAD_SQL.match(/ON censo_ageb_raw\(cvegeo\)/g)).toHaveLength(1);
   });
 
   it("carries no COMMIT of its own: it runs inside the reload's single transaction (qa-audit C3, audit #145)", () => {

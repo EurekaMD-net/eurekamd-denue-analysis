@@ -190,12 +190,12 @@ export function buildCensoAgebCreateTable(
  * no BEGIN/COMMIT of its own: an inner COMMIT would end the reload's
  * transaction early.
  *
- * qa-audit C2: added non-partial cvegeo index alongside the partial one.
- * The partial index `WHERE mza='000' AND ageb!='0000'` predicate doesn't
- * always match the censo_ageb view's predicate (which adds loc/mun
- * filters), and Postgres planner may fail predicate-implication checks.
- * The non-partial cvegeo index is the safe fallback for the LEFT JOIN
- * `cab.cvegeo = a.cvegeo` in agebFarmaciaOpportunitySql.
+ * Audit #141: only the partial cvegeo index. The censo_ageb view's
+ * predicate implies `mza='000' AND ageb!='0000'` (it only adds loc/mun
+ * filters), so the planner uses it for `cvegeo = X` and the LEFT JOIN
+ * `cab.cvegeo = a.cvegeo` in agebFarmaciaOpportunitySql. The second
+ * idx_censo_ageb_raw_cvegeo (qa-audit C2) was an identical partial index
+ * on live with 0 scans; migrations/020-indexes.sql drops it.
  *
  * qa-audit W4: censo_ageb view also defends against unexpected mza
  * sentinels (`'*'`, non-numeric). manzana view already filters mza!='*';
@@ -208,8 +208,6 @@ ALTER TABLE censo_ageb_raw
 
 CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_cvegeo_ageb_only
   ON censo_ageb_raw(cvegeo) WHERE mza = '000' AND ageb != '0000';
-CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_cvegeo
-  ON censo_ageb_raw(cvegeo);
 CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_level
   ON censo_ageb_raw(entidad, mun, loc, ageb, mza);
 

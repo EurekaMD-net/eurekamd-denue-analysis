@@ -53,7 +53,6 @@ GROUP BY 1, 2;
 -- 137 rows / 137 unique (scian, irs_grado) pairs / 0 NULL keys.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sgm_scian_irs
   ON mv_sector_grade_matrix(scian, irs_grado);
-CREATE INDEX idx_mv_sgm_scian ON mv_sector_grade_matrix(scian);
 CREATE INDEX idx_mv_sgm_irs ON mv_sector_grade_matrix(irs_grado);
 
 -- =============================================================================
@@ -150,10 +149,10 @@ FROM sesnsp_delitos_municipal
 WHERE cve_mun IS NOT NULL AND LENGTH(cve_mun) = 5
 GROUP BY cve_mun, ano;
 
-CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_dmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_dmy_unique ON mv_delitos_municipal_yearly(cve_mun, ano);
 
 
@@ -212,8 +211,8 @@ WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
   AND anio_ocur ~ '^[0-9]{4}$'
 GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
 
-CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_mmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_yearly(cve_mun, ano);

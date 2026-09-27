@@ -141,6 +141,14 @@ describe("POST_LOAD_SQL — ce2024_municipal materialized view", () => {
     );
   });
 
+  it("indexes the per-entidad rollup lookup on every rebuild (audit #123)", () => {
+    // analytics reads `WHERE sector IS NULL AND id_estrato IS NULL AND
+    // cve_ent = X`; the MV is DROP+CREATEd, so the index lives here too.
+    expect(POST_LOAD_SQL).toMatch(
+      /DROP INDEX IF EXISTS idx_ce2024_mun_ent_rollup;\s*CREATE INDEX idx_ce2024_mun_ent_rollup ON ce2024_municipal \(cve_ent\)\s*WHERE sector IS NULL AND id_estrato IS NULL;/,
+    );
+  });
+
   it("is idempotent — drops and recreates everything", () => {
     expect(POST_LOAD_SQL).toMatch(/DROP MATERIALIZED VIEW IF EXISTS/);
     expect(POST_LOAD_SQL).toMatch(/DROP INDEX IF EXISTS/);

@@ -80,9 +80,12 @@ CREATE TABLE IF NOT EXISTS establecimientos (
 -- Índices
 -- -----------------------------------------------------------------------------
 
--- Búsqueda por entidad/estado
-CREATE INDEX IF NOT EXISTS idx_estab_entidad
-  ON establecimientos(entidad);
+-- Búsqueda por entidad/estado. Audit #121/#135: covering index, so the
+-- per-entidad aggregates (municipios, locust-muni, top-sectors) are
+-- index-only scans; it replaces idx_estab_entidad (migrations/020-indexes.sql).
+CREATE INDEX IF NOT EXISTS idx_estab_ent_mun_cov
+  ON establecimientos(entidad, area_geo)
+  INCLUDE (clase_actividad_id, sector_actividad_id);
 
 -- Búsqueda por municipio dentro de entidad
 CREATE INDEX IF NOT EXISTS idx_estab_area_geo
@@ -110,10 +113,6 @@ CREATE INDEX IF NOT EXISTS idx_estab_subrama
 -- Índice espacial GIST para consultas geográficas
 CREATE INDEX IF NOT EXISTS idx_estab_geom
   ON establecimientos USING GIST(geom);
-
--- Índice para texto libre (nombre)
-CREATE INDEX IF NOT EXISTS idx_estab_nombre
-  ON establecimientos USING gin(to_tsvector('spanish', coalesce(nombre, '')));
 
 -- -----------------------------------------------------------------------------
 -- Trigger: actualizar updated_at automáticamente
