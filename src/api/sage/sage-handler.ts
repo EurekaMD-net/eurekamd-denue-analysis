@@ -235,7 +235,9 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           // ----- 2. Execute the route --------------------------------
           let columns: string[] = [];
           let rows: unknown[] = [];
-          let digestForNarrative: ReturnType<typeof buildDigest> = {
+          let digestForNarrative: ReturnType<typeof buildDigest> & {
+            truncated?: boolean;
+          } = {
             columns: [],
             row_count: 0,
             first_n_rows: [],
@@ -296,14 +298,18 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               return;
             }
             rows = result.data.rows.slice(0, cap);
-            const digest = buildDigest(rows);
+            const truncated = result.data.rows.length > cap;
+            const digest = {
+              ...buildDigest(rows),
+              ...(truncated ? { truncated } : {}),
+            };
             digestForNarrative = digest;
             columns = result.data.columns;
             send("table", {
               columns,
               rows,
               row_count: rows.length,
-              truncated: result.data.rows.length > cap,
+              truncated,
             });
           }
 
@@ -371,6 +377,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
                 row_count: digestForNarrative.row_count,
                 first_5_rows: digestForNarrative.first_n_rows.slice(0, 5),
                 numeric_stats: digestForNarrative.numeric_stats,
+                ...(digestForNarrative.truncated ? { truncated: true } : {}),
               },
               narrative: fullNarrative,
             },

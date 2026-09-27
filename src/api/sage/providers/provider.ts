@@ -69,6 +69,8 @@ export interface PriorTurnDigest {
     row_count: number;
     first_5_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    /** SQL result cut at the row cap: row_count is a floor, not the total. */
+    truncated?: boolean;
   };
   narrative: string;
 }
@@ -98,6 +100,8 @@ export interface NarrativeInput {
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
     /** Scalar fields beside the rows array of a keyed endpoint body. */
     context?: Record<string, unknown>;
+    /** SQL result cut at the row cap: row_count is a floor, not the total. */
+    truncated?: boolean;
   };
   /** Last N turns, for cohesion. */
   history: PriorTurnDigest[];

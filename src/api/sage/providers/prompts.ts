@@ -26,7 +26,7 @@ Mexican geographic codes:
 When drafting SQL:
 - ONLY SELECT or WITH … SELECT statements. No DML, no DDL.
 - Use ONLY the allowlisted views/MVs in the schema summary. No raw tables.
-- Always include an explicit LIMIT (max 5000).
+- Results are cut at 200 rows. For "how many" or total questions use COUNT(*) / SUM() aggregates; never count by listing rows.
 - Use lowercase column names; the schema is case-sensitive.
 
 When calling an endpoint, use the endpoint name AS WRITTEN in the spec. Do not invent endpoints.
@@ -61,7 +61,7 @@ export function buildRouterUserPrompt(
       sections.push(
         `- User: ${turn.question}\n  Route: ${turn.route.kind}${
           turn.route.endpoint_name ? ` (${turn.route.endpoint_name})` : ""
-        }\n  Result: ${turn.digest.row_count} rows, columns: ${turn.digest.columns.join(", ")}\n  Narrative: ${turn.narrative.slice(0, 200)}${turn.narrative.length > 200 ? "…" : ""}`,
+        }\n  Result: ${rowCountLabel(turn.digest)} rows, columns: ${turn.digest.columns.join(", ")}\n  Narrative: ${turn.narrative.slice(0, 200)}${turn.narrative.length > 200 ? "…" : ""}`,
       );
     }
   }
@@ -112,6 +112,11 @@ export function rowsToCsv(columns: string[], rows: unknown[]): string {
   return out.slice(0, -1);
 }
 
+/** `N+` when the SQL result was cut at the row cap (N is a floor). */
+function rowCountLabel(d: { row_count: number; truncated?: boolean }): string {
+  return d.truncated ? `${d.row_count}+` : `${d.row_count}`;
+}
+
 export function buildNarrativeUserPrompt(
   question: string,
   route: { kind: string; endpoint_name?: string; sql?: string },
@@ -121,6 +126,7 @@ export function buildNarrativeUserPrompt(
     first_n_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
     context?: Record<string, unknown>;
+    truncated?: boolean;
   },
   history: PriorTurnDigest[],
 ): string {
@@ -130,7 +136,7 @@ export function buildNarrativeUserPrompt(
   if (history.length > 0) {
     sections.push(
       `# Prior context\n\n${history
-        .map((h) => `- "${h.question}" → ${h.digest.row_count} rows`)
+        .map((h) => `- "${h.question}" → ${rowCountLabel(h.digest)} rows`)
         .join("\n")}`,
     );
   }
@@ -140,7 +146,7 @@ export function buildNarrativeUserPrompt(
   );
 
   sections.push(
-    `# Result digest\n\nRow count: ${digest.row_count}\nColumns: ${digest.columns.join(", ")}${digest.context ? `\nContext: ${JSON.stringify(digest.context).slice(0, 1024)}` : ""}\n\nFirst rows (${digest.first_n_rows.length} shown):\n\`\`\`csv\n${rowsToCsv(digest.columns, digest.first_n_rows)}\n\`\`\``,
+    `# Result digest\n\nRow count: ${digest.truncated ? `${digest.row_count}+ (cut at the ${digest.row_count}-row cap; the real total is larger and unknown; numeric stats cover only these rows)` : digest.row_count}\nColumns: ${digest.columns.join(", ")}${digest.context ? `\nContext: ${JSON.stringify(digest.context).slice(0, 1024)}` : ""}\n\nFirst rows (${digest.first_n_rows.length} shown):\n\`\`\`csv\n${rowsToCsv(digest.columns, digest.first_n_rows)}\n\`\`\``,
   );
 
   if (digest.numeric_stats) {

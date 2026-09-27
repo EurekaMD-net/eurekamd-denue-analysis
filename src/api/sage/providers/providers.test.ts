@@ -4,6 +4,7 @@ import {
   buildRouterUserPrompt,
   buildNarrativeUserPrompt,
   NARRATIVE_ROWS_MAX_BYTES,
+  ROUTER_SYSTEM_PROMPT,
 } from "./prompts.js";
 import { SAGE_ENDPOINT_CATALOG } from "../endpoint-catalog.js";
 
@@ -116,5 +117,58 @@ describe("buildNarrativeUserPrompt — rows block (audit #209/#76)", () => {
       NARRATIVE_ROWS_MAX_BYTES + "… (truncated)".length,
     );
     expect(block.endsWith("… (truncated)")).toBe(true);
+  });
+});
+
+describe("row cap is visible to the model (audit #87 follow-up)", () => {
+  const route = { kind: "sql", sql: "SELECT nom_mun FROM x" };
+  const prior = {
+    question: "lista municipios de Oaxaca",
+    route: { kind: "sql" as const, sql: "SELECT nom_mun FROM x" },
+    digest: {
+      columns: ["nom_mun"],
+      row_count: 200,
+      first_5_rows: [],
+      truncated: true,
+    },
+    narrative: "n",
+  };
+
+  it("narrative prompt says a cut result's row count is a floor", () => {
+    const p = buildNarrativeUserPrompt(
+      "¿cuántos municipios tiene Oaxaca?",
+      route,
+      {
+        columns: ["nom_mun"],
+        row_count: 200,
+        first_n_rows: [{ nom_mun: "Tlaxiaco" }],
+        truncated: true,
+      },
+      [prior],
+    );
+    expect(p).toContain("Row count: 200+ (cut at the 200-row cap");
+    expect(p).not.toContain("Row count: 200\n");
+    expect(p).toContain("→ 200+ rows");
+  });
+
+  it("narrative prompt keeps a plain count when the result was not cut", () => {
+    const p = buildNarrativeUserPrompt(
+      "q",
+      route,
+      { columns: ["nom_mun"], row_count: 12, first_n_rows: [] },
+      [],
+    );
+    expect(p).toContain("Row count: 12\n");
+  });
+
+  it("router history marks a cut prior result as N+ rows", () => {
+    const p = buildRouterUserPrompt("q", SAGE_ENDPOINT_CATALOG, [prior], "");
+    expect(p).toContain("Result: 200+ rows");
+  });
+
+  it("router system prompt states the 200-row cap and steers counts to COUNT(*)", () => {
+    expect(ROUTER_SYSTEM_PROMPT).toContain("cut at 200 rows");
+    expect(ROUTER_SYSTEM_PROMPT).toContain("COUNT(*)");
+    expect(ROUTER_SYSTEM_PROMPT).not.toContain("max 5000");
   });
 });

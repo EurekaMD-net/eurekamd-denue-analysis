@@ -281,7 +281,7 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
       ok: true,
       data: { rows, columns: ["cve_mun", "total"] },
     });
-    const { provider } = fakeProvider({
+    const { provider, narrativeInputs } = fakeProvider({
       kind: "sql",
       sql: "SELECT cve_mun, total FROM x",
       reasoning: "",
@@ -293,5 +293,38 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
     expect((table.rows as unknown[]).length).toBe(200);
     expect(table.row_count).toBe(200);
     expect(table.truncated).toBe(true);
+    // The cut reaches the narrative and the persisted thread digest, so
+    // neither reports "200 rows" as if it were the real total.
+    expect(narrativeInputs[0]!.digest.truncated).toBe(true);
+    const persisted = mockAppendTurn.mock.lastCall![2] as {
+      digest: { row_count: number; truncated?: boolean };
+    };
+    expect(persisted.digest).toMatchObject({ row_count: 200, truncated: true });
+  });
+
+  it("SQL route: a result that fits the cap is not marked truncated", async () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({
+      cve_mun: String(i).padStart(5, "0"),
+      total: String(i),
+    }));
+    mockSql.mockResolvedValue({
+      ok: true,
+      data: { rows, columns: ["cve_mun", "total"] },
+    });
+    const { provider, narrativeInputs } = fakeProvider({
+      kind: "sql",
+      sql: "SELECT cve_mun, total FROM x",
+      reasoning: "",
+      confidence: 1,
+    } as RouteOutput);
+    const evs = await ask(provider);
+    const table = evs.find((e) => e.event === "table")!.data;
+    expect(table.row_count).toBe(200);
+    expect(table.truncated).toBe(false);
+    expect(narrativeInputs[0]!.digest.truncated).toBeUndefined();
+    const persisted = mockAppendTurn.mock.lastCall![2] as {
+      digest: Record<string, unknown>;
+    };
+    expect(persisted.digest).not.toHaveProperty("truncated");
   });
 });
