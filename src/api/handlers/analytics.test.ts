@@ -399,6 +399,18 @@ describe("GET /analytics/municipios?entidad=", () => {
     expect(sql).toMatch(/unidades_clues/);
   });
 
+  it("counts farmacias as SCIAN 464111/464112, not 4659 pet/gift shops (audit #57)", async () => {
+    mockExec.mockReturnValue("null");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipios?entidad=06", { headers: AUTH });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "COUNT(*) FILTER (WHERE clase_actividad_id IN ('464111','464112'))::bigint AS farmacias",
+    );
+    expect(sql).not.toContain("4659");
+  });
+
   it("normalizes null DB columns to null in API response", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
@@ -1184,9 +1196,14 @@ describe("GET /analytics/locust-ageb", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /analytics/mortality-summary", () => {
+  // Audit #60: the summary SQL returns the rows plus whether `ano` is a
+  // primary (>= 100k national deaths) year.
+  const primary = (municipios: unknown[]) =>
+    JSON.stringify({ ano_is_primary: true, municipios });
+
   it("returns per-municipio rows with cause breakdown + per-1k normalization", async () => {
     mockExec.mockReturnValue(
-      JSON.stringify([
+      primary([
         {
           cve_mun: "09007",
           municipio: "Iztapalapa",
@@ -1230,6 +1247,44 @@ describe("GET /analytics/mortality-summary", () => {
     expect(sql).toMatch(/LEFT\(m\.cve_mun, 2\) = '14'/);
     expect(sql).toMatch(/m\.ano = 2023/);
     expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
+    // Audit #60: primary-year check against the same MV.
+    expect(sql).toMatch(/HAVING SUM\(total_defunciones\) >= 100000/);
+    expect(sql).toContain(
+      "'ano_is_primary', EXISTS (SELECT 1 FROM primary_years WHERE ano = 2023)",
+    );
+  });
+
+  it("rejects a lag-only (non-primary) ano with 400 / validation.ano_not_primary (audit #60)", async () => {
+    // 2023 in the 2024 EDR release: 52 late-registered deaths for
+    // Iztapalapa, which must not be served as the year's total.
+    mockExec.mockReturnValue(
+      JSON.stringify({
+        ano_is_primary: false,
+        municipios: [
+          {
+            cve_mun: "09007",
+            municipio: "Iztapalapa",
+            poblacion: 1835486,
+            total_defunciones: 52,
+            def_menores_1ano: 0,
+            def_circulatorio: 17,
+            def_neoplasias: 4,
+            def_endocrinas: 9,
+            def_externas: 3,
+            tasa_mortalidad_per_1k: 0.03,
+            tasa_infantil_per_1k: 0,
+          },
+        ],
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/mortality-summary?entidad=09&ano=2023",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("validation.ano_not_primary");
   });
 
   it("rejects invalid entidad with 400 / validation.entidad", async () => {
@@ -1260,7 +1315,7 @@ describe("GET /analytics/mortality-summary", () => {
   });
 
   it("uses config.currentMortalityAno as default when no ano arg provided", async () => {
-    mockExec.mockReturnValue("[]");
+    mockExec.mockReturnValue(primary([]));
     const app = createServer({ ...CONFIG, currentMortalityAno: 2025 });
     const res = await app.request("/analytics/mortality-summary?entidad=09", {
       headers: AUTH,
@@ -1275,7 +1330,7 @@ describe("GET /analytics/mortality-summary", () => {
 
   it("preserves null poblacion / null tasas when source is missing", async () => {
     mockExec.mockReturnValue(
-      JSON.stringify([
+      primary([
         {
           cve_mun: "32018",
           municipio: "X",
@@ -1313,7 +1368,7 @@ describe("GET /analytics/mortality-summary", () => {
         });
       })
       .mockReturnValueOnce(
-        JSON.stringify([
+        primary([
           {
             cve_mun: "09007",
             municipio: "Iztapalapa",
@@ -1351,6 +1406,12 @@ describe("GET /analytics/mortality-summary", () => {
     expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 4/);
     expect(liveSql).toMatch(/NULLIF\(capitulo, ''\)::int = 20/);
     expect(liveSql).toMatch(/LEFT\(edad, 1\) IN \('1','2','3'\)/);
+    // Audit #60: live primary-year floor mirrors the boot resolver.
+    expect(liveSql).toMatch(/primary_years AS \(/);
+    expect(liveSql).toMatch(/HAVING COUNT\(\*\) >= 100000/);
+    expect(liveSql).toContain(
+      "'ano_is_primary', EXISTS (SELECT 1 FROM primary_years WHERE ano = 2024)",
+    );
   });
 
   it("returns 502 with code postgres.parse_error on malformed psql output", async () => {
@@ -1365,7 +1426,7 @@ describe("GET /analytics/mortality-summary", () => {
   });
 
   it("sets long Cache-Control + Vary on success", async () => {
-    mockExec.mockReturnValue("[]");
+    mockExec.mockReturnValue(primary([]));
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/mortality-summary?entidad=09", {
       headers: AUTH,
@@ -1460,6 +1521,20 @@ describe("GET /analytics/mortality-trend", () => {
     const sql = argList[argList.length - 1] ?? "";
     expect(sql).toMatch(/cve_mun = '14039'/);
     expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
+  });
+
+  it("serves only primary years, dropping late-registration lag rows (audit #60)", async () => {
+    mockExec.mockReturnValueOnce("[]").mockReturnValueOnce("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/mortality-trend?cve_mun=09007", {
+      headers: AUTH,
+    });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(
+      /primary_years AS \(\s*SELECT ano FROM mv_mortalidad_municipal_yearly\s*GROUP BY ano\s*HAVING SUM\(total_defunciones\) >= 100000/,
+    );
+    expect(sql).toContain("AND ano IN (SELECT ano FROM primary_years)");
   });
 
   it("rejects invalid cve_mun with 400 / validation.cve_mun", async () => {
@@ -1563,6 +1638,11 @@ describe("GET /analytics/mortality-trend", () => {
     expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
     expect(liveSql).toMatch(/ent_resid = '09'/);
     expect(liveSql).toMatch(/mun_resid = '007'/);
+    // Audit #60: same primary-year floor on the live path.
+    expect(liveSql).toMatch(/HAVING COUNT\(\*\) >= 100000/);
+    expect(liveSql).toContain(
+      "AND NULLIF(anio_ocur, '')::int IN (SELECT ano FROM primary_years)",
+    );
   });
 });
 
@@ -1912,6 +1992,60 @@ describe("GET /analytics/agebs-by-municipio", () => {
     const sql = args?.[args.length - 1];
     expect(sql).toContain("clues DESC");
     expect(sql).not.toContain("establecimientos DESC");
+  });
+
+  it("counts operating CLUES via the clues MV with sargable muni filters (audit #58/#119/#19)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/agebs-by-municipio?cve_mun=09007", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    // `clues` MV is EN OPERACION-only and carries an indexed geom.
+    expect(sql).toContain("JOIN clues c ON ST_Contains(a2.geom, c.geom)");
+    expect(sql).not.toContain("clues_raw");
+    // Column-wise equality so a btree on (cve_ent, cve_mun) can serve it.
+    expect(sql).not.toMatch(/cve_ent \|\| /);
+    expect(sql).toContain("WHERE a2.cve_ent = '09' AND a2.cve_mun = '007'");
+    expect(sql).toContain("WHERE a.cve_ent = '09' AND a.cve_mun = '007'");
+    expect(sql).toContain("clase_actividad_id IN ('464111','464112')");
+  });
+
+  it("counts establishments by the AGEB's own municipio, not DENUE area_geo (audit #61)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/agebs-by-municipio?cve_mun=09007", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).not.toContain("area_geo");
+    expect(sql.match(/ageb >= '09007' AND ageb < '09008'/g)).toHaveLength(2);
+  });
+
+  it("carries the next-prefix bound across a digit rollover (09999 -> 10000)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/agebs-by-municipio?cve_mun=09999", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain("ageb >= '09999' AND ageb < '10000'");
+  });
+
+  it("breaks ranking ties on cvegeo in both ORDER BYs (audit #64)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/agebs-by-municipio?cve_mun=09007&order_by=clues&limit=5",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toMatch(/ORDER BY clues DESC NULLS LAST, t\.cvegeo\) FROM/);
+    expect(sql).toMatch(/ORDER BY clues DESC NULLS LAST, a\.cvegeo\s+LIMIT 5/);
   });
 
   it("normalizes ambito enum (rejects unexpected values to null)", async () => {
@@ -2304,6 +2438,56 @@ describe("GET /analytics/ageb-detail", () => {
     expect(locSql).toContain("mun = '007'");
     expect(locSql).toContain("loc = '0001'");
   });
+
+  it("reads the CLUES sample + count from the operating-only clues MV (audit #58/#119)", async () => {
+    mockExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            cvegeo: "0900700010001",
+            cve_ent: "09",
+            cve_mun: "007",
+            cve_loc: "0001",
+            cve_ageb: "0001",
+            ambito: "Urbana",
+            area_km2: "1.0",
+            centroid_lat: "19.4",
+            centroid_lon: "-99.1",
+            bbox_minlon: null,
+            bbox_minlat: null,
+            bbox_maxlon: null,
+            bbox_maxlat: null,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(
+        JSON.stringify([{ total_establecimientos: 0, total_farmacias: 0 }]),
+      )
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([0]))
+      .mockReturnValueOnce(JSON.stringify([]))
+      .mockReturnValueOnce(JSON.stringify([]));
+
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/ageb-detail?cvegeo=0900700010001",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const sqls = mockExec.mock.calls.map((c) => {
+      const a = c[1] as string[];
+      return a[a.length - 1] ?? "";
+    });
+    const cluesSqls = sqls.filter((q) => q.includes("ST_Contains"));
+    expect(cluesSqls).toHaveLength(2);
+    for (const q of cluesSqls) {
+      expect(q).toContain("JOIN clues c ON ST_Contains(a.geom, c.geom)");
+      expect(q).not.toContain("clues_raw");
+    }
+    expect(cluesSqls.join("\n")).toContain("c.clave_clues AS clues");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2434,6 +2618,26 @@ describe("GET /analytics/ageb-farmacia-opportunity", () => {
       /json_agg\(row_to_json\(t\) ORDER BY \(\s*t\.num_clues \* 0\.5/,
     );
     expect(sql).not.toMatch(/json_agg\(row_to_json\(t\) ORDER BY t\.score/);
+  });
+
+  it("uses operating CLUES, AGEB-prefix counts, sargable filters and a cvegeo tiebreak (audit #58/#61/#19/#64)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/ageb-farmacia-opportunity?cve_mun=15033&limit=5",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain("JOIN clues c ON ST_Contains(a2.geom, c.geom)");
+    expect(sql).not.toContain("clues_raw");
+    expect(sql).not.toMatch(/cve_ent \|\| /);
+    expect(sql).toContain("WHERE a.cve_ent = '15' AND a.cve_mun = '033'");
+    expect(sql).not.toContain("area_geo");
+    expect(sql.match(/ageb >= '15033' AND ageb < '15034'/g)).toHaveLength(2);
+    expect(sql).toContain("clase_actividad_id IN ('464111','464112')");
+    expect(sql).toMatch(/\) DESC NULLS LAST, t\.cvegeo\) FROM/);
+    expect(sql).toMatch(/\) DESC NULLS LAST, a\.cvegeo\s+LIMIT 5/);
   });
 });
 
@@ -2594,6 +2798,37 @@ describe("GET /analytics/opportunity-by-ageb (v0.2.5)", () => {
     expect(sql).toContain("clase_actividad_id IN ('464111','464112')");
     // Defensive: must NOT mention the wrong column
     expect(sql).not.toContain("sector_actividad_id IN");
+  });
+
+  it.each(["score", "pobtot", "target_count", "total_estab"])(
+    "order_by=%s breaks ties on cvegeo in both ORDER BYs (audit #69)",
+    async (orderBy) => {
+      mockExec.mockReturnValue(JSON.stringify([]));
+      const app = createServer(CONFIG);
+      await app.request(
+        `/analytics/opportunity-by-ageb?cve_mun=09015&target_scian=464111&order_by=${orderBy}&limit=20`,
+        { headers: AUTH },
+      );
+      const args = mockExec.mock.calls[0]?.[1] as string[];
+      const sql = args[args.length - 1] ?? "";
+      expect(sql).toMatch(/, r\.cvegeo\) FROM \(/);
+      expect(sql).toMatch(/, a\.cvegeo\s+LIMIT 20/);
+    },
+  );
+
+  it("counts by the AGEB's own municipio with sargable polygon filters (audit #61/#19)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/opportunity-by-ageb?cve_mun=09015&target_scian=464111",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).not.toContain("area_geo");
+    expect(sql.match(/ageb >= '09015' AND ageb < '09016'/g)).toHaveLength(2);
+    expect(sql).not.toMatch(/cve_ent \|\| /);
+    expect(sql).toContain("WHERE a.cve_ent = '09' AND a.cve_mun = '015'");
   });
 
   it("dispatches 2-digit code to sector_actividad_id column", async () => {
@@ -7745,6 +7980,18 @@ describe("/analytics/entidad-detail (v0.2.17 vivienda_credito_comercial)", () =>
 // ---------------------------------------------------------------------------
 
 describe("GET /analytics/locust-muni", () => {
+  it("counts denue_farmacias as SCIAN 464111/464112, not 4659 (audit #66)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-muni?entidad=09", { headers: AUTH });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain(
+      "COUNT(*) FILTER (WHERE clase_actividad_id IN ('464111','464112'))::bigint AS denue_farmacias",
+    );
+    expect(sql).not.toContain("4659");
+  });
+
   it("returns wide muni row joining every pre-aggregated source", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([

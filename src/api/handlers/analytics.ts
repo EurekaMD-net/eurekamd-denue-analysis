@@ -147,6 +147,24 @@ function normalizeGrado(g: string | null | undefined): IrsGrado {
   return "sin_dato";
 }
 
+// SCIAN clases for pharmacies: 464111 (sin minisúper), 464112 (con
+// minisúper). One list for every farmacia count so municipios, AGEB and
+// Locust endpoints cannot drift apart again (audit #57/#66: two sites used
+// LIKE '4659%', which is pets/gifts/religious goods, not pharmacies).
+const FARMACIA_CLASES = ["464111", "464112"] as const;
+const FARMACIA_CLASES_SQL = FARMACIA_CLASES.map((c) => `'${c}'`).join(",");
+
+/**
+ * `ageb` range predicate for AGEBs of one municipio (AGEB keys start with
+ * the 5-char cve_mun). A btree range can use idx_establecimientos_ageb;
+ * `LIKE 'X%'` cannot under the en_US collation. Keys are alphanumeric, so
+ * the range is exactly the prefix. cveMun pre-validated by CVE_MUN_RE.
+ */
+function agebOfMunicipioSql(cveMun: string): string {
+  const next = String(Number(cveMun) + 1).padStart(5, "0");
+  return `ageb >= '${cveMun}' AND ageb < '${next}'`;
+}
+
 /**
  * Detect whether a postgres error is the "relation does not exist"
  * fingerprint (psql code 42P01). Used by analytics handlers to fall
@@ -439,7 +457,7 @@ WITH e_counts AS (
   SELECT
     area_geo AS cve_mun,
     COUNT(*)::bigint AS establecimientos,
-    COUNT(*) FILTER (WHERE clase_actividad_id LIKE '4659%')::bigint AS farmacias
+    COUNT(*) FILTER (WHERE clase_actividad_id IN (${FARMACIA_CLASES_SQL}))::bigint AS farmacias
   FROM establecimientos
   WHERE entidad = '${entidad}' AND area_geo IS NOT NULL
   GROUP BY area_geo
@@ -1022,6 +1040,26 @@ export function resolveCurrentMortalityAno(config: ApiServerConfig): {
   return { ano: MORTALITY_DEFAULT_CURRENT_ANO, source: "fallback" };
 }
 
+// Audit #60: only one EDR release is loaded, so earlier years hold just its
+// late-registration lag rows (2023 ≈ 17k vs 2024 ≈ 790k nationally). Trend
+// and summary only serve "primary" years, the same >= 100k national floor
+// the resolver above uses. MV and live-fallback variants of the same CTE.
+const MORTALITY_PRIMARY_YEARS_MV_CTE = `primary_years AS (
+  SELECT ano FROM mv_mortalidad_municipal_yearly
+  GROUP BY ano
+  HAVING SUM(total_defunciones) >= 100000
+)`;
+
+const MORTALITY_PRIMARY_YEARS_LIVE_CTE = `primary_years AS (
+  SELECT NULLIF(anio_ocur, '')::int AS ano
+  FROM inegi_edr_defunciones_raw
+  WHERE anio_ocur ~ '^[0-9]{4}$'
+    AND ent_resid ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
+    AND mun_resid IS NOT NULL AND mun_resid != '999'
+  GROUP BY NULLIF(anio_ocur, '')::int
+  HAVING COUNT(*) >= 100000
+)`;
+
 // ---------------------------------------------------------------------------
 // /analytics/mortality-summary?entidad=NN[&ano=YYYY]
 // ---------------------------------------------------------------------------
@@ -1044,6 +1082,10 @@ function mortalitySummaryMvSql(entidad: string, ano: number): string {
   // entidad pre-validated by ENTIDAD_RE; ano pre-validated by RISK_ANO_RE
   // (reused for mortality — same year-range constraints).
   return `
+WITH ${MORTALITY_PRIMARY_YEARS_MV_CTE}
+SELECT json_build_object(
+  'ano_is_primary', EXISTS (SELECT 1 FROM primary_years WHERE ano = ${ano}),
+  'municipios', (
 SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FROM (
   SELECT
     m.cve_mun,
@@ -1066,7 +1108,9 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
   FROM mv_mortalidad_municipal_yearly m
   LEFT JOIN censo_municipios cm USING (cve_mun)
   WHERE LEFT(m.cve_mun, 2) = '${entidad}' AND m.ano = ${ano}
-) t;
+) t
+  )
+);
 `;
 }
 
@@ -1079,7 +1123,8 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
  */
 function mortalitySummaryLiveSql(entidad: string, ano: number): string {
   return `
-WITH muni AS (
+WITH ${MORTALITY_PRIMARY_YEARS_LIVE_CTE},
+muni AS (
   SELECT
     (ent_resid || mun_resid)                                   AS cve_mun,
     COUNT(*)::bigint                                           AS total_defunciones,
@@ -1095,6 +1140,9 @@ WITH muni AS (
     AND anio_ocur ~ '^[0-9]{4}$' AND NULLIF(anio_ocur, '')::int = ${ano}
   GROUP BY ent_resid || mun_resid
 )
+SELECT json_build_object(
+  'ano_is_primary', EXISTS (SELECT 1 FROM primary_years WHERE ano = ${ano}),
+  'municipios', (
 SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FROM (
   SELECT
     m.cve_mun,
@@ -1116,7 +1164,9 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
     END                                                AS tasa_infantil_per_1k
   FROM muni m
   LEFT JOIN censo_municipios cm USING (cve_mun)
-) t;
+) t
+  )
+);
 `;
 }
 
@@ -1137,11 +1187,22 @@ export async function mortalitySummaryHandler(
     config.currentMortalityAno ?? MORTALITY_DEFAULT_CURRENT_ANO;
   const ano = parseAnoArg(anoRaw, defaultAno, "ano");
 
-  const rows = await runJsonQueryMvFirst<RawMortalitySummaryRow[]>(
+  const raw = await runJsonQueryMvFirst<{
+    ano_is_primary?: boolean;
+    municipios?: RawMortalitySummaryRow[] | null;
+  }>(
     config,
     mortalitySummaryMvSql(entidad, ano),
     mortalitySummaryLiveSql(entidad, ano),
   );
+  if (raw.ano_is_primary !== true) {
+    throw new HttpError(
+      `ano ${ano} no es un año primario de mortalidad (solo contiene registros tardíos de otra edición EDR)`,
+      400,
+      "validation.ano_not_primary",
+    );
+  }
+  const rows = raw.municipios ?? [];
 
   const result: MortalitySummaryResult = {
     entidad,
@@ -1195,6 +1256,7 @@ function mortalityTrendSql(cveMun: string): string {
   // year bounds to 2010..2039 to match RISK_ANO_RE — corrupt rows beyond
   // that range are suppressed by both layers.
   return `
+WITH ${MORTALITY_PRIMARY_YEARS_MV_CTE}
 SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
   SELECT
     ano,
@@ -1207,6 +1269,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
   FROM mv_mortalidad_municipal_yearly
   WHERE cve_mun = '${cveMun}'
     AND ano BETWEEN 2010 AND 2039
+    AND ano IN (SELECT ano FROM primary_years)
 ) t;
 `;
 }
@@ -1224,6 +1287,7 @@ function mortalityTrendLiveSql(cveMun: string): string {
   const ent = cveMun.slice(0, 2);
   const mun = cveMun.slice(2, 5);
   return `
+WITH ${MORTALITY_PRIMARY_YEARS_LIVE_CTE}
 SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
   SELECT
     NULLIF(anio_ocur, '')::int                                     AS ano,
@@ -1238,6 +1302,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
     AND mun_resid = '${mun}'
     AND anio_ocur ~ '^[0-9]{4}$'
     AND NULLIF(anio_ocur, '')::int BETWEEN 2010 AND 2039
+    AND NULLIF(anio_ocur, '')::int IN (SELECT ano FROM primary_years)
   GROUP BY NULLIF(anio_ocur, '')::int
 ) t;
 `;
@@ -1515,7 +1580,7 @@ export async function stateCalibratorsHandler(
 // ---------------------------------------------------------------------------
 // AGEB analytics primitive (v0.2.4-A, 2026-05-05)
 // Spatial + count endpoints exposing the existing `ageb_polygons` ×
-// `establecimientos.ageb` × `clues_raw` infrastructure. No new tables — this
+// `establecimientos.ageb` × `clues` infrastructure. No new tables — this
 // is purely an exposure layer. Census-AGEB indicators (population density,
 // % indigenous, vivienda) are deferred to v0.2.4-B pending operator URL
 // drop for INEGI's RESAGEBURB dataset (currently behind a gated portal per
@@ -1549,7 +1614,7 @@ function agebsByMunicipioSql(
   // (AGEBS_ORDER_BY_SQL) — never user-controlled in the SQL string. limit is
   // an integer clamped to AGEBS_MAX_LIMIT before reaching this function.
   return `
-SELECT json_agg(row_to_json(t) ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST) FROM (
+SELECT json_agg(row_to_json(t) ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST, t.cvegeo) FROM (
   SELECT
     a.cvegeo,
     NULLIF(TRIM(a.ambito), '') AS ambito,
@@ -1562,32 +1627,24 @@ SELECT json_agg(row_to_json(t) ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAS
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
     GROUP BY ageb
   ) e ON e.ageb = a.cvegeo
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
-      AND clase_actividad_id IN ('464111','464112')
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
+      AND clase_actividad_id IN (${FARMACIA_CLASES_SQL})
     GROUP BY ageb
   ) f ON f.ageb = a.cvegeo
   LEFT JOIN (
     SELECT a2.cvegeo, COUNT(*) AS cnt
     FROM ageb_polygons a2
-    JOIN clues_raw c ON ST_Contains(
-      a2.geom,
-      ST_SetSRID(ST_MakePoint(
-        NULLIF(c.longitud, '')::numeric,
-        NULLIF(c.latitud, '')::numeric
-      ), 4326)
-    )
-    WHERE a2.cve_ent || a2.cve_mun = '${cveMun}'
-      AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
-      AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    JOIN clues c ON ST_Contains(a2.geom, c.geom)
+    WHERE a2.cve_ent = '${cveMun.slice(0, 2)}' AND a2.cve_mun = '${cveMun.slice(2)}'
     GROUP BY a2.cvegeo
   ) s ON s.cvegeo = a.cvegeo
-  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
-  ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST
+  WHERE a.cve_ent = '${cveMun.slice(0, 2)}' AND a.cve_mun = '${cveMun.slice(2)}'
+  ORDER BY ${AGEBS_ORDER_BY_SQL[orderBy]} NULLS LAST, a.cvegeo
   LIMIT ${limit}
 ) t;
 `;
@@ -1848,7 +1905,7 @@ function agebEstabSummarySql(cvegeo: string): string {
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT
     COUNT(*)::bigint AS total_establecimientos,
-    COUNT(*) FILTER (WHERE clase_actividad_id IN ('464111','464112'))::bigint
+    COUNT(*) FILTER (WHERE clase_actividad_id IN (${FARMACIA_CLASES_SQL}))::bigint
       AS total_farmacias
   FROM establecimientos
   WHERE ageb = '${cvegeo}'
@@ -1873,27 +1930,19 @@ SELECT json_agg(row_to_json(t) ORDER BY t.count DESC) FROM (
 }
 
 function agebCluesSql(cvegeo: string, cap: number): string {
-  // ST_Contains uses gist index on ageb_polygons.geom and is fast for a
-  // single AGEB lookup. Filter clues_raw to numeric-safe lat/lon first.
+  // `clues` MV: EN OPERACION units only, prebuilt geom with a GiST index
+  // (audit #58/#119). Same source as /analytics/municipios unidades_clues.
   return `
 SELECT json_agg(row_to_json(t) ORDER BY t.clues) FROM (
   SELECT
-    c.clues,
-    c.nombre_de_la_unidad AS nombre,
-    c.nombre_tipo_establecimiento AS tipo,
-    NULLIF(c.latitud, '')::numeric AS lat,
-    NULLIF(c.longitud, '')::numeric AS lon
+    c.clave_clues AS clues,
+    c.unidad_nombre AS nombre,
+    c.tipo_establecimiento AS tipo,
+    c.lat,
+    c.lon
   FROM ageb_polygons a
-  JOIN clues_raw c ON ST_Contains(
-    a.geom,
-    ST_SetSRID(ST_MakePoint(
-      NULLIF(c.longitud, '')::numeric,
-      NULLIF(c.latitud, '')::numeric
-    ), 4326)
-  )
+  JOIN clues c ON ST_Contains(a.geom, c.geom)
   WHERE a.cvegeo = '${cvegeo}'
-    AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
-    AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
   LIMIT ${cap}
 ) t;
 `;
@@ -1905,16 +1954,8 @@ function agebCluesCountSql(cvegeo: string): string {
 SELECT json_build_array(COUNT(*)) FROM (
   SELECT 1
   FROM ageb_polygons a
-  JOIN clues_raw c ON ST_Contains(
-    a.geom,
-    ST_SetSRID(ST_MakePoint(
-      NULLIF(c.longitud, '')::numeric,
-      NULLIF(c.latitud, '')::numeric
-    ), 4326)
-  )
+  JOIN clues c ON ST_Contains(a.geom, c.geom)
   WHERE a.cvegeo = '${cvegeo}'
-    AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
-    AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
 ) t;
 `;
 }
@@ -2185,7 +2226,7 @@ function agebFarmaciaOpportunitySql(cveMun: string, limit: number): string {
   return `
 SELECT json_agg(row_to_json(t) ORDER BY (
   t.num_clues * 0.5 + t.num_establecimientos * 0.3 - t.num_farmacias * 1.0
-) DESC NULLS LAST) FROM (
+) DESC NULLS LAST, t.cvegeo) FROM (
   SELECT
     a.cvegeo,
     NULLIF(TRIM(a.ambito), '') AS ambito,
@@ -2215,37 +2256,29 @@ SELECT json_agg(row_to_json(t) ORDER BY (
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
     GROUP BY ageb
   ) e ON e.ageb = a.cvegeo
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
-      AND clase_actividad_id IN ('464111','464112')
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
+      AND clase_actividad_id IN (${FARMACIA_CLASES_SQL})
     GROUP BY ageb
   ) f ON f.ageb = a.cvegeo
   LEFT JOIN (
     SELECT a2.cvegeo, COUNT(*) AS cnt
     FROM ageb_polygons a2
-    JOIN clues_raw c ON ST_Contains(
-      a2.geom,
-      ST_SetSRID(ST_MakePoint(
-        NULLIF(c.longitud, '')::numeric,
-        NULLIF(c.latitud, '')::numeric
-      ), 4326)
-    )
-    WHERE a2.cve_ent || a2.cve_mun = '${cveMun}'
-      AND c.longitud ~ '^-?[0-9]+\\.?[0-9]*$'
-      AND c.latitud ~ '^-?[0-9]+\\.?[0-9]*$'
+    JOIN clues c ON ST_Contains(a2.geom, c.geom)
+    WHERE a2.cve_ent = '${cveMun.slice(0, 2)}' AND a2.cve_mun = '${cveMun.slice(2)}'
     GROUP BY a2.cvegeo
   ) s ON s.cvegeo = a.cvegeo
   LEFT JOIN censo_ageb cab ON cab.cvegeo = a.cvegeo
-  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
+  WHERE a.cve_ent = '${cveMun.slice(0, 2)}' AND a.cve_mun = '${cveMun.slice(2)}'
   ORDER BY (
     COALESCE(s.cnt, 0) * 0.5
     + COALESCE(e.cnt, 0) * 0.3
     - COALESCE(f.cnt, 0) * 1.0
-  ) DESC NULLS LAST
+  ) DESC NULLS LAST, a.cvegeo
   LIMIT ${limit}
 ) t;
 `;
@@ -2550,7 +2583,7 @@ function opportunityByAgebSql(
 SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
     .replace(/cab\.pobtot/g, "r.pobtot")
     .replace(/COALESCE\(t\.cnt, 0\)/g, "r.target_count")
-    .replace(/COALESCE\(e\.cnt, 0\)/g, "r.total_estab")}) FROM (
+    .replace(/COALESCE\(e\.cnt, 0\)/g, "r.total_estab")}, r.cvegeo) FROM (
   SELECT
     a.cvegeo,
     NULLIF(TRIM(a.ambito), '') AS ambito,
@@ -2577,12 +2610,12 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
   FROM ageb_polygons a
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
     GROUP BY ageb
   ) e ON e.ageb = a.cvegeo
   LEFT JOIN (
     SELECT ageb, COUNT(*) AS cnt FROM establecimientos
-    WHERE area_geo = '${cveMun}' AND ageb IS NOT NULL AND ageb != ''
+    WHERE ${agebOfMunicipioSql(cveMun)} AND ageb IS NOT NULL AND ageb != ''
       AND ${scianColumn} IN (${inList})
     GROUP BY ageb
   ) t ON t.ageb = a.cvegeo
@@ -2597,8 +2630,8 @@ SELECT json_agg(row_to_json(r) ORDER BY ${orderExpr
     WHERE anio = (SELECT MAX(anio) FROM sinba_morbidity_municipal WHERE cve_mun = '${cveMun}')
       AND cve_mun = '${cveMun}'
   ) smm ON true
-  WHERE a.cve_ent || a.cve_mun = '${cveMun}'
-  ${rezagoWhere}ORDER BY ${orderExpr}
+  WHERE a.cve_ent = '${cveMun.slice(0, 2)}' AND a.cve_mun = '${cveMun.slice(2)}'
+  ${rezagoWhere}ORDER BY ${orderExpr}, a.cvegeo
   LIMIT ${limit}
 ) r;
 `;
@@ -4778,7 +4811,7 @@ WITH denue_agg AS (
   SELECT
     area_geo AS cve_mun,
     COUNT(*)::bigint AS denue_establecimientos,
-    COUNT(*) FILTER (WHERE clase_actividad_id LIKE '4659%')::bigint AS denue_farmacias
+    COUNT(*) FILTER (WHERE clase_actividad_id IN (${FARMACIA_CLASES_SQL}))::bigint AS denue_farmacias
   FROM establecimientos
   WHERE entidad = '${entidad}' AND area_geo IS NOT NULL
   GROUP BY area_geo
