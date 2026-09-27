@@ -47,6 +47,10 @@ INEGI DENUE API and upserts them into `establecimientos`. The data loaded now is
   stops it (it is not disabled) and records `timer_stopped: true`. The worker starts it again
   right after `finished_at`. If the timer was already inactive, the script records
   `timer_stopped: false` and leaves it alone.
+  If the worker exits before `finished_at`, or you abandon the run, `denue-matview-refresh.timer`
+  stays stopped; start it by hand with `systemctl start denue-matview-refresh.timer`. A reboot
+  re-arms it (enabled). The timer is Persistent=true, so the worker's restart fires one immediate
+  catch-up refresh (~5 min, harmless).
 
 ## Throttles and why
 

@@ -190,9 +190,9 @@ phase_resume() {
   [[ -n $(base_get .run_start) ]] || die "no run_start in $BASE: nothing to resume, use '$0 start'"
   unit_active && die "$UNIT is already active"
   # A stop during post-steps leaves the SQL running inside supabase-db (outside the unit's cgroup).
-  local busy; busy=$(ro "SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND query ~* '$BUSY_RE'")
+  local busy; busy=$(ro "SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend' AND state<>'idle' AND query ~* '$BUSY_RE'")
   if [[ $busy -gt 0 ]]; then
-    ro "SELECT pid||' '||coalesce(state,'?')||' age='||coalesce((now()-query_start)::text,'?')||' '||left(regexp_replace(query,'\s+',' ','g'),100) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND query ~* '$BUSY_RE'"
+    ro "SELECT pid||' '||coalesce(state,'?')||' age='||coalesce((now()-query_start)::text,'?')||' '||left(regexp_replace(query,'\s+',' ','g'),100) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend' AND state<>'idle' AND query ~* '$BUSY_RE'"
     die "$busy DB session(s) still running post-step SQL (above); wait for pg_stat_activity to drain, then resume"
   fi
   preflight || die "preflight failed"
@@ -252,15 +252,21 @@ phase_worker() {
 }
 
 # Prints "clave nombre: old -> new" for each estado whose records_extracted fell more than MAX_DROP_PCT
-# below the archived previous run. Empty = OK (or acknowledged, or no archive to compare with).
+# below the archived previous run. Empty = OK (or no archive to compare with). With .truncation_ack=true
+# the drops are printed to stderr as "WARN (acked) <clave> <old> -> <new>" and stdout stays empty.
 truncated_estados() {
   local arch; arch=$(base_get .archived_state_file)
-  [[ $(base_get .truncation_ack) == true ]] && return 0
   [[ -n $arch && -f $arch ]] || return 0
-  jq -r --slurpfile old "$arch" --argjson pct "$MAX_DROP_PCT" '.estados | to_entries[]
+  local drops; drops=$(jq -r --slurpfile old "$arch" --argjson pct "$MAX_DROP_PCT" '.estados | to_entries[]
     | (.value.records_extracted) as $n | ($old[0].estados[.key].records_extracted // 0) as $o
     | select($o > 0 and $n < $o * (1 - $pct/100))
-    | "  \(.key) \(.value.nombre): \($o) -> \($n)"' "$STATE"
+    | "\(.key) \(.value.nombre)\t\($o) -> \($n)"' "$STATE")
+  [[ -n $drops ]] || return 0
+  if [[ $(base_get .truncation_ack) == true ]]; then
+    printf '%s\n' "$drops" | awk -F'\t' '{split($1, k, " "); print "WARN (acked) " k[1] " " $2}' >&2
+    return 0
+  fi
+  printf '%s\n' "$drops" | awk -F'\t' '{print "  " $1 ": " $2}'
 }
 
 post_step() {
@@ -298,7 +304,7 @@ phase_status() {
     echo "$UNIT: inactive (last exit: journalctl -u $UNIT -n 20)"
   fi
   echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
-  echo "$TIMER: $(systemctl is-active "$TIMER" || true)   (timer_stopped by start: $(jq -r '.timer_stopped // "n/a"' "$BASE" 2>/dev/null || echo n/a))"
+  echo "$TIMER: $(systemctl is-active "$TIMER" || true)   (timer_stopped by start: $(jq -r 'if has("timer_stopped") then .timer_stopped else "n/a" end' "$BASE" 2>/dev/null || echo n/a))"
   echo "raw files: $(compgen -G "$RAW/*.json" | wc -l) in $RAW ($(du -sh "$RAW" 2>/dev/null | cut -f1))"
   if [[ -f $LOG ]]; then
     log "log tail ($LOG)"
