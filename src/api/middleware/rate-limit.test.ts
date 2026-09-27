@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Hono } from "hono";
-import { makeRateLimitMiddleware } from "./rate-limit.js";
+import { isPriorityPrincipal, makeRateLimitMiddleware } from "./rate-limit.js";
 
 type UserEnv = { Variables: { user: { user_id: string } } };
 
@@ -190,5 +190,49 @@ describe("makeRateLimitMiddleware", () => {
     expect((await app.request("/x")).status).toBe(429);
     ip = "10.0.0.2";
     expect((await app.request("/x")).status).toBe(200);
+  });
+});
+
+describe("exempt: isPriorityPrincipal (the X-Api-Key tier)", () => {
+  // Pre-change: no `exempt` option, so the api-key requests below hit the
+  // `if (recent.length >= max)` 429 branch on the 3rd call.
+  function exemptApp(user?: string) {
+    const app = new Hono<UserEnv>();
+    if (user) {
+      app.use("*", async (c, next) => {
+        c.set("user", { user_id: user });
+        await next();
+      });
+    }
+    app.use(
+      "*",
+      makeRateLimitMiddleware({
+        max: 2,
+        windowMs: 60_000,
+        getIp: () => "10.0.0.1",
+        exempt: isPriorityPrincipal,
+      }),
+    );
+    app.get("/x", (c) => c.text("ok"));
+    return app;
+  }
+
+  it("never 429s the api key and does not consume the shared bucket", async () => {
+    const app = exemptApp();
+    for (let i = 0; i < 10; i++) {
+      const res = await app.request("/x", { headers: { "x-api-key": "k" } });
+      expect(res.status).toBe(200);
+    }
+    // Same IP bucket: had the api-key calls counted, this would be 429.
+    expect((await app.request("/x")).status).toBe(200);
+    expect((await app.request("/x")).status).toBe(200);
+    expect((await app.request("/x")).status).toBe(429);
+
+    // A bearer principal is still limited, even with a stray x-api-key.
+    const bearer = exemptApp("user-a");
+    const h = { headers: { "x-api-key": "k" } };
+    expect((await bearer.request("/x", h)).status).toBe(200);
+    expect((await bearer.request("/x", h)).status).toBe(200);
+    expect((await bearer.request("/x", h)).status).toBe(429);
   });
 });

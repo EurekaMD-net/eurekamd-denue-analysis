@@ -210,7 +210,8 @@ describe("GET /analytics/layers/values — query execution (audit P05/P08)", () 
     );
     const args = mockExec.mock.calls[0]?.[1] as string[];
     const i = args.indexOf("-e");
-    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
+    // X-Api-Key is the priority tier: 2x the 25 s default (psql-runner.ts).
+    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=50000/);
   });
 
   it("requires entidad for grain=ageb (#25)", async () => {

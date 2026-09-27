@@ -71,6 +71,7 @@ Every command below spells out the full path.
 | P36 | web | f6e9c5d | Sage streams stop on page exit; errors classified by status; fewer re-renders |
 | P24-web | web | 8b1b28a | Drop Sage threads the server no longer exposes; restore persisted turn errors |
 | X-web-fields-contract | web | 6cd34fc | Locust field labels match the backend; catalog keys pinned to the API contract |
+| X-jarvis-priority | backend | (this commit) | The shared X-Api-Key (machine-only, Jarvis) is the priority tier: exempt from the /analytics/* and /tiles/* rate limits (/sage/query keeps its 6/min LLM-budget guard), its psql queries jump the runner's queue and get 2x the timeout capped at 60 s. Sage's in-process dispatch inherits the caller's tier. Header, key name and routes unchanged. |
 
 These lane commits are merged too, but no package step names them:
 6e0b45e (tiles: payload trim, index-scan plan, in-process LRU; #100 #136 #52),

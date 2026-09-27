@@ -11,6 +11,9 @@
  *    default, work_mem=32MB and jit=off — session-level only, the instance
  *    config is untouched;
  *  - a module-level semaphore caps in-flight psql processes;
+ *  - priority requests (the shared X-Api-Key, i.e. Jarvis — see
+ *    request-context.ts) are dequeued before normal waiters and get twice
+ *    the timeout, capped at 60 s (an explicit longer timeout is kept);
  *  - every call is tagged with PGAPPNAME=denue-<uuid>. Killing the docker
  *    CLI does NOT stop psql or its backend inside the container, so on
  *    timeout or abort the runner also fires pg_cancel_backend for the tag;
@@ -30,6 +33,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { HttpError } from "../middleware/error.js";
 import { assertSafeContainer } from "../handlers/_safe-container.js";
+import { isPriorityRequest } from "../request-context.js";
 
 export interface RunSqlOptions {
   /** Docker container running Postgres (config.dbContainer). */
@@ -52,6 +56,8 @@ const DEFAULT_TIMEOUT_MS = 25_000;
 // The DB-side statement_timeout must fire first so psql reports a clean
 // error; the client-side kill is only the backstop.
 const CLIENT_GRACE_MS = 5_000;
+// Priority requests double the timeout up to this cap.
+const PRIORITY_TIMEOUT_CAP_MS = 60_000;
 // 64MB accommodates dense ageb-detail / manzanas-by-ageb payloads.
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const MAX_IN_FLIGHT = 6;
@@ -124,21 +130,37 @@ export function psqlArgv(opts: RunSqlOptions, appName: string): string[] {
 
 // --- semaphore ------------------------------------------------------------
 
+// Two FIFO queues: a freed slot goes to the oldest priority waiter first,
+// then the oldest normal one. A slot is handed straight to the next waiter
+// (inFlight unchanged), so inFlight < MAX_IN_FLIGHT implies both are empty.
 let inFlight = 0;
+const priorityWaiters: Array<() => void> = [];
 const waiters: Array<() => void> = [];
 
-function acquire(): Promise<void> {
+function acquire(priority: boolean): Promise<void> {
   if (inFlight < MAX_IN_FLIGHT) {
     inFlight++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => waiters.push(resolve));
+  return new Promise((resolve) =>
+    (priority ? priorityWaiters : waiters).push(resolve),
+  );
 }
 
 function release(): void {
-  const next = waiters.shift();
+  const next = priorityWaiters.shift() ?? waiters.shift();
   if (next) next();
   else inFlight--;
+}
+
+/** Priority: 2x the timeout, capped, never below what the caller asked. */
+function effectiveTimeoutMs(
+  timeoutMs: number | undefined,
+  priority: boolean,
+): number {
+  const base = timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!priority) return base;
+  return Math.max(base, Math.min(base * 2, PRIORITY_TIMEOUT_CAP_MS));
 }
 
 // --- cancel ---------------------------------------------------------------
@@ -174,15 +196,20 @@ export function runSql(sql: string, opts: RunSqlOptions): Promise<string> {
 
 async function execTagged(
   sql: string,
-  opts: RunSqlOptions,
+  callerOpts: RunSqlOptions,
   appName: string,
 ): Promise<string> {
+  const priority = isPriorityRequest();
+  const opts: RunSqlOptions = {
+    ...callerOpts,
+    timeoutMs: effectiveTimeoutMs(callerOpts.timeoutMs, priority),
+  };
   const argv = psqlArgv(opts, appName);
   const maxBuffer = opts.maxBuffer ?? DEFAULT_MAX_BUFFER;
   const wallMs = (opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) + CLIENT_GRACE_MS;
 
   if (opts.signal?.aborted) throw upstreamError("postgres.error");
-  await acquire();
+  await acquire(priority);
   try {
     if (opts.signal?.aborted) throw upstreamError("postgres.error");
     return await new Promise<string>((resolve, reject) => {

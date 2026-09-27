@@ -98,7 +98,8 @@ describe("GET /search — radius path uses the shared runner (audit C1)", () => 
     const args = mockExecFile.mock.calls[0]?.[1] as string[];
     const i = args.indexOf("-e");
     expect(i).toBeGreaterThan(0);
-    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
+    // X-Api-Key is the priority tier: 2x the 25 s default (psql-runner.ts).
+    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=50000/);
   });
 
   it("psql failure surfaces as 502 postgres.error, not 500 (audit #54)", async () => {

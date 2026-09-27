@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { createHmac } from "node:crypto";
 import { makeAuthMiddleware } from "./auth.js";
 import { _clearJwtCache } from "./bearer-auth.js";
+import { requestContext } from "../request-context.js";
 
 const TEST_KEY = "test-api-key-12345";
 const JWT_SECRET = "test-jwt-secret";
@@ -228,5 +229,59 @@ describe("makeAuthMiddleware — Bearer rejections are generic", () => {
       headers: { Authorization: `Bearer ${tok}` },
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("makeAuthMiddleware — request context (priority tier)", () => {
+  // Pre-change: auth.ts called a bare `return next()` on both paths, so
+  // requestContext.getStore() is undefined in the handler and every
+  // assertion on the store below fails.
+  beforeEach(() => _clearJwtCache());
+
+  function ctxApp() {
+    const app = new Hono();
+    app.use(
+      "*",
+      makeAuthMiddleware({ apiKey: TEST_KEY, supabaseJwtSecret: JWT_SECRET }),
+    );
+    app.get("/", async (c) => {
+      await Promise.resolve(); // context must survive an await
+      return c.json(requestContext.getStore() ?? null);
+    });
+    return app;
+  }
+  const memberJwt = () =>
+    makeJwt({
+      ...MEMBER,
+      sub: "user-1",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+
+  it("X-Api-Key runs the chain as the priority principal", async () => {
+    const res = await ctxApp().request("/", {
+      headers: { "X-Api-Key": TEST_KEY },
+    });
+    expect(await res.json()).toEqual({ principal: "apikey", priority: true });
+  });
+
+  it("a valid bearer runs the chain without priority", async () => {
+    const res = await ctxApp().request("/", {
+      headers: { Authorization: `Bearer ${memberJwt()}` },
+    });
+    expect(await res.json()).toEqual({ principal: "user-1", priority: false });
+  });
+
+  it("a nested api-key request inherits a non-priority outer context", async () => {
+    // Sage's dispatcher re-enters the app with the shared key on behalf of
+    // a browser user; that must not escalate the user's queries.
+    const app = ctxApp();
+    const res = await requestContext.run(
+      { principal: "user-1", priority: false },
+      () => app.request("/", { headers: { "X-Api-Key": TEST_KEY } }),
+    );
+    expect(await res.json()).toEqual({ principal: "apikey", priority: false });
   });
 });

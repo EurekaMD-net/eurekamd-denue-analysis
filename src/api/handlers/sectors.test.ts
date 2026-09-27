@@ -128,7 +128,8 @@ describe("GET /sectors", () => {
     const argList = mockExec.mock.calls[0]?.[1] as string[];
     const i = argList.indexOf("-e");
     expect(i).toBeGreaterThan(0);
-    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
+    // X-Api-Key is the priority tier: 2x the 25 s default (psql-runner.ts).
+    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=50000/);
   });
 
   it("returns empty array when DB returns null", async () => {

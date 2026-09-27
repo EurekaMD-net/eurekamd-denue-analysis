@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { createHmac } from "node:crypto";
 import { createServer } from "./server.js";
 import type { ApiServerConfig } from "./types.js";
 
@@ -12,6 +13,29 @@ const TEST_CONFIG: ApiServerConfig = {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+const JWT_SECRET = "test-jwt-secret";
+const b64url = (b: Buffer | string) =>
+  Buffer.from(b).toString("base64url").replace(/=+$/, "");
+/** HS256 Supabase-style JWT for a member of the uncharted app. */
+function memberJwt(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const head = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = b64url(
+    JSON.stringify({
+      sub: "user-1",
+      role: "authenticated",
+      aud: "authenticated",
+      app_metadata: { apps: ["uncharted"] },
+      iat: now,
+      exp: now + 3600,
+    }),
+  );
+  const sig = createHmac("sha256", JWT_SECRET)
+    .update(`${head}.${body}`)
+    .digest();
+  return `${head}.${body}.${b64url(sig)}`;
+}
 
 describe("createServer — config validation", () => {
   it("throws if supabaseUrl is missing", () => {
@@ -108,17 +132,32 @@ describe("createServer — edge limits", () => {
 
   it("/analytics/ageb-detail is limited to 20/min per principal+IP", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const app = createServer(TEST_CONFIG);
+    const app = createServer({ ...TEST_CONFIG, supabaseJwtSecret: JWT_SECRET });
+    const headers = { Authorization: `Bearer ${memberJwt()}` };
     // Missing cvegeo → 400 from the handler without touching the DB.
     for (let i = 0; i < 20; i++) {
+      const res = await app.request("/analytics/ageb-detail", { headers });
+      expect(res.status).toBe(400);
+    }
+    const limited = await app.request("/analytics/ageb-detail", { headers });
+    expect(limited.status).toBe(429);
+  });
+
+  it("the X-Api-Key (Jarvis) is exempt from the /analytics limits", async () => {
+    // Pre-change: server.ts registered the ageb-detail limiter without
+    // `exempt: isPriorityPrincipal`, so request 21 here was a 429.
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const app = createServer(TEST_CONFIG);
+    for (let i = 0; i < 30; i++) {
       const res = await app.request("/analytics/ageb-detail", {
         headers: { "X-Api-Key": "test-key" },
       });
       expect(res.status).toBe(400);
     }
-    const limited = await app.request("/analytics/ageb-detail", {
-      headers: { "X-Api-Key": "test-key" },
+    // A forged key is rejected by auth before any limiter could exempt it.
+    const forged = await app.request("/analytics/ageb-detail", {
+      headers: { "X-Api-Key": "not-the-key" },
     });
-    expect(limited.status).toBe(429);
+    expect(forged.status).toBe(401);
   });
 });

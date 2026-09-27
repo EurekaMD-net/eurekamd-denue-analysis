@@ -36,11 +36,16 @@
  * uncharted app membership) or the shared X-Api-Key header (fallback,
  * machine clients). See middleware/auth.ts.
  *
- * Rate limits (middleware/rate-limit.ts):
- *   /sage/query       6/min per principal (+16 KiB body cap)
+ * Rate limits (middleware/rate-limit.ts), all registered after auth:
+ *   /sage/query       6/min per principal (+16 KiB body cap); applies to
+ *                     the X-Api-Key too (LLM budget guard vs a leaked key)
  *   /analytics/*      120/min per principal+IP; ageb-detail and
  *                     agebs-by-municipio 20/min
  *   /tiles/*          60/s per IP (sized for MapLibre's viewport burst)
+ * The shared X-Api-Key is machine-only (Jarvis) and the priority tier: it
+ * is exempt from the /analytics/* and /tiles/* limits, and its DB queries
+ * jump the psql queue with 2x the timeout (request-context.ts,
+ * db/psql-runner.ts). /search and /clusters carry no limiter.
  */
 
 import { Hono } from "hono";
@@ -49,7 +54,10 @@ import type { ApiServerConfig } from "./types.js";
 import { makeAuthMiddleware } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
 import { logMiddleware } from "./middleware/log.js";
-import { makeRateLimitMiddleware } from "./middleware/rate-limit.js";
+import {
+  isPriorityPrincipal,
+  makeRateLimitMiddleware,
+} from "./middleware/rate-limit.js";
 import { searchHandler } from "./handlers/search.js";
 import { establishmentHandler } from "./handlers/establishment.js";
 import { summarySectorHandler } from "./handlers/summary-sector.js";
@@ -164,13 +172,15 @@ export function createServer(config: ApiServerConfig): Hono {
 
   // /analytics/* runs psql per request (ageb-detail opens several backends
   // on the shared cluster), so it is limited per principal+IP: 120/min in
-  // general, 20/min on the two heaviest routes. Audit #17.
+  // general, 20/min on the two heaviest routes. Audit #17. The X-Api-Key
+  // (Jarvis, the priority caller) is exempt; auth has already validated it.
   app.use(
     "/analytics/*",
     makeRateLimitMiddleware({
       max: 120,
       windowMs: 60_000,
       keyBy: "principal+ip",
+      exempt: isPriorityPrincipal,
     }),
   );
   app.use(
@@ -179,6 +189,7 @@ export function createServer(config: ApiServerConfig): Hono {
       max: 20,
       windowMs: 60_000,
       keyBy: "principal+ip",
+      exempt: isPriorityPrincipal,
     }),
   );
   app.use(
@@ -187,6 +198,7 @@ export function createServer(config: ApiServerConfig): Hono {
       max: 20,
       windowMs: 60_000,
       keyBy: "principal+ip",
+      exempt: isPriorityPrincipal,
     }),
   );
 
@@ -196,8 +208,15 @@ export function createServer(config: ApiServerConfig): Hono {
   // limit dropped 80% of those tiles to 429, leaving the user with a
   // near-empty map. 60/s/IP comfortably absorbs an initial burst plus
   // a follow-on pan; the 50k-features-per-tile cap inside the handler
-  // is the real abuse defense.
-  app.use("/tiles/*", makeRateLimitMiddleware({ max: 60, windowMs: 1000 }));
+  // is the real abuse defense. The X-Api-Key (Jarvis) is exempt.
+  app.use(
+    "/tiles/*",
+    makeRateLimitMiddleware({
+      max: 60,
+      windowMs: 1000,
+      exempt: isPriorityPrincipal,
+    }),
+  );
 
   app.get("/search", (c) => searchHandler(c, config));
   app.get("/establishment/:clee", (c) => establishmentHandler(c, config));

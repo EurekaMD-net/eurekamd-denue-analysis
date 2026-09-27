@@ -52,6 +52,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { runJson, runJsonSync, runSql } from "./psql-runner.js";
+import { requestContext } from "../request-context.js";
 
 const SQL = "SELECT json_agg(t) FROM secret_table t WHERE x = 'marker'";
 const OPTS = { container: "test-supabase-db" };
@@ -261,6 +262,74 @@ describe("concurrency", () => {
     const out = await Promise.all(ps);
     expect(out).toHaveLength(10);
     expect(queryChildren()).toHaveLength(10);
+  });
+});
+
+const asPriority = <T>(fn: () => T): T =>
+  requestContext.run({ principal: "apikey", priority: true }, fn);
+const timeoutOf = (child: FakeChild) =>
+  /statement_timeout=(\d+)/.exec(envArg(child.args, "PGOPTIONS") ?? "")?.[1];
+
+describe("priority tier (X-Api-Key request context)", () => {
+  it("a priority waiter takes the next free slot ahead of an earlier normal waiter", async () => {
+    // Pre-change: release() did `waiters.shift()` on a single FIFO, so the
+    // normal waiter (queued first) got the slot and spawned[6] ran "normal".
+    const running = Array.from({ length: 6 }, () => runSql(SQL, OPTS));
+    await waitForSpawns(6);
+    const normal = runSql("SELECT 'normal'", OPTS);
+    await tick();
+    const priority = asPriority(() => runSql("SELECT 'priority'", OPTS));
+    await tick();
+    expect(queryChildren()).toHaveLength(6);
+
+    spawned[0]!.finish("a");
+    await waitForSpawns(7);
+    await tick();
+    expect(queryChildren()).toHaveLength(7);
+    expect(spawned[6]!.sql()).toContain("priority");
+
+    spawned[1]!.finish("b");
+    await waitForSpawns(8);
+    expect(spawned[7]!.sql()).toContain("normal");
+    for (const c of queryChildren().slice(2)) c.finish("x");
+    await Promise.all([...running, normal, priority]);
+  });
+
+  it("doubles the default timeout for priority requests", async () => {
+    // Pre-change: pgOptions used `opts.timeoutMs ?? DEFAULT_TIMEOUT_MS`
+    // unscaled, so this read 25000.
+    const p = asPriority(() => runSql(SQL, OPTS));
+    await waitForSpawns(1);
+    expect(timeoutOf(spawned[0]!)).toBe("50000");
+    spawned[0]!.finish("");
+    await p;
+  });
+
+  it("caps the doubled timeout at 60 s but keeps a longer explicit one", async () => {
+    // Pre-change: statement_timeout was the caller's value (40000) as is.
+    const capped = asPriority(() => runSql(SQL, { ...OPTS, timeoutMs: 40_000 }));
+    const longer = asPriority(() => runSql(SQL, { ...OPTS, timeoutMs: 90_000 }));
+    await waitForSpawns(2);
+    expect(timeoutOf(spawned[0]!)).toBe("60000");
+    expect(timeoutOf(spawned[1]!)).toBe("90000");
+    spawned[0]!.finish("");
+    spawned[1]!.finish("");
+    await Promise.all([capped, longer]);
+  });
+
+  it("the priority wall-clock kill moves with the doubled timeout", async () => {
+    // Pre-change: wallMs = timeoutMs + 5s = 6000, so the kill fired at 6 s.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const p = asPriority(() => runSql(SQL, { ...OPTS, timeoutMs: 1000 }));
+    const settled = p.catch((e: unknown) => e);
+    await waitForSpawns(1);
+    const child = spawned[0]!;
+    vi.advanceTimersByTime(6999);
+    expect(child.kill).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(await settled).toMatchObject({ status: 502 });
+    expect(child.kill).toHaveBeenCalled();
+    expect(cancelChildren()).toHaveLength(1);
   });
 });
 

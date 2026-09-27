@@ -14,11 +14,18 @@
  * On a successful JWT path, c.set("user", {...}) is attached so
  * downstream handlers can identify the caller. The X-Api-Key path
  * leaves `user` unset — handlers that need identity must guard.
+ *
+ * Both paths run the rest of the chain inside requestContext (see
+ * ../request-context.ts): the X-Api-Key path is the priority tier (its DB
+ * queries jump the psql queue and get a longer timeout), the JWT path is
+ * not. A nested in-process request (Sage's dispatcher re-enters the app
+ * with the shared key) never escalates: it inherits the outer priority.
  */
 
 import type { MiddlewareHandler } from "hono";
 import { timingSafeEqual } from "node:crypto";
 import { verifyBearer, type AuthedUser } from "./bearer-auth.js";
+import { requestContext } from "../request-context.js";
 
 export interface AuthMiddlewareConfig {
   /** Shared API key (machine-client path). Required. */
@@ -69,7 +76,10 @@ export function makeAuthMiddleware(
         );
       }
       c.set("user", result.user as AuthedUser);
-      return next();
+      return requestContext.run(
+        { principal: result.user.user_id, priority: false },
+        next,
+      );
     }
 
     // ---- Path 2: X-Api-Key (machine clients) -----------------------
@@ -90,6 +100,10 @@ export function makeAuthMiddleware(
     ) {
       return c.json({ error: "Invalid X-Api-Key", code: "auth.invalid" }, 401);
     }
-    return next();
+    const outer = requestContext.getStore();
+    return requestContext.run(
+      { principal: "apikey", priority: outer ? outer.priority : true },
+      next,
+    );
   };
 }
