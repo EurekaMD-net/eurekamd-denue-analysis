@@ -76,6 +76,16 @@ describe("020-indexes.sql", () => {
     for (const i of built) expect(guardBlock, i).toContain(`'${i}'`);
   });
 
+  it("refuses to drop idx_estab_nombre unless 009's idx_estab_nombre_trgm exists and is VALID", () => {
+    const guardStart = SQL.lastIndexOf("DO $$", SQL.indexOf("is missing or INVALID"));
+    const guardEnd = SQL.indexOf("END $$;", guardStart);
+    const guard = SQL.slice(guardStart, guardEnd);
+    expect(guard).toMatch(
+      /x\.indexrelid = to_regclass\('public\.idx_estab_nombre_trgm'\)\s+AND x\.indisvalid\s+\) THEN\s+RAISE EXCEPTION/,
+    );
+    expect(guardEnd).toBeLessThan(SQL.indexOf("DROP INDEX CONCURRENTLY IF EXISTS public.idx_estab_nombre;"));
+  });
+
   it("ends with VACUUM (ANALYZE) establecimientos so index-only scans skip the heap", () => {
     expect(SQL.trimEnd().endsWith("VACUUM (ANALYZE) public.establecimientos;")).toBe(true);
   });

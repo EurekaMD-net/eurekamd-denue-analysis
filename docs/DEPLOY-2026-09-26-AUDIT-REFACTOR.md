@@ -82,7 +82,8 @@ cdf52fc (web: abort cancelled queries, allow '..' in search text; #176 #199).
 
 ## (b) Operator runbook
 
-Everything from step 2 to step 7 happens in **one window**. The live
+Step 1b (G1 user tagging) runs at least 1 h BEFORE the window. Everything
+from step 2 to step 7 happens in **one window**. The live
 `denue-analyzer` runs `npx tsx --env-file=.env scripts/serve.ts` straight
 from the main checkout, and `denue-matview-refresh.timer` (daily at about
 04:02 UTC) runs `scripts/refresh-matviews.sh` from the same place. After the
@@ -104,7 +105,7 @@ chmod 600 /root/claude/projects/data-intelligence/denue-data-analysis/.env
 # (P02) world-readable .env files anywhere under /root/claude: chmod 600 each one listed
 find /root/claude -maxdepth 5 -name '.env' -perm /o+r -print
 # (P02) nobody outside DENUE reads the relations 002 locks down (expect no output)
-grep -rlE 'rest/v1/(ageb_polygons|mun_polygons|ent_polygons|loc_polygons|establecimientos)' /root/claude --include=*.ts --include=*.tsx --include=*.js --exclude-dir=node_modules --exclude-dir=dist | grep -v denue-data-analysis
+grep -rlE 'rest/v1/(ageb_polygons|mun_polygons|ent_polygons|loc_polygons|establecimientos)' /root/claude --include=*.ts --include=*.tsx --include=*.js --exclude-dir=node_modules --exclude-dir=dist | grep -v denue-data-analysis | grep -v denue-wt
 # (P04) must print 0: EnvironmentFile overrides a drop-in Environment=
 grep -c '^TRUST_PROXY=' /root/claude/projects/data-intelligence/denue-data-analysis/.env
 # Keep the nightly refresh from firing mid-window (restarted in step 8)
@@ -119,6 +120,25 @@ Also confirm, outside the shell:
   `top-municipios.ts`, `sector-summary.ts`.
 - (P03) No other EurekaMD app relies on GoTrue self-signup (section G2).
 - (P03) The list of emails that should keep access (section G1).
+
+### Step 1b: section G1, tag the allowed users (at least 1 h before step 2)
+
+Live, 0 of 15 users carry `app_metadata.apps`. The new code (P03) rejects
+a bearer JWT without `uncharted` in it, and a JWT only picks up the tag
+when it is next issued: at sign-in, or at the hourly token refresh. Tag
+the users at least 1 h before step 2, so every open session already
+carries the tag when the new code starts. Tagging later means up to 1 h
+of 401s after the step-7 restart. Also, from step 2 on the new code is on
+disk, and the unit has `Restart=always`, so an unplanned restart at any
+point after the merge already enforces the tag.
+
+```
+docker exec supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE auth.users SET raw_app_meta_data = jsonb_set(coalesce(raw_app_meta_data,'{}'::jsonb), '{apps}', coalesce(raw_app_meta_data->'apps','[]'::jsonb) || '[\"uncharted\"]'::jsonb) WHERE email IN ('<allowed-1>','<allowed-2>')"
+# expect the number of emails listed above
+docker exec supabase-db psql -U postgres -d postgres -tA -c "SET default_transaction_read_only=on" -c "SELECT count(*) FROM auth.users WHERE raw_app_meta_data->'apps' ? 'uncharted'"
+```
+
+Rollback: none needed. The tag has no effect on the old code.
 
 ### Step 2: merge
 
@@ -140,6 +160,8 @@ rollback.
 ```
 # (P01 code is in this merge, see (c)) denue_sage becomes LOGIN (no password),
 # 8 s timeout, read-only default. It is NOLOGIN live today, so Sage SQL fails until this runs.
+# (P01 round 2, c33842d) also sets app.service_role_key and app.webhook_url to '' for denue_sage sessions
+# and revokes the SQL-string/file functions (ts_stat, *_to_xml, pg_read_file, ...) from PUBLIC.
 docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < /root/claude/projects/data-intelligence/denue-data-analysis/scripts/sage-role.sql
 # (P31) denue_api: the role every psql-backed endpoint now logs in as. Without it: 502 everywhere.
 docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < /root/claude/projects/data-intelligence/denue-data-analysis/scripts/api-role.sql
@@ -190,19 +212,13 @@ Notes:
   keyword queries stay slow.
 - If 020 is interrupted, its validity guard stops before any DROP. Run
   `DROP INDEX CONCURRENTLY <the INVALID index it names>`, then re-run 020.
+  The guard also stops 020 when 009's `idx_estab_nombre_trgm` is missing
+  or INVALID, so `idx_estab_nombre` is never dropped before /search has
+  its replacement.
 
 ### Step 5: section G (GoTrue / auth), clearly separate
 
-**G1: tag the allowed users (required BEFORE step 7).** Live, 0 of 15 users
-carry `app_metadata.apps`, so restarting without this locks everyone out.
-
-```
-docker exec supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE auth.users SET raw_app_meta_data = jsonb_set(coalesce(raw_app_meta_data,'{}'::jsonb), '{apps}', coalesce(raw_app_meta_data->'apps','[]'::jsonb) || '[\"uncharted\"]'::jsonb) WHERE email IN ('<allowed-1>','<allowed-2>')"
-```
-
-Users must sign out and back in, or wait up to 1 h for a token refresh,
-before their JWT carries the tag.
-Rollback: none needed. The tag has no effect on the old code.
+G1 (user tagging) already ran in step 1b.
 
 **G2: close self-signup (independent of the code; do it after confirming
 no other app needs it).** Record the current values first:
@@ -235,12 +251,21 @@ Rollback: `rm /etc/systemd/system/denue-analyzer.service.d/trust-proxy.conf /etc
 
 ```
 systemctl restart denue-analyzer && sleep 20 && systemctl is-active denue-analyzer && curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3030/health
-journalctl -u denue-analyzer -n 60 --no-pager | grep -iE 'trust|ip=|source=data'
+SINCE="$(systemctl show -p ActiveEnterTimestamp --value denue-analyzer)"
+journalctl -u denue-analyzer --since "$SINCE" --no-pager -o cat | grep -E 'TRUST_PROXY|current_ano resolved from data:|fell back to static'
+# expect 2 (risk-summary + mortality-summary), then 0
+journalctl -u denue-analyzer --since "$SINCE" --no-pager -o cat | grep -c 'current_ano resolved from data:'
+journalctl -u denue-analyzer --since "$SINCE" --no-pager -o cat | grep -c 'current_ano resolver fell back to static'
 systemd-analyze security denue-analyzer | tail -1
 ```
 
 Expected: `active`, `200`, the boot line `client IP: rightmost X-Forwarded-For (TRUST_PROXY on)`,
-and risk/mortality ano with `source=data` (this confirms the `psql -f -` stdin transport against the live container).
+`risk-summary default current_ano resolved from data: <year>` and
+`mortality-summary default current_ano resolved from data: <year>`, so the
+counts print `2` then `0`. Those two resolvers are the first queries
+through the `psql -f -` stdin transport against the live container. A
+`fell back to static` line means they failed (DB unreachable, a missing
+role or GRANT), even though `/health` returned 200.
 
 ### Step 8: the single web build, then re-arm the timer
 
@@ -275,14 +300,14 @@ to `Content-Security-Policy`, then validate, reload and commit again.
 
 ### Section P (Postgres instance / shared GoTrue secrets), clearly separate
 
-- 002 (step 3) sets instance-wide role defaults shared with other apps:
+- 002 (step 4) sets instance-wide role defaults shared with other apps:
   anon 3 s, authenticated 8 s, service_role 30 s `statement_timeout`.
   Before this, none of these roles had one.
   Rollback: `docker exec supabase-db psql -U postgres -d postgres -c "ALTER ROLE anon RESET statement_timeout" -c "ALTER ROLE authenticated RESET statement_timeout" -c "ALTER ROLE service_role RESET statement_timeout"`.
   Do not roll back the revokes, which are a security fix. If an outside
   consumer breaks, grant that one relation explicitly.
-- Optional (P02 step 4): if exposure through the old 644 `.env` cannot be
-  ruled out, rotate `SUPABASE_JWT_SECRET` in `/opt/supabase/.env`. This
+- Required by step 10 (c) for #110 (and P02 step 4, the old 644 `.env`):
+  rotate `SUPABASE_JWT_SECRET` in `/opt/supabase/.env`. This
   reissues the anon and service keys for **every** app on the instance.
   Rollback: none once keys are reissued, so plan it with every app owner.
 - Optional later (P03): add `GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}/auth/v1`
@@ -290,16 +315,75 @@ to `Content-Security-Policy`, then validate, reload and commit again.
   `iss`. A follow-up can then make the `iss` check strict.
   Rollback: remove the line, then `cd /opt/supabase && docker compose up -d auth`.
 
-### Step 10: verification (read-only)
+### Step 10: #110 durable fix (section K, shared-instance secrets)
+
+Step 3 (`sage-role.sql`) masks the database-level settings
+`app.service_role_key` and `app.webhook_url` for `denue_sage`, so no SQL
+that reaches Sage can read them. The value itself still sits in
+`pg_db_role_setting` for database `postgres`, which every role can read
+(`current_setting()`, and the catalog is PUBLIC-readable), and it was
+readable before this deploy. That is the durable part of critical finding
+#110, and it has three parts. (c) is not optional.
+
+(a) Read-only check: which functions still read the key.
+
+```
+docker exec supabase-db psql -U postgres -d postgres -tA -c "SET default_transaction_read_only=on" -c "SET statement_timeout='20s'" -c "SELECT n.nspname||'.'||p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.prosrc ILIKE '%service_role_key%'"
+```
+
+On 2026-09-27 this prints `public.notify_jarvis`, the mission-control
+trigger function on `tasks`, `goals`, `objectives` and `journal_entries`.
+It reads `current_setting('app.service_role_key', true)` and sends it as
+the `Bearer` of its `net.http_post` to `app.webhook_url`.
+`supabase_vault` is not installed. Coordinate with the mission-control
+owner: move the key `notify_jarvis()` sends to storage that PUBLIC cannot
+read, then run (a) again. Run (b) only when (a) prints nothing. If you
+run it earlier, the triggers do not fail (they pass `missing_ok`), but
+the Jarvis webhook gets an empty bearer.
+
+(b) Remove the key from the database. Of the two dotted settings stored
+on database `postgres`, only `app.service_role_key` holds a secret.
+`app.webhook_url` is a URL with no credential in it (read-only check,
+2026-09-27), and `notify_jarvis()` still needs it, so it stays.
+
+```
+docker exec supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres RESET app.service_role_key"
+# expect 0 rows
+docker exec supabase-db psql -U postgres -d postgres -tA -c "SET default_transaction_read_only=on" -c "SELECT s.setdatabase FROM pg_db_role_setting s, unnest(s.setconfig) c WHERE c LIKE 'app.service_role_key=%'"
+```
+
+Rollback: none. Once the key is rotated in (c) the old value is useless,
+and restoring it would expose it again.
+
+(c) **Coordination required, not optional**: rotate the service_role key
+with every app owner on the shared Supabase instance (db.mycommit.net).
+Any role on the instance, and any Sage user before this deploy, could read
+it, and it bypasses RLS for every project there. A service_role JWT
+re-signed with an unchanged JWT secret leaves the leaked one valid, so
+this is the JWT-secret rotation in section P, which reissues the anon and
+service keys for every app. Regenerate the secret and SERVICE_ROLE_KEY in
+`/opt/supabase/.env`, run `cd /opt/supabase && docker compose up -d`, then
+update each consumer's `SUPABASE_SERVICE_KEY` (and the copy that
+`notify_jarvis()` now reads) and restart each consumer.
+Rollback: none once keys are reissued, so schedule it with every owner.
+
+### Step 11: verification (read-only)
 
 Run the SQL checks read-only:
 `docker exec supabase-db psql -U postgres -d postgres -tA -c "SET default_transaction_read_only=on" -c "SET statement_timeout='20s'" -c "<query>"`.
 
 ```
-# (P31) smoke every psql-backed route: expect no 5xx; "permission denied for" in the journal means a missed GRANT
-(cd /root/claude/projects/data-intelligence/denue-data-analysis && set -a; . ./.env; set +a; for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010010' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455.pbf'; do curl -s -o /dev/null -w "%{http_code} $p\n" -H "X-Api-Key: $API_KEY" "http://127.0.0.1:3030$p"; done)
+# (P31) smoke every psql-backed route: expect 200 on every line (the tile may be 204 if empty).
+# A 4xx means a wrong path or key, a 5xx a server fault; "permission denied for" in the journal means a missed GRANT
+(cd /root/claude/projects/data-intelligence/denue-data-analysis && API_KEY=$(grep -E '^API_KEY=' .env | cut -d= -f2-); for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010010' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455'; do curl -s -o /dev/null -w "%{http_code} $p\n" -H "X-Api-Key: $API_KEY" "http://127.0.0.1:3030$p"; done)
 ```
 
+- (P01, #110) Sage logs in as a non-superuser whose session cannot read the
+  masked settings:
+  `docker exec supabase-db psql -U denue_sage -d postgres -tAc "SELECT current_user, current_setting('is_superuser')"` prints `denue_sage|off`;
+  `docker exec supabase-db psql -U denue_sage -d postgres -tAc "SELECT length(current_setting('app.service_role_key', true)), length(current_setting('app.webhook_url', true))"` prints `0|0`
+  (any other number means the key is readable: re-run `sage-role.sql`).
+  One live Sage question that takes the SQL route returns a table.
 - (P07) During a heavy `agebs-by-municipio?cve_mun=09007` request,
   `time curl -s http://127.0.0.1:3030/health` stays at a few ms.
   `SELECT application_name, count(*) FROM pg_stat_activity WHERE application_name LIKE 'denue-%' GROUP BY 1`
@@ -325,7 +409,7 @@ Run the SQL checks read-only:
   Login, sign-out and a token refresh (a tab left open past about 1 h) all
   work. A /map tab from the previous deploy reloads itself once.
 - (P15) `curl -sI https://uncharted.eurekamd.cloud/ | grep -iE 'strict-transport|x-frame|content-security|x-content-type'`;
-  `curl -s -o /dev/null -w '%{http_code}\n' https://uncharted.eurekamd.cloud/assets/index-Bycu1coZ.js.map` returns 404;
+  `ls /root/claude/projects/data-intelligence/denue-data-analysis/web/dist/assets/*.map 2>/dev/null | wc -l` prints 0;
   `curl -sI https://uncharted.eurekamd.cloud/minisu-catalog/index.html | grep -i content-security`.
   On /map, the browser console shows no CSP report-only violations (tiles, glyphs, sprites, workers, login).
 - (P24/P25) Two Sage questions, then read `sage_turns_audit`. The Anthropic
@@ -343,6 +427,9 @@ Run the SQL checks read-only:
   transaction: `mv_sinba_morbidity_municipal` (185a993) and the three censo
   views from `migrate-censo-views.sql`. Earlier lane notes said to re-run
   018 or `migrate-censo-views.sql` after a reload. That no longer applies.
+- Re-run `scripts/sage-role.sql` after any new `ALTER DATABASE ... SET` of
+  a dotted setting (`app.*`). The masking in it applies only to the
+  settings stored when it last ran (P01 round 2).
 - Re-running `sage-role.sql` or `perf-matviews.sql` drops `denue_sage` on
   `mv_sinba_morbidity_municipal`. This is harmless: Sage's catalog lists
   the view.
@@ -388,11 +475,16 @@ reverted and the later commits reworked. A plain `git revert` of 4c15ce1
 does not stand alone, because d5d8df3 runs the gate through the
 `denue_sage` runner options it introduced.
 
+Round 2 reworked all three on this branch (c33842d, 15fecc0, acb21f5).
+Their operator steps are already in the runbook: `sage-role.sql` (step 3),
+the restart (step 7), the web build (step 8), and for P01 the #110 durable
+fix (step 10) and its checks (step 11).
+
 | Package | Commits in branch | Last fix round (from the lane) |
 | --- | --- | --- |
-| P01 (Sage SQL gate: non-superuser, tokenizer, denylist) | 4c15ce1, 937a529 | #110 was still open because `ts_stat`/`ts_rewrite` were missing from the denylist; 937a529 adds them to FORBIDDEN_FUNCTIONS, a follow-up commit, history not rewritten. The commit notes the durable fix is an operator step that removes the leaked setting from the database. Requires `sage-role.sql` (step 3). |
-| P11 (Sage 200-row cap truncation) | c5928c4 | The SQL path lost the true count. The digest is now `{...buildDigest(rows), truncated}` when `fetched > cap`. |
-| P16 (sign-out drops the session) | f108dd7, 70e2815 | #192: the `signOut({scope:'local'})` fallback failed the same way, so it was removed. On `{error}`, `signOut` warns without the token, awaits `stopAutoRefresh()` and deletes the `sb-*-auth-token` keys itself. |
+| P01 (Sage SQL gate: non-superuser, tokenizer, denylist) | 4c15ce1, 937a529, c33842d | #110 was still open because `ts_stat`/`ts_rewrite` were missing from the denylist; 937a529 adds them to FORBIDDEN_FUNCTIONS, a follow-up commit, history not rewritten. Round 2 (c33842d) masks the secrets for `denue_sage` in `sage-role.sql` (step 3) and decodes U& identifiers. The durable fix is step 10. |
+| P11 (Sage 200-row cap truncation) | c5928c4, 15fecc0 | The SQL path lost the true count. The digest is now `{...buildDigest(rows), truncated}` when `fetched > cap`. Round 2 (15fecc0): the endpoint route sends `truncated: false`, so an exact 570-row total no longer shows as "570+". |
+| P16 (sign-out drops the session) | f108dd7, 70e2815, acb21f5 | #192: the `signOut({scope:'local'})` fallback failed the same way, so it was removed. On `{error}`, `signOut` warns without the token and deletes the `sb-*-auth-token` keys itself. Round 2 (acb21f5) drops the `stopAutoRefresh()` call, which left a same-tab re-login without token refresh. |
 
 ---
 

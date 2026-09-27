@@ -84,7 +84,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ce2024_mun_ent_rollup
 
 -- Every index built above must exist and be VALID before anything is dropped
 -- (idx_estab_entidad in particular is only redundant once its replacement
--- is usable).
+-- is usable). idx_estab_nombre_trgm is built by 009-trgm-index.sql, not
+-- here: idx_estab_nombre is dropped below only once /search has it.
 DO $$
 DECLARE
   i text;
@@ -100,6 +101,13 @@ BEGIN
       RAISE EXCEPTION 'index % is missing or INVALID: DROP INDEX CONCURRENTLY it and re-run 020', i;
     END IF;
   END LOOP;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index x
+     WHERE x.indexrelid = to_regclass('public.idx_estab_nombre_trgm')
+       AND x.indisvalid
+  ) THEN
+    RAISE EXCEPTION 'index idx_estab_nombre_trgm is missing or INVALID: apply 009-trgm-index.sql (DROP INDEX CONCURRENTLY an INVALID one first), then re-run 020';
+  END IF;
 END $$;
 
 -- #121/#135: prefix of idx_estab_ent_mun_cov.
