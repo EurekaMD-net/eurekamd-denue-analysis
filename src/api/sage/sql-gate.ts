@@ -159,6 +159,10 @@ const FORBIDDEN_FUNCTIONS = [
   "pg_ls_dir",
   "pg_cancel_backend",
   "pg_terminate_backend",
+  // ts_stat(text) and ts_rewrite(tsquery, text) run their text argument
+  // as a query through SPI.
+  "ts_stat",
+  "ts_rewrite",
 ];
 const FORBIDDEN_FUNCTION_PREFIXES = [
   "lo_",
@@ -166,6 +170,8 @@ const FORBIDDEN_FUNCTION_PREFIXES = [
   "query_to_xml",
   "table_to_xml",
   "cursor_to_xml",
+  "schema_to_xml",
+  "database_to_xml",
   "pg_sleep",
 ];
 // Any name qualified by one of these schemas is rejected (pg_net, Supabase

@@ -147,6 +147,28 @@ describe("preCheckSql", () => {
     }
   });
 
+  it("rejects ts_stat / ts_rewrite, which run a query string via SPI", () => {
+    for (const sql of [
+      "SELECT word FROM ts_stat($q$SELECT current_setting('app.x')::tsvector$q$)",
+      "SELECT word FROM pg_catalog.ts_stat('SELECT v FROM t', 'a')",
+      "SELECT ts_rewrite('a'::tsquery, 'SELECT t, s FROM aliases')",
+      'SELECT "ts_rewrite"(\'a\'::tsquery, \'SELECT 1\')',
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_FORBIDDEN_KEYWORD");
+    }
+  });
+
+  it("rejects schema_to_xml* and database_to_xml*", () => {
+    for (const sql of [
+      "SELECT schema_to_xml('public', true, false, '')",
+      "SELECT schema_to_xmlschema('public', true, false, '')",
+      "SELECT database_to_xml(true, false, '')",
+      "SELECT database_to_xml_and_xmlschema(true, false, '')",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_FORBIDDEN_KEYWORD");
+    }
+  });
+
   it("rejects a mismatched dollar quote", () => {
     expect(
       preCheckSql("SELECT $a$ x; DELETE FROM y $b$ FROM censo_entidades")
