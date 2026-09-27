@@ -74,6 +74,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { argv } from "node:process";
+import { copyFromStdinScript, runPsqlScript } from "./_psql-tx.js";
 
 interface Args {
   csv: string;
@@ -774,31 +775,19 @@ export async function loadCnbvCredito(args: Args): Promise<void> {
     console.log(
       "[load-cnbv] truncating + loading raw CSV (UTF-8 transcoded)...",
     );
-    dockerExecStdin(
-      args.container,
-      ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-      `TRUNCATE TABLE cnbv_credito_raw_2025;`,
-    );
-
+    // Audit #146: TRUNCATE and \copy share ONE psql session and
+    // transaction (CSV piped inline after the \copy line), so a failed copy
+    // rolls the TRUNCATE back instead of committing an empty raw table.
     const copyCmd = `\\copy cnbv_credito_raw_2025 (${RAW_HEADER_COLS.join(", ")}) FROM STDIN WITH (FORMAT csv, HEADER true)`;
     const csvBuf = readFileSync(utf8Path);
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        args.container,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-c",
+    runPsqlScript(
+      args.container,
+      copyFromStdinScript(
+        `TRUNCATE TABLE cnbv_credito_raw_2025;`,
         copyCmd,
-      ],
-      { input: csvBuf, maxBuffer: 256 * 1024 * 1024 },
+        csvBuf,
+      ),
+      30 * 60_000,
     );
 
     // 5. Build views atomically.

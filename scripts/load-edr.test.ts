@@ -19,6 +19,7 @@ vi.mock("node:fs", async (importOriginal) => ({
 }));
 
 import {
+  buildEdrAppendSql,
   buildEdrReloadSql,
   EDR_COLUMNS,
   EDR_DDL_FOR_TEST,
@@ -260,9 +261,8 @@ describe("loadEdr", () => {
     mockClose.mockReturnValue(undefined);
 
     mockExec
-      .mockReturnValueOnce("") // DELETE FROM ... WHERE anio_regis = '2023'
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // DELETE year + \copy (one tx, audit #147)
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("1639344") // raw_rows (2x)
       .mockReturnValueOnce("1618000") // rows_with_residence
@@ -275,14 +275,39 @@ describe("loadEdr", () => {
       append: true,
     });
 
-    // First call: DELETE keyed by the year extracted from line 2.
-    const purgeCall = mockExec.mock.calls[0];
-    expect(purgeCall?.[1]?.[0]).toBe("exec");
-    const purgeSql = purgeCall?.[1]?.[purgeCall[1].length - 1] ?? "";
-    expect(purgeSql).toMatch(/DELETE FROM inegi_edr_defunciones_raw/);
-    expect(purgeSql).toMatch(/anio_regis = '2023'/);
-    // Second call: cp (no DDL).
-    expect(mockExec.mock.calls[1]?.[1]?.[0]).toBe("cp");
+    // First call: cp (no DDL, no purge outside the transaction).
+    expect(mockExec.mock.calls[0]?.[1]?.[0]).toBe("cp");
+    // Second call: DELETE keyed by the year extracted from line 2, then
+    // \copy — ONE single-transaction psql session (audit #147), so a failed
+    // \copy rolls the purge back instead of leaving 2023 deleted.
+    const txCall = mockExec.mock.calls[1];
+    expect(txCall?.[1]).toContain("--single-transaction");
+    const txSql = String((txCall?.[2] as { input: string }).input);
+    const containerPath = String(
+      (mockExec.mock.calls[0]?.[1] as string[])[3],
+    ).replace("supabase-db:", "");
+    expect(txSql).toBe(buildEdrAppendSql(containerPath, "2023"));
+    expect(txSql).toMatch(/DELETE FROM inegi_edr_defunciones_raw/);
+    expect(txSql).toMatch(/anio_regis = '2023'/);
+    expect(txSql.indexOf("DELETE")).toBeLessThan(txSql.indexOf("\\copy"));
+    // No psql session runs the DELETE on its own.
+    const loneDeletes = mockExec.mock.calls.filter((c) =>
+      ((c[1] as string[]) ?? []).some((a) => a.includes("DELETE FROM")),
+    );
+    expect(loneDeletes).toHaveLength(0);
+  });
+
+  it("buildEdrAppendSql: DELETE + \\copy, or \\copy alone when the year is unknown", () => {
+    expect(buildEdrAppendSql("/tmp/e.csv", "2023")).toBe(
+      "DELETE FROM inegi_edr_defunciones_raw WHERE anio_regis = '2023';\n" +
+        "\\copy inegi_edr_defunciones_raw FROM '/tmp/e.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    expect(buildEdrAppendSql("/tmp/e.csv", null)).toBe(
+      "\\copy inegi_edr_defunciones_raw FROM '/tmp/e.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    expect(() => buildEdrAppendSql("/tmp/e.csv", "2023'; DROP")).toThrow(
+      /anio_regis inválido/,
+    );
   });
 
   it("--append with unparseable anio_regis skips purge (loader proceeds)", async () => {
@@ -307,7 +332,7 @@ describe("loadEdr", () => {
 
     mockExec
       .mockReturnValueOnce("") // docker cp (no purge, no DDL)
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // \copy (one tx, no DELETE)
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("0")
       .mockReturnValueOnce("0")
@@ -322,6 +347,9 @@ describe("loadEdr", () => {
 
     // First call should jump straight to cp — purge is skipped on unparseable year.
     expect(mockExec.mock.calls[0]?.[1]?.[0]).toBe("cp");
+    expect(
+      String((mockExec.mock.calls[1]?.[2] as { input: string }).input),
+    ).not.toMatch(/DELETE/);
   });
 
   it("cleans up the container temp file even if \\copy throws", async () => {

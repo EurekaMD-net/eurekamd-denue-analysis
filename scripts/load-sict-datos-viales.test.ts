@@ -58,10 +58,9 @@ afterEach(() => vi.restoreAllMocks());
  * Drive a successful end-to-end load. Exec sequence (W1 fix: views combined):
  *   1. dockerExecStdin → RAW_DDL (CREATE TABLE)
  *   2. dockerExec → COUNT(*) idempotency guard
- *   3. dockerExecStdin → TRUNCATE
- *   4. execFileSync (no helper) → \copy
- *   5. dockerExecStdin → VIEWS_DDL_TRANSACTION (atomic BEGIN/COMMIT block)
- *   6. dockerExec → POST_LOAD_VERIFY_SQL
+ *   3. runPsqlScript → TRUNCATE + \copy FROM STDIN, ONE transaction (audit #146)
+ *   4. dockerExecStdin → VIEWS_DDL_TRANSACTION (atomic BEGIN/COMMIT block)
+ *   5. dockerExec → POST_LOAD_VERIFY_SQL
  *
  * `mockReadFile` returns the CSV TWICE: once for `rewriteHeader` and once
  * for the `\copy` STDIN buffer (we read the CLEANED tempfile back in).
@@ -73,8 +72,7 @@ function stubHappyPath(): void {
   mockExec
     .mockReturnValueOnce("CREATE TABLE\nCREATE INDEX\n") // RAW_DDL
     .mockReturnValueOnce("0\n") // COUNT(*) — empty
-    .mockReturnValueOnce("TRUNCATE TABLE\n") // TRUNCATE
-    .mockReturnValueOnce("COPY 1\n") // \copy
+    .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy (one tx)
     .mockReturnValueOnce(
       "CREATE VIEW\nCREATE MATERIALIZED VIEW\nCREATE INDEX\nCOMMIT\n",
     ) // VIEWS_DDL_TRANSACTION
@@ -130,22 +128,31 @@ describe("loadSictDatosViales (orchestration)", () => {
       force: true,
       container: "supabase-db",
     });
-    // 6 exec calls in canonical order (W1: views merged into 1 transaction)
-    expect(mockExec).toHaveBeenCalledTimes(6);
+    // 5 exec calls in canonical order (W1: views merged into 1 transaction)
+    expect(mockExec).toHaveBeenCalledTimes(5);
 
     // Call 1: RAW_DDL via stdin
     expect(mockExec.mock.calls[0]?.[2]).toMatchObject({ input: RAW_DDL });
-    // Call 4: \copy command — args contain STDIN copy invocation
-    const copyArgs = (mockExec.mock.calls[3]?.[1] ?? []) as string[];
-    expect(copyArgs.join(" ")).toContain(
+    // Call 3: TRUNCATE + \copy FROM STDIN in ONE single-transaction psql
+    // session (audit #146), CSV inline after the \copy line.
+    const txArgs = (mockExec.mock.calls[2]?.[1] ?? []) as string[];
+    expect(txArgs).toContain("--single-transaction");
+    expect(txArgs).not.toContain("-c");
+    const txInput = String(
+      (mockExec.mock.calls[2]?.[2] as { input: Buffer }).input,
+    );
+    expect(txInput.startsWith("TRUNCATE TABLE sict_estaciones_viales_raw_2024;\n")).toBe(true);
+    expect(txInput).toContain(
       `\\copy sict_estaciones_viales_raw_2024 (${RAW_HEADER_COLS.join(", ")}) FROM STDIN`,
     );
-    // Call 5: VIEWS_DDL_TRANSACTION (single atomic call wrapping both DDLs)
-    expect(mockExec.mock.calls[4]?.[2]).toMatchObject({
+    expect(txInput.indexOf("TRUNCATE")).toBeLessThan(txInput.indexOf("\\copy"));
+    expect(txInput.endsWith("\n\\.\n")).toBe(true);
+    // Call 4: VIEWS_DDL_TRANSACTION (single atomic call wrapping both DDLs)
+    expect(mockExec.mock.calls[3]?.[2]).toMatchObject({
       input: VIEWS_DDL_TRANSACTION,
     });
-    // Call 6: POST_LOAD_VERIFY_SQL
-    expect(mockExec.mock.calls[5]?.[1]?.join(" ")).toContain(
+    // Call 5: POST_LOAD_VERIFY_SQL
+    expect(mockExec.mock.calls[4]?.[1]?.join(" ")).toContain(
       POST_LOAD_VERIFY_SQL,
     );
   });
@@ -180,6 +187,38 @@ describe("loadSictDatosViales (orchestration)", () => {
     );
   });
 
+  it("a failed \\copy never runs TRUNCATE on its own (audit #146)", async () => {
+    mockReadFile
+      .mockReturnValueOnce(SAMPLE_CSV)
+      .mockReturnValueOnce(Buffer.from(SAMPLE_CSV));
+    mockExec
+      .mockReturnValueOnce("CREATE TABLE\n") // RAW_DDL ok
+      .mockReturnValueOnce("0\n") // COUNT 0 — proceed
+      .mockImplementationOnce(() => {
+        // psql rolls the whole session back: TRUNCATE is undone.
+        throw new Error("ERROR: extra data after last expected column");
+      });
+    await expect(
+      loadSictDatosViales({
+        csv: "raw/sict/datos_viales_2024.csv",
+        force: true,
+        container: "supabase-db",
+      }),
+    ).rejects.toThrow(/extra data/);
+    // No psql session ever ran the TRUNCATE outside the \copy transaction,
+    // and nothing ran after the failure.
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    const lone = mockExec.mock.calls.filter((c) => {
+      const input = (c[2] as { input?: unknown } | undefined)?.input;
+      return (
+        typeof input === "string" &&
+        input.includes("TRUNCATE") &&
+        !input.includes("\\copy")
+      );
+    });
+    expect(lone).toHaveLength(0);
+  });
+
   it("cleans up tempdir even on docker-exec failure during DDL step", async () => {
     // Round-3 audit C1: this test exercises the FINALLY-block tempdir
     // cleanup path when the Node-side `docker exec` invocation throws.
@@ -193,8 +232,7 @@ describe("loadSictDatosViales (orchestration)", () => {
     mockExec
       .mockReturnValueOnce("CREATE TABLE\n") // RAW_DDL ok
       .mockReturnValueOnce("0\n") // COUNT 0 — proceed
-      .mockReturnValueOnce("TRUNCATE\n") // TRUNCATE ok
-      .mockReturnValueOnce("COPY 1\n") // \copy ok
+      .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy ok
       .mockImplementationOnce(() => {
         // Simulate `docker exec` itself failing (container died, network
         // partition, etc.) at the VIEWS_DDL_TRANSACTION step.

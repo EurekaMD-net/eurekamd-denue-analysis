@@ -12,7 +12,9 @@ const { mockOpen, mockRead, mockClose, mockStat } = vi.hoisted(() => ({
   mockClose: vi.fn(),
   mockStat: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -22,6 +24,7 @@ vi.mock("node:fs", () => ({
 import {
   buildPostLoadSql,
   buildSinbaCreateTable,
+  buildSinbaReloadSql,
   loadSinba,
 } from "./load-sinba.js";
 
@@ -51,7 +54,8 @@ function mockHeaderFs(line: string, sizeBytes = 50_000_000): void {
 describe("buildSinbaCreateTable", () => {
   it("lowercases columns and quotes them as TEXT", () => {
     const sql = buildSinbaCreateTable(HEADER);
-    expect(sql).toContain("DROP TABLE IF EXISTS sinba_ec_raw CASCADE");
+    expect(sql).toContain("DROP TABLE IF EXISTS sinba_ec_raw;");
+    expect(sql).not.toContain("CASCADE");
     expect(sql).toContain('"clave_entidad" TEXT');
     expect(sql).toContain('"clave_municipio" TEXT');
     expect(sql).toContain('"adm02" TEXT');
@@ -102,10 +106,10 @@ describe("buildPostLoadSql", () => {
     expect(sql).toContain("anio ~ '^[0-9]{4}$'");
   });
 
-  it("wraps in BEGIN/COMMIT (qa-audit C3 — atomic view replace)", () => {
+  it("carries no BEGIN/COMMIT: it runs inside the reload's single transaction (qa-audit C3, audit #145)", () => {
+    // An inner COMMIT would end runPsqlScript's --single-transaction early.
     const sql = buildPostLoadSql(HEADER);
-    expect(sql.trim().startsWith("BEGIN;")).toBe(true);
-    expect(sql.trim().endsWith("COMMIT;")).toBe(true);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
   });
 
   it("CREATE OR REPLACE VIEW (idempotent, no race)", () => {
@@ -176,6 +180,7 @@ describe("loadSinba — C1 force-required-on-populated guard", () => {
     mockHeaderFs(HEADER);
     mockExec.mockImplementation((_cmd, args) => {
       const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('sinba_ec_raw')")) return "t\n";
       if (sql.includes("SELECT COUNT(*) FROM sinba_ec_raw")) return "141021\n";
       return "";
     });
@@ -184,10 +189,29 @@ describe("loadSinba — C1 force-required-on-populated guard", () => {
     ).rejects.toThrow(/already has 141021 rows.*--force/);
   });
 
+  it("rethrows a failed COUNT probe instead of treating it as 'absent' (audit #157)", async () => {
+    mockHeaderFs(HEADER);
+    mockExec.mockImplementation((_cmd, args) => {
+      const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('sinba_ec_raw')")) return "t\n";
+      if (sql.includes("SELECT COUNT(*) FROM sinba_ec_raw")) {
+        throw new Error("canceling statement due to lock timeout");
+      }
+      return "";
+    });
+    await expect(
+      loadSinba({ csvPath: "/tmp/sinba.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/lock timeout/);
+    expect(
+      mockExec.mock.calls.some((c) => (c[2] as { input?: string })?.input),
+    ).toBe(false);
+  });
+
   it("--force allows re-load", async () => {
     mockHeaderFs(HEADER);
     mockExec.mockImplementation((_cmd, args) => {
       const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass")) return "";
       if (sql.includes("SELECT COUNT(*) FROM sinba_ec_raw")) return "141021\n";
       if (sql.includes("SELECT COUNT(*) FROM sinba_morbidity_municipal"))
         return "2204\n";
@@ -200,5 +224,47 @@ describe("loadSinba — C1 force-required-on-populated guard", () => {
     });
     expect(result.rows_loaded).toBe(141021);
     expect(result.munis_covered).toBe(2204);
+  });
+});
+
+describe("loadSinba — atomic reload (audit #145)", () => {
+  it("runs DDL, \\copy, swap and view as ONE single-transaction psql session", async () => {
+    mockHeaderFs(HEADER);
+    mockExec.mockImplementation((_cmd, args) => {
+      const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('sinba_ec_raw')")) return "f\n";
+      if (sql.includes("to_regclass")) return "";
+      if (sql.includes("SELECT COUNT(*)")) return "1\n";
+      return "";
+    });
+    await loadSinba({ csvPath: "/tmp/sinba.csv", dbContainer: "supabase-db" });
+    const txs = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(txs).toHaveLength(1);
+    expect((txs[0]?.[2] as { input: string }).input).toBe(
+      buildSinbaReloadSql(HEADER, "/tmp/sinba_ec.csv"),
+    );
+    // No DDL or \copy outside that transaction.
+    for (const c of mockExec.mock.calls) {
+      if (c === txs[0]) continue;
+      expect((c[1] as string[]).join(" ")).not.toMatch(/\\copy|DROP |CREATE /);
+    }
+  });
+
+  it("buildSinbaReloadSql: staging \\copy before any live DROP; explicit view drop; swap; view; grants", () => {
+    const sql = buildSinbaReloadSql(HEADER, "/tmp/sinba_ec.csv");
+    const copy = sql.indexOf("\\copy sinba_ec_raw_staging FROM '/tmp/sinba_ec.csv'");
+    const dropView = sql.indexOf("DROP VIEW IF EXISTS sinba_morbidity_municipal;");
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS sinba_ec_raw;");
+    const swap = sql.indexOf("ALTER TABLE sinba_ec_raw_staging RENAME TO sinba_ec_raw;");
+    const view = sql.indexOf("CREATE OR REPLACE VIEW sinba_morbidity_municipal AS");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropView);
+    expect(dropView).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(view);
+    expect(sql).not.toMatch(/CASCADE|\bCOMMIT;/);
+    expect(sql).toContain("GRANT SELECT ON sinba_morbidity_municipal TO denue_sage;");
   });
 });

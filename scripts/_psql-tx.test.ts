@@ -10,10 +10,13 @@ import {
   assertRelationsExist,
   CENSO_VIEWS,
   censoViewsSql,
+  copyFromStdinScript,
+  existingRowCount,
   perfMatviewSql,
   postLoadGrants,
   refreshedMatviews,
   runPsqlScript,
+  swapInStagingSql,
 } from "./_psql-tx.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +45,120 @@ describe("runPsqlScript", () => {
       /unsafe container/,
     );
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPsqlScript with a Buffer script", () => {
+  it("pipes the bytes unchanged (inline \\copy data survives)", () => {
+    mockExec.mockReturnValue("");
+    const buf = Buffer.from("TRUNCATE t;\n\\copy t FROM STDIN\nñ,1\n\\.\n");
+    runPsqlScript("supabase-db", buf, 1000);
+    expect((mockExec.mock.calls[0]?.[2] as { input: Buffer }).input).toBe(buf);
+  });
+});
+
+describe("copyFromStdinScript (audit #146)", () => {
+  const CMD = "\\copy t (a, b) FROM STDIN WITH (FORMAT csv, HEADER true)";
+
+  it("prelude, then the \\copy line, then the CSV bytes, then the \\. marker", () => {
+    const out = copyFromStdinScript(
+      "TRUNCATE TABLE t;",
+      CMD,
+      Buffer.from("a,b\n1,ñ\n"),
+    ).toString("utf-8");
+    expect(out).toBe(`TRUNCATE TABLE t;\n${CMD}\na,b\n1,ñ\n\\.\n`);
+  });
+
+  it("puts \\. on its own line when the CSV lacks a trailing newline", () => {
+    const out = copyFromStdinScript("", CMD, Buffer.from("a,b\n1,2")).toString(
+      "utf-8",
+    );
+    expect(out.endsWith("1,2\n\\.\n")).toBe(true);
+  });
+
+  it("keeps the CSV bytes verbatim (no re-encoding)", () => {
+    const csv = Buffer.from([0x61, 0x0a, 0xf1, 0x0a]); // Latin-1 ñ stays one byte
+    const out = copyFromStdinScript("", CMD, csv);
+    expect(out.subarray(out.length - csv.length - 3, out.length - 3)).toEqual(csv);
+  });
+
+  it("rejects a copy command that is not a one-line \\copy ... FROM STDIN", () => {
+    expect(() =>
+      copyFromStdinScript("", "\\copy t FROM '/tmp/x.csv'", Buffer.from("")),
+    ).toThrow(/FROM STDIN/);
+    expect(() =>
+      copyFromStdinScript("", `${CMD}\nDROP TABLE t;`, Buffer.from("")),
+    ).toThrow(/one-line/);
+  });
+});
+
+describe("existingRowCount (audit #157)", () => {
+  function route(regclass: string, count: string | Error): void {
+    mockExec.mockImplementation((_bin: string, args: string[]) => {
+      if (!Array.isArray(args)) return "";
+      const sql = args[args.length - 1] ?? "";
+      if (sql.includes("to_regclass")) return `${regclass}\n`;
+      if (count instanceof Error) throw count;
+      return `${count}\n`;
+    });
+  }
+
+  it("returns 0 only when to_regclass reports the relation absent", () => {
+    route("f", "999");
+    expect(existingRowCount("supabase-db", "t_raw")).toBe(0);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the COUNT when the relation exists", () => {
+    route("t", "1500000");
+    expect(existingRowCount("supabase-db", "t_raw")).toBe(1_500_000);
+    const sqls = mockExec.mock.calls.map((c) => (c[1] as string[]).at(-1));
+    expect(sqls).toEqual([
+      "SELECT to_regclass('t_raw') IS NOT NULL;",
+      "SELECT COUNT(*) FROM t_raw;",
+    ]);
+  });
+
+  it("rethrows a failed COUNT instead of reporting an empty table", () => {
+    route("t", new Error("canceling statement due to lock timeout"));
+    expect(() => existingRowCount("supabase-db", "t_raw")).toThrow(/lock timeout/);
+  });
+
+  it("rethrows a failed probe and rejects unexpected probe output", () => {
+    mockExec.mockImplementation(() => {
+      throw new Error("Error response from daemon: No such container");
+    });
+    expect(() => existingRowCount("supabase-db", "t_raw")).toThrow(/No such container/);
+    route("", "0");
+    expect(() => existingRowCount("supabase-db", "t_raw")).toThrow(
+      /unexpected to_regclass output/,
+    );
+    route("t", "");
+    expect(() => existingRowCount("supabase-db", "t_raw")).toThrow(
+      /unexpected COUNT output/,
+    );
+  });
+
+  it("refuses unsafe identifiers and containers before calling docker", () => {
+    expect(() => existingRowCount("supabase-db", "t; DROP")).toThrow(/unsafe relation/);
+    expect(() => existingRowCount("--rm", "t_raw")).toThrow();
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("swapInStagingSql (audit #145)", () => {
+  it("drops the listed dependents, then the live table, then renames staging", () => {
+    expect(
+      swapInStagingSql("t_raw", ["DROP VIEW IF EXISTS v2;", "DROP VIEW IF EXISTS v1;"]),
+    ).toBe(
+      "DROP VIEW IF EXISTS v2;\nDROP VIEW IF EXISTS v1;\n" +
+        "DROP TABLE IF EXISTS t_raw;\nALTER TABLE t_raw_staging RENAME TO t_raw;",
+    );
+  });
+
+  it("never uses CASCADE and refuses unsafe table names", () => {
+    expect(swapInStagingSql("t_raw", [])).not.toMatch(/CASCADE/);
+    expect(() => swapInStagingSql("t raw", [])).toThrow(/unsafe relation/);
   });
 });
 

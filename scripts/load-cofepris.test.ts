@@ -12,7 +12,9 @@ const { mockOpen, mockRead, mockClose, mockStat } = vi.hoisted(() => ({
   mockClose: vi.fn(),
   mockStat: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -22,6 +24,7 @@ vi.mock("node:fs", () => ({
 import {
   CREATE_TABLE_SQL,
   POST_LOAD_SQL,
+  buildCofeprisReloadSql,
   loadCofepris,
 } from "./load-cofepris.js";
 
@@ -143,9 +146,34 @@ describe("POST_LOAD_SQL", () => {
     );
   });
 
-  it("wrapped in BEGIN/COMMIT (qa-audit C3 — atomic view replace)", () => {
-    expect(POST_LOAD_SQL.trim().startsWith("BEGIN;")).toBe(true);
-    expect(POST_LOAD_SQL.trim().endsWith("COMMIT;")).toBe(true);
+  it("carries no BEGIN/COMMIT: it runs inside the reload's single transaction (qa-audit C3, audit #145)", () => {
+    // An inner COMMIT would end runPsqlScript's --single-transaction early.
+    expect(POST_LOAD_SQL).not.toMatch(/\b(BEGIN|COMMIT);/);
+  });
+});
+
+describe("buildCofeprisReloadSql (audit #145)", () => {
+  it("staging \\copy before any live DROP; explicit view drops; swap; views; grants", () => {
+    const sql = buildCofeprisReloadSql("/tmp/cofepris_farmacias.csv");
+    const copy = sql.indexOf(
+      "\\copy cofepris_farmacias_staging FROM '/tmp/cofepris_farmacias.csv' WITH (FORMAT csv, HEADER true, NULL '')",
+    );
+    const dropAgeb = sql.indexOf("DROP VIEW IF EXISTS cofepris_farmacias_by_ageb;");
+    const dropMuni = sql.indexOf("DROP VIEW IF EXISTS cofepris_farmacias_by_municipio;");
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS cofepris_farmacias;");
+    const swap = sql.indexOf(
+      "ALTER TABLE cofepris_farmacias_staging RENAME TO cofepris_farmacias;",
+    );
+    const views = sql.indexOf("CREATE OR REPLACE VIEW cofepris_farmacias_by_municipio AS");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropAgeb);
+    expect(dropAgeb).toBeLessThan(dropRaw);
+    expect(dropMuni).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(views);
+    expect(sql).not.toMatch(/CASCADE/);
+    expect(CREATE_TABLE_SQL).not.toMatch(/CREATE TABLE cofepris_farmacias \(/);
+    expect(sql).toContain("GRANT SELECT ON cofepris_farmacias_by_ageb TO denue_sage;");
   });
 });
 
@@ -199,6 +227,7 @@ describe("loadCofepris — C1 force-required-on-populated guard", () => {
     mockHeaderFs(HEADER);
     mockExec.mockImplementation((_cmd, args) => {
       const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('cofepris_farmacias')")) return "t\n";
       if (sql.includes("SELECT COUNT(*) FROM cofepris_farmacias"))
         return "2381\n";
       return "";
@@ -209,6 +238,27 @@ describe("loadCofepris — C1 force-required-on-populated guard", () => {
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/already has 2381 rows.*--force/);
+  });
+
+  it("rethrows a failed COUNT probe instead of treating it as 'absent' (audit #157)", async () => {
+    mockHeaderFs(HEADER);
+    mockExec.mockImplementation((_cmd, args) => {
+      const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('cofepris_farmacias')")) return "t\n";
+      if (sql.includes("SELECT COUNT(*) FROM cofepris_farmacias")) {
+        throw new Error("canceling statement due to statement timeout");
+      }
+      return "";
+    });
+    await expect(
+      loadCofepris({
+        csvPath: "/tmp/cofepris/farmacias_geocoded.csv",
+        dbContainer: "supabase-db",
+      }),
+    ).rejects.toThrow(/statement timeout/);
+    expect(
+      mockExec.mock.calls.some((c) => (c[2] as { input?: string })?.input),
+    ).toBe(false);
   });
 
   it("--force allows re-load and returns counts", async () => {
@@ -222,6 +272,7 @@ describe("loadCofepris — C1 force-required-on-populated guard", () => {
       if (sql.includes("WHERE cvegeo_ageb IS NOT NULL")) return "2197\n";
       if (sql.includes("SELECT COUNT(*) FROM cofepris_farmacias"))
         return "2381\n";
+      if (sql.includes("to_regclass")) return "";
       return "COPY 2381\n";
     });
     const result = await loadCofepris({
@@ -229,6 +280,14 @@ describe("loadCofepris — C1 force-required-on-populated guard", () => {
       dbContainer: "supabase-db",
       force: true,
     });
+    // Audit #145: DDL, \copy, swap and views run as ONE psql session.
+    const txs = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(txs).toHaveLength(1);
+    expect((txs[0]?.[2] as { input: string }).input).toBe(
+      buildCofeprisReloadSql("/tmp/cofepris_farmacias.csv"),
+    );
     expect(result.rows_loaded).toBe(2381);
     expect(result.vigente).toBe(2195);
     expect(result.with_cve_mun).toBe(2197);

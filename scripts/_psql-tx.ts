@@ -42,10 +42,12 @@ function assertIdent(name: string): void {
 /**
  * Pipe `script` into ONE psql session as a single transaction. Any error
  * (including a failed `\copy`) stops the script and rolls everything back.
+ * A Buffer script can carry `\copy ... FROM STDIN` data inline (see
+ * copyFromStdinScript).
  */
 export function runPsqlScript(
   container: string,
-  script: string,
+  script: string | Buffer,
   timeoutMs: number,
 ): string {
   assertSafeContainer(container);
@@ -74,6 +76,90 @@ export function runPsqlScript(
       maxBuffer: 50 * 1024 * 1024,
     },
   );
+}
+
+/**
+ * A psql script that runs `prelude` (e.g. `TRUNCATE <raw>;`) and then
+ * `\copy ... FROM STDIN` with `csv` inline, ended by the `\.` marker
+ * (audit #146). Piped through runPsqlScript it is one transaction, so a
+ * failed copy rolls the TRUNCATE back instead of committing an empty table.
+ */
+export function copyFromStdinScript(
+  prelude: string,
+  copyCmd: string,
+  csv: Buffer,
+): Buffer {
+  if (!/^\\copy [^\n]* FROM STDIN\b[^\n]*$/.test(copyCmd)) {
+    throw new Error("_psql-tx: copyCmd must be a one-line \\copy ... FROM STDIN");
+  }
+  // The `\.` end-of-data marker must start its own line.
+  const sep = csv.length === 0 || csv[csv.length - 1] === 0x0a ? "" : "\n";
+  return Buffer.concat([
+    Buffer.from(`${prelude}\n${copyCmd}\n`, "utf-8"),
+    csv,
+    Buffer.from(`${sep}\\.\n`, "utf-8"),
+  ]);
+}
+
+/**
+ * Rows in `table`, or 0 when the relation does not exist (audit #157). Only
+ * a NULL `to_regclass` means "absent": a COUNT timeout, lock wait or docker
+ * error is rethrown, so a populated-table guard can never mistake a failed
+ * probe for an empty table and go on to replace it.
+ */
+export function existingRowCount(container: string, table: string): number {
+  assertSafeContainer(container);
+  assertIdent(table);
+  const psql = (sql: string): string =>
+    execFileSync(
+      "docker",
+      [
+        "exec",
+        container,
+        "psql",
+        "-X",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "postgres",
+        "-d",
+        "postgres",
+        "-t",
+        "-A",
+        "-c",
+        sql,
+      ],
+      { encoding: "utf-8", timeout: 60_000 },
+    ).trim();
+  const exists = psql(`SELECT to_regclass('${table}') IS NOT NULL;`);
+  if (exists === "f") return 0;
+  if (exists !== "t") {
+    throw new Error(`_psql-tx: unexpected to_regclass output "${exists}"`);
+  }
+  const out = psql(`SELECT COUNT(*) FROM ${table};`);
+  const n = Number.parseInt(out, 10);
+  if (!Number.isFinite(n)) {
+    throw new Error(`_psql-tx: unexpected COUNT output "${out}" for ${table}`);
+  }
+  return n;
+}
+
+/**
+ * Swap `<table>_staging` in for `<table>`: drop the listed dependents
+ * first (explicitly, no CASCADE — an unknown dependent makes DROP TABLE
+ * fail and the transaction roll back), then the old table, then rename.
+ * Emit inside a runPsqlScript transaction, after the staging \copy.
+ */
+export function swapInStagingSql(
+  table: string,
+  dropDependents: readonly string[],
+): string {
+  assertIdent(table);
+  return [
+    ...dropDependents,
+    `DROP TABLE IF EXISTS ${table};`,
+    `ALTER TABLE ${table}_staging RENAME TO ${table};`,
+  ].join("\n");
 }
 
 /** MVs the nightly refresh sweeps — parsed from the script so the lists can't drift. */

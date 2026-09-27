@@ -9,6 +9,7 @@ vi.mock("node:child_process", () => ({
 import {
   ENOE_RAW_DDL_FOR_TEST,
   ENOE_SDEM_COL_INDEX,
+  buildEnoeSwapSql,
   calibratorsDdlForTest,
   loadEnoe,
 } from "./load-enoe.js";
@@ -47,13 +48,37 @@ describe("ENOE_RAW_DDL_FOR_TEST", () => {
     }
   });
 
-  it("indexes by ent + trimestre", () => {
-    expect(ENOE_RAW_DDL_FOR_TEST).toMatch(/idx_enoe_sdem_ent/);
-    expect(ENOE_RAW_DDL_FOR_TEST).toMatch(/idx_enoe_sdem_trim/);
+  it("indexes by ent + trimestre (on the swapped-in table)", () => {
+    const sql = buildEnoeSwapSql(2025);
+    expect(sql).toContain("CREATE INDEX idx_enoe_sdem_ent ON enoe_sdem_raw (ent);");
+    expect(sql).toContain(
+      "CREATE INDEX idx_enoe_sdem_trim ON enoe_sdem_raw (trimestre);",
+    );
+    expect(ENOE_RAW_DDL_FOR_TEST).not.toMatch(/CREATE INDEX/);
   });
 
-  it("uses DROP TABLE IF EXISTS for idempotent rerun", () => {
-    expect(ENOE_RAW_DDL_FOR_TEST).toMatch(/DROP TABLE IF EXISTS/);
+  it("uses DROP TABLE IF EXISTS for idempotent rerun (staging, no CASCADE)", () => {
+    expect(ENOE_RAW_DDL_FOR_TEST).toContain(
+      "DROP TABLE IF EXISTS enoe_sdem_raw_staging;",
+    );
+    expect(ENOE_RAW_DDL_FOR_TEST).not.toMatch(/CASCADE/);
+  });
+});
+
+describe("buildEnoeSwapSql (audit #145)", () => {
+  it("swap → indexes → calibrators → grants, no inner BEGIN/COMMIT", () => {
+    const sql = buildEnoeSwapSql(2025);
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS enoe_sdem_raw;");
+    const swap = sql.indexOf("ALTER TABLE enoe_sdem_raw_staging RENAME TO enoe_sdem_raw;");
+    const index = sql.indexOf("CREATE INDEX idx_enoe_sdem_ent");
+    const calib = sql.indexOf("DELETE FROM calibrators_enoe_state WHERE ano_levantamiento = 2025");
+    const grant = sql.indexOf("REVOKE ALL ON enoe_sdem_raw FROM anon, authenticated, trustr_app;");
+    expect(dropRaw).toBeGreaterThan(-1);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(index);
+    expect(index).toBeLessThan(calib);
+    expect(calib).toBeLessThan(grant);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
   });
 });
 
@@ -168,10 +193,10 @@ describe("loadEnoe", () => {
     ).rejects.toThrow(/csvPath\[Q1\] inválido/);
   });
 
-  it("orchestrates DDL → per-quarter (cp + awk + \\copy + cleanup) → calib DDL → counts", async () => {
-    // 1 raw DDL + per-quarter (cp + awk + \copy + rm) ×2 quarters + calib DDL + 2 counts = 1 + 8 + 1 + 2 = 12 calls
+  it("orchestrates staging DDL → per-quarter (cp + awk + \\copy + cleanup) → swap tx → counts", async () => {
+    // 1 staging DDL + per-quarter (cp + awk + \copy + rm) ×2 quarters + swap tx + 2 counts + relation check = 13 calls
     mockExec
-      .mockReturnValueOnce("") // raw DDL
+      .mockReturnValueOnce("") // staging DDL
       .mockReturnValueOnce("") // Q1 cp
       .mockReturnValueOnce("") // Q1 awk projection
       .mockReturnValueOnce("") // Q1 \copy
@@ -180,9 +205,10 @@ describe("loadEnoe", () => {
       .mockReturnValueOnce("") // Q2 awk projection
       .mockReturnValueOnce("") // Q2 \copy
       .mockReturnValueOnce("") // Q2 rm cleanup
-      .mockReturnValueOnce("") // calibrators DDL
+      .mockReturnValueOnce("") // swap + indexes + calibrators (one tx)
       .mockReturnValueOnce("840000") // raw_rows count
-      .mockReturnValueOnce("32"); // calibrators count
+      .mockReturnValueOnce("32") // calibrators count
+      .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 
     const result = await loadEnoe({
       quarters: [
@@ -209,11 +235,48 @@ describe("loadEnoe", () => {
     // Awk script is at args[4] (after "exec","container","sh","-c"); it
     // should tag trimestre=1 in the output.
     expect(awkCall?.[1]?.[4]).toMatch(/print 1, /);
+
+    // Audit #145: quarters land in staging; the live swap + calibrators run
+    // as ONE session after the last quarter's \copy.
+    const args = mockExec.mock.calls.map((c) => (c[1] as string[]).join(" "));
+    expect(args[3]).toContain("\\copy enoe_sdem_raw_staging (trimestre");
+    expect(args[7]).toContain("\\copy enoe_sdem_raw_staging (trimestre");
+    const txIdx = mockExec.mock.calls.findIndex(
+      (c) => (c[2] as { input?: string })?.input === buildEnoeSwapSql(2025),
+    );
+    expect(txIdx).toBe(9);
+    expect(mockExec.mock.calls[9]?.[1]).toContain("--single-transaction");
+  });
+
+  it("never swaps when a later quarter's \\copy fails (live table untouched)", async () => {
+    mockExec.mockImplementation((_bin: string, args: string[]) => {
+      if (!Array.isArray(args)) return "";
+      if (args.some((a) => a.includes("\\copy")) && mockExec.mock.calls.length > 4) {
+        throw new Error("\\copy failed: Q2 malformed");
+      }
+      return "";
+    });
+    await expect(
+      loadEnoe({
+        quarters: [
+          { trimestre: 1, csvPath: "/tmp/sdem_1.csv" },
+          { trimestre: 2, csvPath: "/tmp/sdem_2.csv" },
+        ],
+        dbContainer: "supabase-db",
+        year: 2025,
+      }),
+    ).rejects.toThrow(/Q2 malformed/);
+    const touchesLive = mockExec.mock.calls.some((c) =>
+      String((c[2] as { input?: string })?.input ?? "").includes(
+        "DROP TABLE IF EXISTS enoe_sdem_raw;",
+      ),
+    );
+    expect(touchesLive).toBe(false);
   });
 
   it("cleans up container temp files even if \\copy throws", async () => {
     mockExec
-      .mockReturnValueOnce("") // raw DDL
+      .mockReturnValueOnce("") // staging DDL
       .mockReturnValueOnce("") // Q1 cp
       .mockReturnValueOnce("") // Q1 awk
       .mockImplementationOnce(() => {

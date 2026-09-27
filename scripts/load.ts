@@ -10,7 +10,14 @@
  *   SUPABASE_SERVICE_KEY — JWT service_role de Supabase
  */
 
-import { loadRecords, readExtractorOutput, updateGeometry, type LoaderConfig } from "../src/db/loader.js";
+import {
+  loadRecords,
+  readExtractorOutput,
+  updateGeometry,
+  type DenueRawRecord,
+  type LoadResult,
+  type LoaderConfig,
+} from "../src/db/loader.js";
 
 // ---------------------------------------------------------------------------
 // Parse args
@@ -28,6 +35,40 @@ function requireEnv(name: string): string {
     process.exit(1);
   }
   return val;
+}
+
+// ---------------------------------------------------------------------------
+// Load + geometry (exported for src/db/loader.test.ts, audit #165)
+// ---------------------------------------------------------------------------
+/**
+ * Upserts `records`, then rewrites PostGIS geometry ONLY when every batch
+ * succeeded. With any failed batch the errors are reported and geometry is
+ * skipped (`geometryUpdated: null`). An updateGeometry failure propagates.
+ */
+export async function loadAndUpdateGeometry(
+  records: DenueRawRecord[],
+  config: LoaderConfig,
+): Promise<{ result: LoadResult; geometryUpdated: number | null }> {
+  const result = await loadRecords(records, config);
+
+  console.log("─".repeat(50));
+  console.log(`✅ Insertados/actualizados : ${result.inserted}`);
+  console.log(`❌ Errores                 : ${result.errors.length}`);
+  console.log(`⏱  Duración               : ${result.durationMs}ms`);
+
+  if (result.errors.length > 0) {
+    console.log("\nDetalle de errores:");
+    for (const err of result.errors) {
+      console.log(`  CLEE ${err.clee}: ${err.error.slice(0, 120)}`);
+    }
+    return { result, geometryUpdated: null };
+  }
+
+  // Actualizar geometrías después de la carga
+  console.log();
+  const geoResult = await updateGeometry(config);
+  console.log(`🗺  Geometrías PostGIS actualizadas: ${geoResult.updated}`);
+  return { result, geometryUpdated: geoResult.updated };
 }
 
 // ---------------------------------------------------------------------------
@@ -54,29 +95,16 @@ async function main(): Promise<void> {
   console.log(`📦 Batch size: ${batchSize}`);
   console.log();
 
-  const result = await loadRecords(records, config);
-
-  console.log("─".repeat(50));
-  console.log(`✅ Insertados/actualizados : ${result.inserted}`);
-  console.log(`❌ Errores                 : ${result.errors.length}`);
-  console.log(`⏱  Duración               : ${result.durationMs}ms`);
-
-  if (result.errors.length > 0) {
-    console.log("\nDetalle de errores:");
-    for (const err of result.errors) {
-      console.log(`  CLEE ${err.clee}: ${err.error.slice(0, 120)}`);
-    }
-  }
-
-  // Actualizar geometrías después de la carga
-  if (result.errors.length === 0) {
-    console.log();
-    const geoResult = await updateGeometry(config);
-    console.log(`🗺  Geometrías PostGIS actualizadas: ${geoResult.updated}`);
-  }
+  await loadAndUpdateGeometry(records, config);
 }
 
-main().catch((err: unknown) => {
-  console.error("❌ Error fatal:", err);
-  process.exit(1);
-});
+// Auto-invoke when run directly (not when imported by tests).
+const isMain =
+  import.meta.url === `file://${process.argv[1] ?? ""}`.replace(/\\/g, "/");
+
+if (isMain) {
+  main().catch((err: unknown) => {
+    console.error("❌ Error fatal:", err);
+    process.exit(1);
+  });
+}

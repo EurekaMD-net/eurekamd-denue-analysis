@@ -12,7 +12,9 @@ const { mockOpen, mockRead, mockClose, mockStat } = vi.hoisted(() => ({
   mockClose: vi.fn(),
   mockStat: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -22,6 +24,7 @@ vi.mock("node:fs", () => ({
 import {
   CREATE_TABLE_SQL,
   POST_LOAD_SQL,
+  buildConevalAgebReloadSql,
   loadConevalAgeb,
 } from "./load-coneval-ageb.js";
 
@@ -49,11 +52,12 @@ function mockFsHeader(line: string, sizeBytes = 5_000_000): void {
 }
 
 describe("CREATE_TABLE_SQL + POST_LOAD_SQL constants", () => {
-  it("CREATE_TABLE_SQL drops + creates raw table with 21 TEXT columns", () => {
+  it("CREATE_TABLE_SQL drops + creates the staging table with 21 TEXT columns", () => {
     expect(CREATE_TABLE_SQL).toContain(
-      "DROP TABLE IF EXISTS coneval_grs_ageb_raw CASCADE",
+      "DROP TABLE IF EXISTS coneval_grs_ageb_raw_staging;",
     );
-    expect(CREATE_TABLE_SQL).toContain("CREATE TABLE coneval_grs_ageb_raw");
+    expect(CREATE_TABLE_SQL).not.toMatch(/CASCADE/);
+    expect(CREATE_TABLE_SQL).toContain("CREATE TABLE coneval_grs_ageb_raw_staging (");
     expect(CREATE_TABLE_SQL).toContain("cvegeo TEXT NOT NULL");
     expect(CREATE_TABLE_SQL).toContain("grado TEXT");
     // 17 indicator columns + cvegeo + pobtot + vivpar_hab + grado = 21
@@ -61,9 +65,8 @@ describe("CREATE_TABLE_SQL + POST_LOAD_SQL constants", () => {
     expect(matches.length).toBeGreaterThanOrEqual(21);
   });
 
-  it("POST_LOAD_SQL is wrapped in BEGIN/COMMIT (qa-audit C3)", () => {
-    expect(POST_LOAD_SQL.trim().startsWith("BEGIN;")).toBe(true);
-    expect(POST_LOAD_SQL.trim().endsWith("COMMIT;")).toBe(true);
+  it("POST_LOAD_SQL carries no BEGIN/COMMIT: it runs inside the reload's single transaction (qa-audit C3, audit #145)", () => {
+    expect(POST_LOAD_SQL).not.toMatch(/\b(BEGIN|COMMIT);/);
   });
 
   it("POST_LOAD_SQL creates btree on cvegeo (LEFT JOIN hot path)", () => {
@@ -133,12 +136,37 @@ describe("loadConevalAgeb — input validation", () => {
   });
 });
 
+describe("buildConevalAgebReloadSql (audit #145)", () => {
+  it("staging \\copy before any live DROP; explicit view drop; swap; view; grants", () => {
+    const sql = buildConevalAgebReloadSql("/tmp/coneval_grs_ageb.csv");
+    const copy = sql.indexOf(
+      "\\copy coneval_grs_ageb_raw_staging FROM '/tmp/coneval_grs_ageb.csv' WITH (FORMAT csv, HEADER true, NULL '*')",
+    );
+    const dropView = sql.indexOf("DROP VIEW IF EXISTS coneval_grs_ageb;");
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS coneval_grs_ageb_raw;");
+    const swap = sql.indexOf(
+      "ALTER TABLE coneval_grs_ageb_raw_staging RENAME TO coneval_grs_ageb_raw;",
+    );
+    const view = sql.indexOf("CREATE OR REPLACE VIEW coneval_grs_ageb");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropView);
+    expect(dropView).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(view);
+    expect(sql).not.toMatch(/CASCADE/);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
+    expect(sql).toContain("GRANT SELECT ON coneval_grs_ageb TO denue_sage;");
+  });
+});
+
 describe("loadConevalAgeb — C1 force-required-on-populated guard", () => {
   it("refuses to drop a populated table without --force", async () => {
     mockFsHeader(VALID_HEADER);
-    // First call: COUNT(*) returns 50000 — table exists + populated.
+    // to_regclass says present; COUNT(*) returns 50000 — populated.
     mockExec.mockImplementation((_cmd, args) => {
+      if (!Array.isArray(args)) return "";
       const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('coneval_grs_ageb_raw')")) return "t\n";
       if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw")) {
         return "50000\n";
       }
@@ -157,22 +185,15 @@ describe("loadConevalAgeb — C1 force-required-on-populated guard", () => {
     expect(dropCalls.length).toBe(0);
   });
 
-  it("proceeds when COUNT errors (relation does not exist — first load)", async () => {
+  it("proceeds when to_regclass reports the table absent (first load)", async () => {
     mockFsHeader(VALID_HEADER);
-    let callIdx = 0;
     mockExec.mockImplementation((_cmd, args) => {
+      if (!Array.isArray(args)) return "";
       const sql = (args as string[]).join(" ");
-      callIdx++;
-      if (
-        sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw") &&
-        callIdx === 1
-      ) {
-        // Simulate "relation does not exist" — load proceeds with create.
-        throw new Error("relation does not exist");
+      if (sql.includes("to_regclass('coneval_grs_ageb_raw') IS NOT NULL")) {
+        return "f\n";
       }
-      if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw")) {
-        return "61430\n";
-      }
+      if (sql.includes("to_regclass")) return "";
       if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb")) {
         return "61430\n";
       }
@@ -184,12 +205,41 @@ describe("loadConevalAgeb — C1 force-required-on-populated guard", () => {
     });
     expect(result.rows_loaded).toBe(61430);
     expect(result.rows_in_view).toBe(61430);
+    // Audit #145: the reload is ONE single-transaction psql session.
+    const txs = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(txs).toHaveLength(1);
+    expect((txs[0]?.[2] as { input: string }).input).toBe(
+      buildConevalAgebReloadSql("/tmp/coneval_grs_ageb.csv"),
+    );
+  });
+
+  it("rethrows a failed COUNT probe instead of treating it as 'absent' (audit #157)", async () => {
+    mockFsHeader(VALID_HEADER);
+    mockExec.mockImplementation((_cmd, args) => {
+      if (!Array.isArray(args)) return "";
+      const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('coneval_grs_ageb_raw')")) return "t\n";
+      if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw")) {
+        throw new Error("canceling statement due to statement timeout");
+      }
+      return "";
+    });
+    await expect(
+      loadConevalAgeb({ csvPath: "/tmp/c.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/statement timeout/);
+    expect(
+      mockExec.mock.calls.some((c) => (c[2] as { input?: string })?.input),
+    ).toBe(false);
   });
 
   it("--force allows re-load even with populated table", async () => {
     mockFsHeader(VALID_HEADER);
     mockExec.mockImplementation((_cmd, args) => {
+      if (!Array.isArray(args)) return "";
       const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass")) return "";
       if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw")) {
         return "61430\n";
       }
@@ -209,33 +259,11 @@ describe("loadConevalAgeb — C1 force-required-on-populated guard", () => {
 });
 
 describe("loadConevalAgeb — \\copy command shape", () => {
-  it("emits \\copy with NULL '*' so INEGI confidentiality sentinels collapse to NULL", async () => {
-    mockFsHeader(VALID_HEADER);
-    mockExec.mockImplementation((_cmd, args) => {
-      const sql = (args as string[]).join(" ");
-      if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb_raw")) {
-        // first call (C1 guard) — table absent, error
-        if (mockExec.mock.calls.length === 1) {
-          throw new Error("relation does not exist");
-        }
-        return "61430\n";
-      }
-      if (sql.includes("SELECT COUNT(*) FROM coneval_grs_ageb")) {
-        return "61430\n";
-      }
-      return "COPY 61430\n";
-    });
-    await loadConevalAgeb({
-      csvPath: "/tmp/c.csv",
-      dbContainer: "supabase-db",
-    });
-    const copyCall = mockExec.mock.calls.find((c) =>
-      ((c[1] as string[]) ?? []).some((arg) => arg.includes("\\copy")),
-    );
-    expect(copyCall).toBeDefined();
-    const copySql = (copyCall![1] as string[]).find((a) =>
-      a.includes("\\copy"),
-    );
+  it("emits \\copy with NULL '*' so INEGI confidentiality sentinels collapse to NULL", () => {
+    const copySql = buildConevalAgebReloadSql("/tmp/coneval_grs_ageb.csv")
+      .split("\n")
+      .find((l) => l.startsWith("\\copy"));
+    expect(copySql).toBeDefined();
     expect(copySql).toContain("FORMAT csv");
     expect(copySql).toContain("HEADER true");
     expect(copySql).toContain("NULL '*'");

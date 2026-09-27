@@ -27,10 +27,12 @@
  *      to /tmp/cnbv_panorama_{muni,estado}.csv. Python+openpyxl is the
  *      project-standard XLSX → CSV pre-pass (see scripts/coneval-ageb-*.py
  *      and scripts/aeropuertos-*.py).
- *   2. DROP+CREATE both raw tables (TEXT cols) idempotently.
- *   3. \copy both CSVs in via docker exec, with NULL '*' so the converter's
- *      sentinel maps to actual NULL on read.
- *   4. DROP+CREATE both views with NULLIF/cast.
+ *   2-4 run as ONE psql --single-transaction session (audit #145): a failed
+ *   \copy leaves both live tables and views untouched.
+ *   2. DROP+CREATE both `_staging` raw tables (TEXT cols) idempotently.
+ *   3. \copy both CSVs into staging, with NULL '*' so the converter's
+ *      sentinel maps to actual NULL on read; drop both views; swap staging in.
+ *   4. DROP+CREATE both views with NULLIF/cast, indexes, grants.
  *   5. Verify counts. Hard-fail if dup (cve_mun) or (cve_ent) groups.
  *
  * Idempotent: rerun freely. Annual refresh (Panorama 2026, ...) overwrites
@@ -45,6 +47,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -66,9 +74,10 @@ function assertSafePath(label: string, p: string): void {
 // DDL — raw tables (all TEXT, mirrors converter HEADER lists exactly).
 // ---------------------------------------------------------------------------
 
+// Both build the `_staging` table; the reload swaps it in (audit #145).
 export const MUNI_RAW_DDL = `
-DROP TABLE IF EXISTS cnbv_panorama_municipal_raw CASCADE;
-CREATE TABLE cnbv_panorama_municipal_raw (
+DROP TABLE IF EXISTS cnbv_panorama_municipal_raw_staging;
+CREATE TABLE cnbv_panorama_municipal_raw_staging (
   clave_municipio_num   TEXT,
   cve_mun               TEXT,
   nom_ent               TEXT,
@@ -151,8 +160,8 @@ CREATE TABLE cnbv_panorama_municipal_raw (
 `;
 
 export const ESTADO_RAW_DDL = `
-DROP TABLE IF EXISTS cnbv_panorama_estatal_raw CASCADE;
-CREATE TABLE cnbv_panorama_estatal_raw (
+DROP TABLE IF EXISTS cnbv_panorama_estatal_raw_staging;
+CREATE TABLE cnbv_panorama_estatal_raw_staging (
   cve_estado_num        TEXT,
   nom_ent               TEXT,
   poblacion_total       TEXT,
@@ -449,6 +458,45 @@ CREATE INDEX IF NOT EXISTS idx_cnbv_panorama_estatal_cve_estado
 
 export const POST_LOAD_SQL_FOR_TEST = buildMuniViewSql() + buildEstadoViewSql();
 
+const PANORAMA_RELATIONS = [
+  "cnbv_panorama_municipal_raw",
+  "cnbv_panorama_estatal_raw",
+  "cnbv_panorama_municipal",
+  "cnbv_panorama_estatal",
+];
+
+/** `\copy <table>_staging (<leading cols>) FROM '<containerPath>' ...`. */
+function stagingCopySql(table: string, containerPath: string): string {
+  return `\\copy ${table}_staging (${tableLeadingCols(table).join(",")}) FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`;
+}
+
+/**
+ * The single-transaction reload script (audit #145): both staging tables
+ * are filled before any live object is dropped; each view is dropped
+ * explicitly (an unknown dependent makes DROP TABLE fail → rollback).
+ */
+export function buildCnbvPanoramaReloadSql(
+  muniContainerPath: string,
+  estadoContainerPath: string,
+): string {
+  return [
+    MUNI_RAW_DDL,
+    ESTADO_RAW_DDL,
+    stagingCopySql("cnbv_panorama_municipal_raw", muniContainerPath),
+    stagingCopySql("cnbv_panorama_estatal_raw", estadoContainerPath),
+    swapInStagingSql("cnbv_panorama_municipal_raw", [
+      "DROP VIEW IF EXISTS cnbv_panorama_municipal;",
+    ]),
+    swapInStagingSql("cnbv_panorama_estatal_raw", [
+      "DROP VIEW IF EXISTS cnbv_panorama_estatal;",
+    ]),
+    buildMuniViewSql(),
+    buildEstadoViewSql(),
+    INDEX_DDL,
+    postLoadGrants(PANORAMA_RELATIONS),
+  ].join("\n");
+}
+
 export interface LoadCnbvPanoramaConfig {
   xlsxPath: string;
   dbContainer: string;
@@ -496,20 +544,30 @@ export async function loadCnbvPanorama(
       writeFileSync(dest, out);
     }
 
-    // 2. Create raw tables
-    psql(config.dbContainer, MUNI_RAW_DDL);
-    psql(config.dbContainer, ESTADO_RAW_DDL);
-
-    // 3. \copy both CSVs in
-    copyCsv(config.dbContainer, muniCsv, "cnbv_panorama_municipal_raw");
-    copyCsv(config.dbContainer, estadoCsv, "cnbv_panorama_estatal_raw");
-
-    // 4. Create views
-    psql(config.dbContainer, buildMuniViewSql());
-    psql(config.dbContainer, buildEstadoViewSql());
-
-    // 4b. Btree indexes on join keys (SV1 round-2 audit)
-    psql(config.dbContainer, INDEX_DDL);
+    // 2-4. One transaction: staging DDL → \copy both → swap → views →
+    //      btree indexes on join keys (SV1 round-2 audit) → grants.
+    const muniPath = "/tmp/cnbv_panorama_municipal_raw.csv";
+    const estadoPath = "/tmp/cnbv_panorama_estatal_raw.csv";
+    try {
+      copyIntoContainer(config.dbContainer, muniCsv, muniPath);
+      copyIntoContainer(config.dbContainer, estadoCsv, estadoPath);
+      runPsqlScript(
+        config.dbContainer,
+        buildCnbvPanoramaReloadSql(muniPath, estadoPath),
+        10 * 60_000,
+      );
+    } finally {
+      for (const p of [muniPath, estadoPath]) {
+        try {
+          execFileSync("docker", ["exec", config.dbContainer, "rm", "-f", p], {
+            encoding: "utf-8",
+            timeout: 30_000,
+          });
+        } catch {
+          // best-effort
+        }
+      }
+    }
 
     // 5. Verify counts + dup guards
     const muniRows = countRows(
@@ -546,6 +604,8 @@ export async function loadCnbvPanorama(
       );
     }
 
+    assertRelationsExist(config.dbContainer, PANORAMA_RELATIONS);
+
     return {
       muni_rows: muniRows,
       estado_rows: estadoRows,
@@ -560,28 +620,12 @@ export async function loadCnbvPanorama(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function psql(container: string, sql: string): void {
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      sql,
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
-}
-
-function copyCsv(container: string, csvPath: string, table: string): void {
-  // CSV path is host-side. docker cp into container, then \copy from inside.
-  const containerPath = `/tmp/${table}.csv`;
+function copyIntoContainer(
+  container: string,
+  csvPath: string,
+  containerPath: string,
+): void {
+  // CSV path is host-side. docker cp into container; \copy reads it inside.
   execFileSync(
     "docker",
     ["cp", "--", csvPath, `${container}:${containerPath}`],
@@ -590,32 +634,6 @@ function copyCsv(container: string, csvPath: string, table: string): void {
       timeout: 60_000,
     },
   );
-  try {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        container,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy ${table} (${tableLeadingCols(table).join(",")}) FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`,
-      ],
-      { encoding: "utf-8", timeout: 5 * 60_000 },
-    );
-  } finally {
-    try {
-      execFileSync("docker", ["exec", container, "rm", "-f", containerPath], {
-        encoding: "utf-8",
-        timeout: 30_000,
-      });
-    } catch {
-      // best-effort
-    }
-  }
 }
 
 /**

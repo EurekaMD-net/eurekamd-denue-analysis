@@ -10,7 +10,9 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -19,6 +21,7 @@ vi.mock("node:fs", () => ({
 import {
   ENIGH_CONCENTRADOHOGAR_COLUMNS,
   ENIGH_RAW_DDL_FOR_TEST,
+  buildEnighReloadSql,
   calibratorsDdlForTest,
   expectEnighHeader,
   loadEnigh,
@@ -82,13 +85,43 @@ describe("ENIGH_RAW_DDL_FOR_TEST", () => {
     }
   });
 
-  it("indexes by entidad (LEFT(ubica_geo, 2))", () => {
-    expect(ENIGH_RAW_DDL_FOR_TEST).toMatch(/idx_enigh_ubica_geo/);
-    expect(ENIGH_RAW_DDL_FOR_TEST).toMatch(/LEFT\(ubica_geo, 2\)/);
+  it("indexes by entidad (LEFT(ubica_geo, 2)) on the swapped-in table", () => {
+    const sql = buildEnighReloadSql("/tmp/e.csv", 2024);
+    expect(sql).toContain(
+      "CREATE INDEX idx_enigh_ubica_geo ON enigh_concentradohogar_raw (LEFT(ubica_geo, 2));",
+    );
+    expect(ENIGH_RAW_DDL_FOR_TEST).not.toMatch(/idx_enigh_ubica_geo/);
   });
 
-  it("uses DROP TABLE IF EXISTS for idempotent rerun", () => {
-    expect(ENIGH_RAW_DDL_FOR_TEST).toMatch(/DROP TABLE IF EXISTS/);
+  it("uses DROP TABLE IF EXISTS for idempotent rerun (staging, no CASCADE)", () => {
+    expect(ENIGH_RAW_DDL_FOR_TEST).toContain(
+      "DROP TABLE IF EXISTS enigh_concentradohogar_raw_staging;",
+    );
+    expect(ENIGH_RAW_DDL_FOR_TEST).not.toMatch(/CASCADE/);
+  });
+});
+
+describe("buildEnighReloadSql (audit #145)", () => {
+  it("\\copy into staging → swap → index → calibrators, one script", () => {
+    const sql = buildEnighReloadSql("/tmp/e.csv", 2024);
+    const copy = sql.indexOf(
+      "\\copy enigh_concentradohogar_raw_staging FROM '/tmp/e.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS enigh_concentradohogar_raw;");
+    const swap = sql.indexOf(
+      "ALTER TABLE enigh_concentradohogar_raw_staging RENAME TO enigh_concentradohogar_raw;",
+    );
+    const index = sql.indexOf("CREATE INDEX idx_enigh_ubica_geo");
+    const calib = sql.indexOf("DELETE FROM calibrators_enigh_state WHERE ano_levantamiento = 2024;");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(index);
+    expect(index).toBeLessThan(calib);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
+    expect(sql).toContain(
+      "REVOKE ALL ON enigh_concentradohogar_raw FROM anon, authenticated, trustr_app;",
+    );
   });
 });
 
@@ -181,16 +214,15 @@ describe("loadEnigh", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("orchestrates DDL → cp → \\copy → cleanup → calibrators DDL → counts", async () => {
+  it("orchestrates cp → ONE reload transaction → cleanup → counts", async () => {
     stubHeader(REAL_HEADER);
     mockExec
-      .mockReturnValueOnce("") // raw DDL
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // DDL + \copy + swap + calibrators (one tx)
       .mockReturnValueOnce("") // rm cleanup
-      .mockReturnValueOnce("") // calibrators DDL + INSERT
       .mockReturnValueOnce("91414") // raw_rows
-      .mockReturnValueOnce("32"); // calibrators_rows
+      .mockReturnValueOnce("32") // calibrators_rows
+      .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 
     const result = await loadEnigh({
       csvPath: "/tmp/enigh2024.csv",
@@ -203,19 +235,29 @@ describe("loadEnigh", () => {
     expect(typeof result.duration_ms).toBe("number");
 
     // The cp call should use the `--` separator (path-injection defense).
-    const cpCall = mockExec.mock.calls[1];
+    const cpCall = mockExec.mock.calls[0];
     expect(cpCall?.[1]).toEqual([
       "cp",
       "--",
       "/tmp/enigh2024.csv",
       expect.stringMatching(/^supabase-db:\/tmp\/enigh_raw_/),
     ]);
+
+    // Audit #145: raw reload and calibrators commit together or not at all.
+    const tx = mockExec.mock.calls[1];
+    expect(tx?.[1]).toContain("--single-transaction");
+    const containerPath = String((cpCall?.[1] as string[])[3]).replace(
+      "supabase-db:",
+      "",
+    );
+    expect((tx?.[2] as { input: string }).input).toBe(
+      buildEnighReloadSql(containerPath, 2024),
+    );
   });
 
   it("cleans up the container temp file even if \\copy throws", async () => {
     stubHeader(REAL_HEADER);
     mockExec
-      .mockReturnValueOnce("") // raw DDL
       .mockReturnValueOnce("") // cp
       .mockImplementationOnce(() => {
         throw new Error("\\copy failed: ERROR: malformed CSV");
@@ -229,8 +271,8 @@ describe("loadEnigh", () => {
       }),
     ).rejects.toThrow(/\\copy failed/);
 
-    // 4th call should be rm cleanup
-    const cleanupCall = mockExec.mock.calls[3];
+    // 3rd call should be rm cleanup
+    const cleanupCall = mockExec.mock.calls[2];
     expect(cleanupCall?.[1]).toEqual([
       "exec",
       "supabase-db",

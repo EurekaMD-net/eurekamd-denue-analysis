@@ -14,20 +14,29 @@
  * normalized to snake_case ASCII headers in the CSV pre-pass (see
  * docs/v0.2-status.md for the openpyxl conversion script).
  *
- * Behavior:
- *   1. Drop+create clues_raw table (68 TEXT columns) idempotently.
+ * Behavior (ONE psql transaction, audit #145 — a failure leaves the DB
+ * untouched and readers see the old data until COMMIT):
+ *   1. Create clues_raw_staging (68 TEXT columns).
  *   2. \copy CSV in (~63k rows: 41k EN OPERACION + 22k FUERA + handful of
  *      under-construction).
- *   3. Replace `clues` materialized view filtered to EN OPERACION with cast
+ *   3. Drop the `clues` MV explicitly (no CASCADE), swap staging in as
+ *      clues_raw.
+ *   4. Replace `clues` materialized view filtered to EN OPERACION with cast
  *      columns: nivel_atencion::int, lat/lon::numeric, geom POINT(4326).
  *      MATERIALIZED so we can build a GIST index over geom for ST_DWithin.
- *   4. Create btree index on cve_mun + GIST index on geom.
+ *   5. Create btree index on cve_mun + GIST index on geom, re-apply grants.
  *
  * Idempotent: rerun freely. The CSV is the boundary of trust.
  */
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -91,9 +100,9 @@ const CLUES_REQUIRED = [
   "longitud",
 ];
 
-const CLUES_DDL = `
-DROP TABLE IF EXISTS clues_raw CASCADE;
-CREATE TABLE clues_raw (
+const CLUES_STAGING_DDL = `
+DROP TABLE IF EXISTS clues_raw_staging;
+CREATE TABLE clues_raw_staging (
   clues TEXT,
   clave_de_la_institucion TEXT, nombre_de_la_institucion TEXT,
   clave_de_la_entidad TEXT, entidad TEXT,
@@ -190,6 +199,21 @@ DROP INDEX IF EXISTS idx_clues_nivel;
 CREATE INDEX idx_clues_nivel ON clues (nivel_atencion);
 `;
 
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * drop the `clues` MV explicitly (an unknown dependent makes DROP TABLE
+ * fail → rollback), swap, rebuild the MV + indexes, re-apply grants.
+ */
+export function buildCluesReloadSql(containerPath: string): string {
+  return [
+    CLUES_STAGING_DDL,
+    `\\copy clues_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+    swapInStagingSql("clues_raw", ["DROP MATERIALIZED VIEW IF EXISTS clues;"]),
+    POST_LOAD_SQL_FOR_TEST,
+    postLoadGrants(["clues_raw", "clues"]),
+  ].join("\n");
+}
+
 export interface LoadCluesConfig {
   csvPath: string;
   dbContainer: string;
@@ -216,25 +240,8 @@ export async function loadClues(
 
   const started = Date.now();
 
-  // 1. Create raw table
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      CLUES_DDL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. Copy CSV in + \copy with try/finally cleanup
+  // 1. Copy CSV in, then ONE transaction: \copy into staging → swap →
+  // MV + indexes → grants (audit #145). try/finally cleans the temp file.
   const containerPath = "/tmp/clues_raw.csv";
   execFileSync(
     "docker",
@@ -242,20 +249,10 @@ export async function loadClues(
     { encoding: "utf-8", timeout: 5 * 60_000 },
   );
   try {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy clues_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-      ],
-      { encoding: "utf-8", timeout: 10 * 60_000 },
+    runPsqlScript(
+      config.dbContainer,
+      buildCluesReloadSql(containerPath),
+      15 * 60_000,
     );
   } finally {
     try {
@@ -268,24 +265,6 @@ export async function loadClues(
       // best-effort
     }
   }
-
-  // 3. Post-load: materialized view + indexes
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL_FOR_TEST,
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
 
   // 4. Verify counts
   const cnt = (sql: string): number => {
@@ -317,6 +296,7 @@ export async function loadClues(
   const clues_with_geom = cnt(
     "SELECT COUNT(*) FROM clues WHERE geom IS NOT NULL;",
   );
+  assertRelationsExist(config.dbContainer, ["clues_raw", "clues"]);
   return {
     raw_rows,
     clues_rows,

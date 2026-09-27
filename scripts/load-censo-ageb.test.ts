@@ -11,7 +11,9 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -19,10 +21,17 @@ vi.mock("node:fs", () => ({
 
 import {
   POST_LOAD_SQL,
+  buildCensoAgebAppendSql,
   buildCensoAgebCreateTable,
+  buildCensoAgebReloadSql,
   loadCensoAgeb,
   runPostLoad,
 } from "./load-censo-ageb.js";
+
+type Call = [string, string[], { input?: string } | undefined];
+const calls = (): Call[] => mockExec.mock.calls as Call[];
+/** The script a runPsqlScript call piped in (undefined for plain -c calls). */
+const txInput = (i: number): string | undefined => calls()[i]?.[2]?.input;
 
 beforeEach(() => {
   mockExec.mockReset();
@@ -49,7 +58,8 @@ function mockFsForState(entidad: string): void {
 describe("buildCensoAgebCreateTable", () => {
   it("strips BOM, lowercases, quotes columns, requires entidad/mun/loc/ageb/mza", () => {
     const sql = buildCensoAgebCreateTable("﻿" + HEADER);
-    expect(sql).toContain("DROP TABLE IF EXISTS censo_ageb_raw CASCADE");
+    expect(sql).toContain("DROP TABLE IF EXISTS censo_ageb_raw;");
+    expect(sql).not.toContain("CASCADE");
     expect(sql).toContain('"entidad" TEXT');
     expect(sql).toContain('"ageb" TEXT');
     expect(sql).toContain('"mza" TEXT');
@@ -122,13 +132,39 @@ describe("POST_LOAD_SQL", () => {
     expect(POST_LOAD_SQL).toMatch(/idx_censo_ageb_raw_cvegeo[^_]/);
   });
 
-  it("wraps everything in BEGIN/COMMIT for atomic readers (qa-audit C3)", () => {
-    // Without the transaction, DROP VIEW + CREATE VIEW gives a ~10ms gap
-    // where concurrent ageb-detail / ageb-farmacia-opportunity requests
-    // would 502. CREATE OR REPLACE is also used (preserves OID), but the
-    // BEGIN/COMMIT hardens against any future statement that DROPs first.
-    expect(POST_LOAD_SQL).toMatch(/^\s*BEGIN;/);
-    expect(POST_LOAD_SQL).toMatch(/COMMIT;\s*$/);
+  it("carries no COMMIT of its own: it runs inside the reload's single transaction (qa-audit C3, audit #145)", () => {
+    // An inner COMMIT would end runPsqlScript's --single-transaction early
+    // and leave the rest of the reload autocommitted.
+    expect(POST_LOAD_SQL).not.toMatch(/\bCOMMIT;/);
+    expect(POST_LOAD_SQL).not.toMatch(/\bBEGIN;/);
+  });
+});
+
+describe("reload scripts (audit #145 / #147)", () => {
+  it("first state: staging \\copy before any live DROP, explicit view drops, swap, views, grants", () => {
+    const sql = buildCensoAgebReloadSql(HEADER, "/tmp/censo_ageb_21.csv");
+    const copy = sql.indexOf("\\copy censo_ageb_raw_staging FROM '/tmp/censo_ageb_21.csv'");
+    const dropManzana = sql.indexOf("DROP VIEW IF EXISTS censo_manzana;");
+    const dropAgeb = sql.indexOf("DROP VIEW IF EXISTS censo_ageb;");
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS censo_ageb_raw;");
+    const swap = sql.indexOf("ALTER TABLE censo_ageb_raw_staging RENAME TO censo_ageb_raw;");
+    const views = sql.indexOf("CREATE OR REPLACE VIEW censo_ageb AS");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropManzana);
+    expect(dropManzana).toBeLessThan(dropRaw);
+    expect(dropAgeb).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(views);
+    expect(sql).not.toMatch(/CASCADE/);
+    expect(sql).toContain("GRANT SELECT ON censo_ageb TO denue_sage;");
+    expect(sql).toContain("GRANT SELECT ON censo_manzana TO denue_sage;");
+  });
+
+  it("--append: DELETE and \\copy in the same script", () => {
+    expect(buildCensoAgebAppendSql("09", "/tmp/censo_ageb_09.csv")).toBe(
+      "DELETE FROM censo_ageb_raw WHERE entidad = '09';\n" +
+        "\\copy censo_ageb_raw FROM '/tmp/censo_ageb_09.csv' WITH (FORMAT csv, HEADER true, NULL '*')",
+    );
   });
 });
 
@@ -183,22 +219,18 @@ describe("loadCensoAgeb", () => {
     ).rejects.toThrow(/ENTIDAD invalid/);
   });
 
-  it("first state: pre-flight COUNT (relation missing) → DROP+CREATE → cp → \\copy → cleanup → 2 counts", async () => {
+  it("first state: to_regclass says absent → cp → ONE reload transaction → cleanup → counts → relation check", async () => {
     mockFsForState("21");
-    // qa-audit C1 (2026-05-05): pre-flight COUNT runs BEFORE the DROP. On
-    // a first-ever load the relation does not exist, so the COUNT throws
-    // — the loader catches it, treats existingRows=0, and proceeds to DROP.
-    // Order: COUNT (throws), createSql, cp, \copy, rm cleanup, state count, total count
+    // Order: to_regclass probe, cp, reload tx, rm cleanup, state count,
+    // total count, to_regclass assertion.
     mockExec
-      .mockImplementationOnce(() => {
-        throw new Error('relation "censo_ageb_raw" does not exist');
-      })
-      .mockReturnValueOnce("") // createSql
+      .mockReturnValueOnce("f\n") // to_regclass('censo_ageb_raw') IS NOT NULL
       .mockReturnValueOnce("") // cp
-      .mockReturnValueOnce("COPY 5234") // \copy
+      .mockReturnValueOnce("COPY 5234") // reload transaction
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("5234") // state count
-      .mockReturnValueOnce("5234"); // total count
+      .mockReturnValueOnce("5234") // total count
+      .mockReturnValueOnce(""); // nothing missing
 
     const result = await loadCensoAgeb({
       csvPath: "/tmp/conjunto_de_datos_ageb_urbana_21_cpv2020.csv",
@@ -210,18 +242,21 @@ describe("loadCensoAgeb", () => {
     expect(result.rows_loaded_state).toBe(5234);
     expect(result.rows_loaded_total).toBe(5234);
 
-    // 2nd call should be CREATE TABLE (1st was the pre-flight COUNT).
-    const createSql =
-      mockExec.mock.calls[1]?.[1]?.[mockExec.mock.calls[1]![1]!.length - 1];
-    expect(createSql).toContain("DROP TABLE IF EXISTS censo_ageb_raw");
-    expect(createSql).toContain("CREATE TABLE censo_ageb_raw");
+    expect(calls()[0]?.[1].at(-1)).toBe(
+      "SELECT to_regclass('censo_ageb_raw') IS NOT NULL;",
+    );
+    // Audit #145: DDL, \copy, swap and views are ONE psql session.
+    expect(calls()[2]?.[1]).toContain("--single-transaction");
+    expect(txInput(2)).toBe(
+      buildCensoAgebReloadSql(HEADER, "/tmp/censo_ageb_21.csv"),
+    );
   });
 
   it("REFUSES non-append load when table has data and --force is absent (qa-audit C1)", async () => {
     mockFsForState("21");
-    // Pre-flight COUNT returns "1500000" — meaning prior states are loaded.
-    // Without --force, the loader must throw BEFORE the DROP runs.
-    mockExec.mockReturnValueOnce("1500000");
+    // Relation exists and holds prior states. Without --force, the loader
+    // must throw BEFORE anything is copied or dropped.
+    mockExec.mockReturnValueOnce("t\n").mockReturnValueOnce("1500000");
 
     await expect(
       loadCensoAgeb({
@@ -231,19 +266,39 @@ describe("loadCensoAgeb", () => {
       }),
     ).rejects.toThrow(/already has 1,500,000 rows.*--append.*--force/);
 
-    // Only the COUNT was called — no DROP, no \copy.
-    expect(mockExec).toHaveBeenCalledTimes(1);
+    // Only the probe + COUNT ran — no \copy, no DROP.
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failing COUNT probe is rethrown, never read as 'table absent' (audit #157)", async () => {
+    mockFsForState("21");
+    // The old guard caught every error and proceeded to DROP ... CASCADE.
+    mockExec.mockReturnValueOnce("t\n").mockImplementationOnce(() => {
+      throw new Error("canceling statement due to statement timeout");
+    });
+
+    await expect(
+      loadCensoAgeb({
+        csvPath: "/tmp/x.csv",
+        dbContainer: "supabase-db",
+        append: false,
+      }),
+    ).rejects.toThrow(/statement timeout/);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    for (const c of calls()) {
+      expect(c[2]?.input ?? "").not.toMatch(/DROP TABLE/);
+    }
   });
 
   it("PROCEEDS with --force when table has data (overrides C1 guard)", async () => {
     mockFsForState("21");
     mockExec
-      .mockReturnValueOnce("") // createSql (COUNT pre-flight skipped because force=true)
-      .mockReturnValueOnce("") // cp
-      .mockReturnValueOnce("COPY 5234") // \copy
+      .mockReturnValueOnce("") // cp (probe skipped because force=true)
+      .mockReturnValueOnce("COPY 5234") // reload transaction
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("5234")
-      .mockReturnValueOnce("5234");
+      .mockReturnValueOnce("5234")
+      .mockReturnValueOnce(""); // nothing missing
 
     const result = await loadCensoAgeb({
       csvPath: "/tmp/x.csv",
@@ -253,18 +308,16 @@ describe("loadCensoAgeb", () => {
     });
 
     expect(result.entidad).toBe("21");
-    // 1st call should be CREATE TABLE directly (no COUNT pre-flight).
-    const firstSql =
-      mockExec.mock.calls[0]?.[1]?.[mockExec.mock.calls[0]![1]!.length - 1];
-    expect(firstSql).toContain("DROP TABLE IF EXISTS censo_ageb_raw");
+    // 1st call is the docker cp directly (no probe).
+    expect(calls()[0]?.[1][0]).toBe("cp");
+    expect(txInput(1)).toContain("DROP TABLE IF EXISTS censo_ageb_raw;");
   });
 
-  it("subsequent state with --append: DELETE WHERE entidad → cp → \\copy → cleanup → counts", async () => {
+  it("subsequent state with --append: cp → DELETE + \\copy in ONE transaction → cleanup → counts", async () => {
     mockFsForState("09");
     mockExec
-      .mockReturnValueOnce("DELETE 0") // DELETE WHERE entidad
       .mockReturnValueOnce("") // cp
-      .mockReturnValueOnce("COPY 28000") // \copy
+      .mockReturnValueOnce("DELETE 0\nCOPY 28000") // DELETE + \copy transaction
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("28000") // state count
       .mockReturnValueOnce("33234"); // total count (21 prior + 09)
@@ -279,22 +332,26 @@ describe("loadCensoAgeb", () => {
     expect(result.rows_loaded_state).toBe(28000);
     expect(result.rows_loaded_total).toBe(33234);
 
-    // 1st call should be DELETE (NOT DROP TABLE)
-    const firstSql =
-      mockExec.mock.calls[0]?.[1]?.[mockExec.mock.calls[0]![1]!.length - 1];
-    expect(firstSql).toContain(
-      "DELETE FROM censo_ageb_raw WHERE entidad = '09'",
+    // Audit #147: the DELETE and the \copy share one single-transaction
+    // session, so a failed copy can no longer leave the state empty.
+    expect(calls()[1]?.[1]).toContain("--single-transaction");
+    expect(txInput(1)).toBe(
+      buildCensoAgebAppendSql("09", "/tmp/censo_ageb_09.csv"),
     );
-    expect(firstSql).not.toContain("DROP TABLE");
+    expect(txInput(1)).not.toContain("DROP TABLE");
+    // No autocommitted DELETE anywhere else.
+    const plainDeletes = calls().filter((c) =>
+      c[1].some((a) => a.includes("DELETE FROM")),
+    );
+    expect(plainDeletes).toHaveLength(0);
   });
 
   it("uses per-entidad temp filename (concurrent-load safe)", async () => {
     mockFsForState("21");
     mockExec.mockReturnValue("");
     mockExec
-      .mockReturnValueOnce("") // createSql (force=true skips pre-flight COUNT)
-      .mockReturnValueOnce("") // cp
-      .mockReturnValueOnce("COPY 1") // \copy
+      .mockReturnValueOnce("") // cp (force=true skips the probe)
+      .mockReturnValueOnce("COPY 1") // reload transaction
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("1") // state count
       .mockReturnValueOnce("1"); // total count
@@ -306,8 +363,8 @@ describe("loadCensoAgeb", () => {
       force: true,
     });
 
-    // 2nd call is `docker cp` — destination should include /tmp/censo_ageb_21.csv
-    const cpArgs = mockExec.mock.calls[1]?.[1] as string[] | undefined;
+    // 1st call is `docker cp` — destination should include /tmp/censo_ageb_21.csv
+    const cpArgs = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     expect(cpArgs?.[0]).toBe("cp");
     expect(cpArgs?.[3]).toMatch(/:\/tmp\/censo_ageb_21\.csv$/);
   });
@@ -315,8 +372,7 @@ describe("loadCensoAgeb", () => {
   it("cleans up container temp file even if \\copy throws", async () => {
     mockFsForState("21");
     mockExec
-      .mockReturnValueOnce("") // createSql (force=true skips pre-flight COUNT)
-      .mockReturnValueOnce("") // cp
+      .mockReturnValueOnce("") // cp (force=true skips the probe)
       .mockImplementationOnce(() => {
         throw new Error("\\copy failed: bad row");
       });
@@ -330,8 +386,8 @@ describe("loadCensoAgeb", () => {
       }),
     ).rejects.toThrow(/\\copy failed/);
 
-    // 4th call (mock index 3) should be rm cleanup
-    const cleanupArgs = mockExec.mock.calls[3]?.[1] as string[] | undefined;
+    // 3rd call (mock index 2) should be rm cleanup
+    const cleanupArgs = mockExec.mock.calls[2]?.[1] as string[] | undefined;
     expect(cleanupArgs?.[0]).toBe("exec");
     expect(cleanupArgs?.[2]).toBe("rm");
     expect(cleanupArgs?.[3]).toBe("-f");
@@ -345,14 +401,15 @@ describe("runPostLoad", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("invokes psql with POST_LOAD_SQL", () => {
+  it("runs POST_LOAD_SQL + grants as ONE single-transaction psql session", () => {
     mockExec.mockReturnValue("");
     const r = runPostLoad("supabase-db");
     expect(typeof r.duration_ms).toBe("number");
     expect(mockExec).toHaveBeenCalledOnce();
-    const sql =
-      mockExec.mock.calls[0]?.[1]?.[mockExec.mock.calls[0]![1]!.length - 1];
+    expect(calls()[0]?.[1]).toContain("--single-transaction");
+    const sql = txInput(0) ?? "";
     expect(sql).toContain("CREATE OR REPLACE VIEW censo_ageb");
     expect(sql).toContain("CREATE OR REPLACE VIEW censo_manzana");
+    expect(sql).toContain("GRANT SELECT ON censo_ageb TO denue_sage;");
   });
 });

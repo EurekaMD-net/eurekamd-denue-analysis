@@ -40,6 +40,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { argv } from "node:process";
+import { copyFromStdinScript, runPsqlScript } from "./_psql-tx.js";
 
 interface Args {
   csv: string;
@@ -495,31 +496,19 @@ export async function loadSictDatosViales(args: Args): Promise<void> {
 
     // 4. Truncate raw + \copy.
     console.log("[load-sict] truncating + loading raw CSV...");
-    dockerExecStdin(
-      args.container,
-      ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-      `TRUNCATE TABLE sict_estaciones_viales_raw_2024;`,
-    );
-
+    // Audit #146: TRUNCATE and \copy share ONE psql session and
+    // transaction (CSV piped inline after the \copy line), so a failed copy
+    // rolls the TRUNCATE back instead of committing an empty raw table.
     const copyCmd = `\\copy sict_estaciones_viales_raw_2024 (${RAW_HEADER_COLS.join(", ")}) FROM STDIN WITH (FORMAT csv, HEADER true)`;
     const csvBuf = readFileSync(cleanedPath);
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        args.container,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-c",
+    runPsqlScript(
+      args.container,
+      copyFromStdinScript(
+        `TRUNCATE TABLE sict_estaciones_viales_raw_2024;`,
         copyCmd,
-      ],
-      { input: csvBuf, maxBuffer: 64 * 1024 * 1024 },
+        csvBuf,
+      ),
+      30 * 60_000,
     );
 
     // 5. Build views atomically (audit W1: one transaction so partial

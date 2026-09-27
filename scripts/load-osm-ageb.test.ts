@@ -9,7 +9,9 @@ const { mockExists, mockStat } = vi.hoisted(() => ({
   mockExists: vi.fn(),
   mockStat: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   existsSync: mockExists,
   statSync: mockStat,
 }));
@@ -96,6 +98,39 @@ describe("buildAggregateSql", () => {
   it("wraps the work in a single explicit transaction", () => {
     expect(sql).toContain("BEGIN;");
     expect(sql).toContain("COMMIT;");
+  });
+
+  it("builds into a staging table and swaps it in before COMMIT (audit #145)", () => {
+    const begin = sql.indexOf("BEGIN;");
+    const createStaging = sql.indexOf("CREATE TABLE osm_ageb_aggregates_staging (");
+    const insert = sql.indexOf("INSERT INTO osm_ageb_aggregates_staging (");
+    const dropLive = sql.indexOf("DROP TABLE IF EXISTS osm_ageb_aggregates;");
+    const rename = sql.indexOf(
+      "ALTER TABLE osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;",
+    );
+    const pkey = sql.indexOf(
+      "ALTER INDEX osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;",
+    );
+    const grants = sql.indexOf(
+      "REVOKE ALL ON osm_ageb_aggregates FROM anon, authenticated, trustr_app;",
+    );
+    const commit = sql.lastIndexOf("COMMIT;");
+    expect(begin).toBeGreaterThan(-1);
+    expect(begin).toBeLessThan(createStaging);
+    expect(createStaging).toBeLessThan(insert);
+    expect(insert).toBeLessThan(dropLive);
+    expect(dropLive).toBeLessThan(rename);
+    expect(rename).toBeLessThan(pkey);
+    expect(pkey).toBeLessThan(grants);
+    expect(grants).toBeLessThan(commit);
+    // The live table is never emptied before the new rows exist.
+    expect(sql).not.toMatch(/INSERT INTO osm_ageb_aggregates \(/);
+    // Staging carries the same role-guarded consumer grants (they follow the
+    // table through the RENAME).
+    expect(sql).toContain(
+      "GRANT SELECT ON osm_ageb_aggregates_staging TO mcp_readonly",
+    );
+    expect(sql).toContain("GRANT SELECT ON osm_ageb_aggregates TO denue_sage;");
   });
 
   it("sets ON_ERROR_STOP so a mid-pipeline failure aborts the txn", () => {
@@ -244,7 +279,7 @@ describe("loadOsmAgeb (orchestration)", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("runs the 8 expected execFileSync calls in order on the happy path", async () => {
+  it("runs the 7 expected execFileSync calls in order on the happy path", async () => {
     // Returns "80000\n" for the final SELECT COUNT(*).
     mockExec.mockReturnValue("80000\n");
     const r = await loadOsmAgeb({
@@ -265,35 +300,39 @@ describe("loadOsmAgeb (orchestration)", () => {
     expect(mockExec.mock.calls[2]![0]).toBe("sed");
     expect(mockExec.mock.calls[2]![1]).toContain("-i");
     expect(mockExec.mock.calls[2]![1]).toContain("s/\\x1e//g");
-    // Step 3: docker exec psql -c CREATE_AGGREGATE_TABLE_SQL
+    // Audit #145: no separate DROP+CREATE session — the table DDL lives in
+    // the aggregate's own transaction.
+    expect(
+      mockExec.mock.calls.some((c) =>
+        (c[1] as string[]).some((a) => a.includes("CREATE TABLE")),
+      ),
+    ).toBe(false);
+    // Step 3: docker cp
     expect(mockExec.mock.calls[3]![0]).toBe("docker");
-    expect(mockExec.mock.calls[3]![1]?.join(" ")).toContain(
-      "osm_ageb_aggregates",
-    );
-    // Step 4: docker cp
-    expect(mockExec.mock.calls[4]![0]).toBe("docker");
-    expect(mockExec.mock.calls[4]![1]).toContain("cp");
-    expect(mockExec.mock.calls[4]![1]).toContain("--");
-    // Step 5: docker exec psql with aggregate SQL via STDIN (3rd arg `input`).
+    expect(mockExec.mock.calls[3]![1]).toContain("cp");
+    expect(mockExec.mock.calls[3]![1]).toContain("--");
+    // Step 4: docker exec psql with aggregate SQL via STDIN (3rd arg `input`).
     // Cannot pass via `-c` — psql's -c rejects multi-statement scripts that
     // mix SQL with the `\copy` meta-command (verified against psql 17).
-    expect(mockExec.mock.calls[5]![0]).toBe("docker");
-    expect(mockExec.mock.calls[5]![1]?.join(" ")).not.toContain(
+    expect(mockExec.mock.calls[4]![0]).toBe("docker");
+    expect(mockExec.mock.calls[4]![1]?.join(" ")).not.toContain(
       "INSERT INTO osm_ageb_aggregates",
     );
-    expect(mockExec.mock.calls[5]![1]).not.toContain("-c");
-    const aggregateOpts = mockExec.mock.calls[5]![2] as
+    expect(mockExec.mock.calls[4]![1]).not.toContain("-c");
+    const aggregateOpts = mockExec.mock.calls[4]![2] as
       | { input?: string }
       | undefined;
-    expect(aggregateOpts?.input).toContain("INSERT INTO osm_ageb_aggregates");
+    expect(aggregateOpts?.input).toBe(
+      buildAggregateSql("/tmp/osm_roads.geojsonseq"),
+    );
     expect(aggregateOpts?.input).toContain(
       "\\copy osm_roads_loader (feat) FROM",
     );
-    // Step 6: docker exec rm -f (cleanup, in finally)
-    expect(mockExec.mock.calls[6]![0]).toBe("docker");
-    expect(mockExec.mock.calls[6]![1]).toContain("rm");
-    // Step 7: docker exec psql -t -A -c COUNT
-    expect(mockExec.mock.calls[7]![1]?.join(" ")).toContain(
+    // Step 5: docker exec rm -f (cleanup, in finally)
+    expect(mockExec.mock.calls[5]![0]).toBe("docker");
+    expect(mockExec.mock.calls[5]![1]).toContain("rm");
+    // Step 6: docker exec psql -t -A -c COUNT
+    expect(mockExec.mock.calls[6]![1]?.join(" ")).toContain(
       "SELECT COUNT(*) FROM osm_ageb_aggregates",
     );
     expect(r.ageb_rows_loaded).toBe(80000);
@@ -322,13 +361,12 @@ describe("loadOsmAgeb (orchestration)", () => {
       .mockReturnValueOnce("") // 1: osmium tags-filter
       .mockReturnValueOnce("") // 2: osmium export
       .mockReturnValueOnce("") // 2b: sed strip
-      .mockReturnValueOnce("") // 3: CREATE TABLE
-      .mockReturnValueOnce("") // 4: docker cp
+      .mockReturnValueOnce("") // 3: docker cp
       .mockImplementationOnce(() => {
-        // 5: AGGREGATE psql throws
+        // 4: AGGREGATE psql throws
         throw new Error("psql: aggregate failed");
       })
-      .mockReturnValueOnce(""); // 6: cleanup rm (must still fire)
+      .mockReturnValueOnce(""); // 5: cleanup rm (must still fire)
     await expect(
       loadOsmAgeb({
         pbfPath: "/p.pbf",
@@ -358,12 +396,11 @@ describe("loadOsmAgeb (orchestration)", () => {
       .mockReturnValueOnce("") // 1: osmium tags-filter
       .mockReturnValueOnce("") // 2: osmium export
       .mockReturnValueOnce("") // 2b: sed strip
-      .mockReturnValueOnce("") // 3: CREATE TABLE
       .mockImplementationOnce(() => {
-        // 4: docker cp throws BEFORE aggregate even starts
+        // 3: docker cp throws BEFORE aggregate even starts
         throw new Error("docker cp: copy denied");
       })
-      .mockReturnValueOnce(""); // 5: cleanup rm — must still fire
+      .mockReturnValueOnce(""); // 4: cleanup rm — must still fire
     await expect(
       loadOsmAgeb({
         pbfPath: "/p.pbf",

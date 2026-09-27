@@ -268,6 +268,28 @@ export function buildEdrReloadSql(containerPath: string): string {
   ].join("\n");
 }
 
+/**
+ * Append-mode script (audit #147): purge the year being re-loaded and \copy
+ * it back in ONE transaction, so a failed \copy cannot leave that year
+ * deleted. `year` is null when the first data row's anio_regis did not parse
+ * (then there is nothing safe to purge and the script only appends).
+ */
+export function buildEdrAppendSql(
+  containerPath: string,
+  year: string | null,
+): string {
+  if (year !== null && !/^(19|20)[0-9]{2}$/.test(year)) {
+    throw new Error(`loadEdr: anio_regis inválido "${year}"`);
+  }
+  return [
+    // Year value is regex-validated (^(19|20)[0-9]{2}$) so safe to inline.
+    ...(year !== null
+      ? [`DELETE FROM inegi_edr_defunciones_raw WHERE anio_regis = '${year}';`]
+      : []),
+    `\\copy inegi_edr_defunciones_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+  ].join("\n");
+}
+
 export interface LoadEdrConfig {
   csvPath: string;
   dbContainer: string;
@@ -296,31 +318,14 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
 
   // 1. Append mode: purge any prior load for the same anio_regis (audit
   // M1 — without this, re-running the same year doubles every aggregate
-  // silently). The CSV is anio_regis-homogeneous by INEGI design.
+  // silently). The CSV is anio_regis-homogeneous by INEGI design. The
+  // purge runs in the same transaction as the \copy (audit #147).
   // Replace mode builds the table in the step-2 transaction instead.
-  if (config.append) {
-    const year = readAnioRegisFromFirstDataRow(config.csvPath);
-    if (year !== null) {
-      // Year value is regex-validated (^(19|20)[0-9]{2}$) so safe to inline.
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-c",
-          `DELETE FROM inegi_edr_defunciones_raw WHERE anio_regis = '${year}';`,
-        ],
-        { encoding: "utf-8", timeout: 5 * 60_000 },
-      );
-    }
-    // Year unparseable → skip purge. Loader still appends; operator can
-    // catch the duplication via the count assertions in the result.
-  }
+  // Year unparseable → skip purge. Loader still appends; operator can
+  // catch the duplication via the count assertions in the result.
+  const appendYear = config.append
+    ? readAnioRegisFromFirstDataRow(config.csvPath)
+    : null;
 
   // 2. Copy CSV in via temp container path + try/finally cleanup
   const containerPath = `/tmp/edr_raw_${Date.now()}.csv`;
@@ -331,20 +336,11 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
   );
   try {
     if (config.append) {
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-c",
-          `\\copy inegi_edr_defunciones_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-        ],
-        { encoding: "utf-8", timeout: 30 * 60_000 },
+      // ONE transaction: DELETE year → \copy (audit #147).
+      runPsqlScript(
+        config.dbContainer,
+        buildEdrAppendSql(containerPath, appendYear),
+        30 * 60_000,
       );
     } else {
       // ONE transaction: staging \copy → swap → indexes → MV rebuild

@@ -63,8 +63,7 @@ function stubHappyPath(): void {
   mockExec
     .mockReturnValueOnce("CREATE TABLE\nCREATE INDEX\n") // RAW_DDL
     .mockReturnValueOnce("0\n") // COUNT(*) — empty
-    .mockReturnValueOnce("TRUNCATE TABLE\n") // TRUNCATE
-    .mockReturnValueOnce("COPY 1\n") // \copy
+    .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy (one tx)
     .mockReturnValueOnce(
       "DROP VIEW\nDROP TABLE\nCREATE TABLE\nINSERT 0 18\nCREATE VIEW\nCREATE MATERIALIZED VIEW\nCREATE INDEX\nCOMMIT\n",
     ) // VIEWS_DDL_TRANSACTION
@@ -109,16 +108,26 @@ describe("loadCnbvCredito (orchestration)", () => {
       force: true,
       container: "supabase-db",
     });
-    expect(mockExec).toHaveBeenCalledTimes(6);
+    expect(mockExec).toHaveBeenCalledTimes(5);
     expect(mockExec.mock.calls[0]?.[2]).toMatchObject({ input: RAW_DDL });
-    const copyArgs = (mockExec.mock.calls[3]?.[1] ?? []) as string[];
-    expect(copyArgs.join(" ")).toContain(
+    // Call 3: TRUNCATE + \copy FROM STDIN in ONE single-transaction psql
+    // session (audit #146), CSV inline after the \copy line.
+    const txArgs = (mockExec.mock.calls[2]?.[1] ?? []) as string[];
+    expect(txArgs).toContain("--single-transaction");
+    expect(txArgs).not.toContain("-c");
+    const txInput = String(
+      (mockExec.mock.calls[2]?.[2] as { input: Buffer }).input,
+    );
+    expect(txInput.startsWith("TRUNCATE TABLE cnbv_credito_raw_2025;\n")).toBe(true);
+    expect(txInput).toContain(
       `\\copy cnbv_credito_raw_2025 (${RAW_HEADER_COLS.join(", ")}) FROM STDIN`,
     );
-    expect(mockExec.mock.calls[4]?.[2]).toMatchObject({
+    expect(txInput.indexOf("TRUNCATE")).toBeLessThan(txInput.indexOf("\\copy"));
+    expect(txInput.endsWith("\n\\.\n")).toBe(true);
+    expect(mockExec.mock.calls[3]?.[2]).toMatchObject({
       input: VIEWS_DDL_TRANSACTION,
     });
-    expect(mockExec.mock.calls[5]?.[1]?.join(" ")).toContain(
+    expect(mockExec.mock.calls[4]?.[1]?.join(" ")).toContain(
       POST_LOAD_VERIFY_SQL,
     );
   });
@@ -167,6 +176,38 @@ describe("loadCnbvCredito (orchestration)", () => {
     expect(idxMuniView).toBeGreaterThan(idxEstadoView);
   });
 
+  it("a failed \\copy never runs TRUNCATE on its own (audit #146)", async () => {
+    mockReadFile
+      .mockReturnValueOnce(SAMPLE_CSV)
+      .mockReturnValueOnce(SAMPLE_CSV);
+    mockExec
+      .mockReturnValueOnce("CREATE TABLE\n") // RAW_DDL ok
+      .mockReturnValueOnce("0\n") // COUNT 0 — proceed
+      .mockImplementationOnce(() => {
+        // psql rolls the whole session back: TRUNCATE is undone.
+        throw new Error("ERROR: extra data after last expected column");
+      });
+    await expect(
+      loadCnbvCredito({
+        csv: "raw/cnbv/credito_2025.csv",
+        force: true,
+        container: "supabase-db",
+      }),
+    ).rejects.toThrow(/extra data/);
+    // No psql session ever ran the TRUNCATE outside the \copy transaction,
+    // and nothing ran after the failure.
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    const lone = mockExec.mock.calls.filter((c) => {
+      const input = (c[2] as { input?: unknown } | undefined)?.input;
+      return (
+        typeof input === "string" &&
+        input.includes("TRUNCATE") &&
+        !input.includes("\\copy")
+      );
+    });
+    expect(lone).toHaveLength(0);
+  });
+
   it("cleans up tempdir even on docker-exec failure during DDL step", async () => {
     mockReadFile
       .mockReturnValueOnce(SAMPLE_CSV)
@@ -174,8 +215,7 @@ describe("loadCnbvCredito (orchestration)", () => {
     mockExec
       .mockReturnValueOnce("CREATE TABLE\n")
       .mockReturnValueOnce("0\n")
-      .mockReturnValueOnce("TRUNCATE\n")
-      .mockReturnValueOnce("COPY 1\n")
+      .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy ok
       .mockImplementationOnce(() => {
         throw new Error("syntax error");
       });

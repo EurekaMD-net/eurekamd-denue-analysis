@@ -5,6 +5,7 @@
  * - transform(): normalización de campos crudos → fila DB
  * - loadRecords(): upsert via PostgREST (mockeado)
  * - readExtractorOutput(): lectura de archivo JSON
+ * - scripts/load.ts loadAndUpdateGeometry(): error vs geometry branch (#165)
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
@@ -19,6 +20,7 @@ import {
   type DenueRawRecord,
   type LoaderConfig,
 } from "./loader.js";
+import { loadAndUpdateGeometry } from "../../scripts/load.js";
 
 // updateGeometry shells out to docker; never let a test reach the real one.
 const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
@@ -636,5 +638,88 @@ describe("updateGeometry()", () => {
     });
 
     await expect(updateGeometry(config)).rejects.toThrow(/connection refused/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scripts/load.ts — the CLI's error and geometry branches (audit #165)
+// ---------------------------------------------------------------------------
+describe("loadAndUpdateGeometry() (scripts/load.ts)", () => {
+  const config: LoaderConfig = {
+    supabaseUrl: "http://localhost:8100",
+    serviceRoleKey: "fake-service-key",
+    batchSize: 1,
+  };
+  const prevContainer = process.env["SUPABASE_DB_CONTAINER"];
+
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+    process.env["SUPABASE_DB_CONTAINER"] = "denue-test-no-such-container";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    if (prevContainer === undefined) delete process.env["SUPABASE_DB_CONTAINER"];
+    else process.env["SUPABASE_DB_CONTAINER"] = prevContainer;
+  });
+
+  it("importing the CLI module does not run main()", () => {
+    // isMain guard: a regression would have read --file / exited on import.
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("all batches OK → rewrites geometry and reports the count", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    execFileSyncMock.mockReturnValue("UPDATE 2\n");
+
+    const out = await loadAndUpdateGeometry([BASE_RECORD, BASE_RECORD], config);
+
+    expect(out.result.inserted).toBe(2);
+    expect(out.result.errors).toHaveLength(0);
+    expect(out.geometryUpdated).toBe(2);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    expect((execFileSyncMock.mock.calls[0]![1] as string[]).join(" ")).toContain(
+      "UPDATE establecimientos",
+    );
+  });
+
+  it("any failed batch → reports the errors and skips the geometry update", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          ++n === 1
+            ? { ok: false, text: async () => "duplicate key value" }
+            : { ok: true },
+        ),
+      ),
+    );
+
+    const out = await loadAndUpdateGeometry([BASE_RECORD, BASE_RECORD], config);
+
+    expect(out.result.inserted).toBe(1);
+    expect(out.result.errors).toEqual([
+      { clee: BASE_RECORD.CLEE, error: "duplicate key value" },
+    ]);
+    expect(out.geometryUpdated).toBeNull();
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+    const logged = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0]))
+      .join("\n");
+    expect(logged).toContain(`CLEE ${BASE_RECORD.CLEE}: duplicate key value`);
+  });
+
+  it("a geometry failure propagates instead of reporting success", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    execFileSyncMock.mockImplementation(() => {
+      throw new Error("psql: connection refused");
+    });
+
+    await expect(
+      loadAndUpdateGeometry([BASE_RECORD], config),
+    ).rejects.toThrow(/connection refused/);
   });
 });

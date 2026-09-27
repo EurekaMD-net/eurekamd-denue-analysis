@@ -10,13 +10,16 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
 }));
 
 import {
+  buildBienestarReloadSql,
   loadBienestarPadron,
   POST_LOAD_SQL_FOR_TEST,
 } from "./load-bienestar-padron.js";
@@ -104,14 +107,13 @@ describe("loadBienestarPadron (orchestration)", () => {
   it("passes csvPath positionally with `--` separator to docker cp", async () => {
     stubHeader(VALID_HEADER);
     mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // raw DDL
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 748\n") // \copy
+      .mockReturnValueOnce("COPY 748\n") // one tx: DDL + \copy + swap + views
       .mockReturnValueOnce("") // rm
-      .mockReturnValueOnce("CREATE VIEW\n") // post-load
       .mockReturnValueOnce("736\n") // count panel
       .mockReturnValueOnce("32\n") // count latest
-      .mockReturnValueOnce("0\n"); // duplicate guard (zero corruption)
+      .mockReturnValueOnce("0\n") // duplicate guard (zero corruption)
+      .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 
     const result = await loadBienestarPadron({
       csvPath: "/data/padron.csv",
@@ -119,6 +121,15 @@ describe("loadBienestarPadron (orchestration)", () => {
     });
     expect(result.panel_rows).toBe(736);
     expect(result.latest_rows).toBe(32);
+
+    // Audit #145: DDL, \copy, swap and views run as ONE psql session.
+    const txs = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(txs).toHaveLength(1);
+    expect((txs[0]?.[2] as { input: string }).input).toBe(
+      buildBienestarReloadSql("/tmp/bienestar_padron.csv"),
+    );
 
     const cpCalls = mockExec.mock.calls.filter((c) => {
       const args = c[1] as string[];
@@ -136,11 +147,9 @@ describe("loadBienestarPadron (orchestration)", () => {
     // source), so the post-load duplicate guard is the only line of defense.
     stubHeader(VALID_HEADER);
     mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // raw DDL
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 750\n") // \copy (extra rows)
+      .mockReturnValueOnce("COPY 750\n") // one tx: DDL + \copy + swap + views (extra rows)
       .mockReturnValueOnce("") // rm
-      .mockReturnValueOnce("CREATE VIEW\n") // post-load
       .mockReturnValueOnce("738\n") // count panel
       .mockReturnValueOnce("32\n") // count latest
       .mockReturnValueOnce("2\n"); // duplicate guard fires
@@ -157,12 +166,15 @@ describe("loadBienestarPadron (orchestration)", () => {
 
   it("cleans up in-container temp file even when \\copy fails", async () => {
     stubHeader(VALID_HEADER);
-    mockExec.mockImplementation((_bin: string, args: string[]) => {
-      if (args.some((a) => a.includes("\\copy"))) {
-        throw new Error("psql copy failed");
-      }
-      return "";
-    });
+    mockExec.mockImplementation(
+      (_bin: string, args: string[], opts?: { input?: string }) => {
+        if (!Array.isArray(args)) return "";
+        if (String(opts?.input ?? "").includes("\\copy")) {
+          throw new Error("psql copy failed");
+        }
+        return "";
+      },
+    );
     await expect(
       loadBienestarPadron({
         csvPath: "/p.csv",
@@ -175,6 +187,33 @@ describe("loadBienestarPadron (orchestration)", () => {
       return Array.isArray(args) && args.includes("rm");
     });
     expect(rmCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("buildBienestarReloadSql (audit #145)", () => {
+  it("staging \\copy before any live DROP; explicit view drops; swap; views; grants", () => {
+    const sql = buildBienestarReloadSql("/tmp/bienestar_padron.csv");
+    const copy = sql.indexOf(
+      "\\copy bienestar_padron_estatal_trimestral_raw_staging FROM '/tmp/bienestar_padron.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    const dropLatest = sql.indexOf("DROP VIEW IF EXISTS bienestar_estatal_latest;");
+    const dropPanel = sql.indexOf("DROP VIEW IF EXISTS bienestar_estatal_trimestral;");
+    const dropRaw = sql.indexOf(
+      "DROP TABLE IF EXISTS bienestar_padron_estatal_trimestral_raw;",
+    );
+    const swap = sql.indexOf(
+      "ALTER TABLE bienestar_padron_estatal_trimestral_raw_staging RENAME TO bienestar_padron_estatal_trimestral_raw;",
+    );
+    const views = sql.indexOf("CREATE VIEW bienestar_estatal_trimestral AS");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropLatest);
+    expect(dropLatest).toBeLessThan(dropPanel);
+    expect(dropPanel).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(views);
+    expect(sql).not.toMatch(/DROP TABLE[^;]*CASCADE/);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
+    expect(sql).toContain("GRANT SELECT ON bienestar_estatal_latest TO denue_sage;");
   });
 });
 
@@ -310,27 +349,9 @@ describe("RAW_DDL column-order pin (R2 audit)", () => {
       "entidad_etiqueta",
       "entidad_etq",
     ];
-    // Re-import RAW_DDL via the orchestration entry — it lives only inside
-    // the loader module. Stub the side effects so the SQL string is
-    // captured without actually running.
-    stubHeader(VALID_HEADER);
-    const sqlCalls: string[] = [];
-    mockExec.mockImplementation((_bin: string, args: string[]) => {
-      const lastArg = args[args.length - 1] ?? "";
-      if (lastArg.includes("CREATE TABLE")) sqlCalls.push(lastArg);
-      // Return mock count values for the verification phase
-      return /\d+\n/.test("0") ? "0\n" : "";
-    });
-    try {
-      await loadBienestarPadron({
-        csvPath: "/data/p.csv",
-        dbContainer: "supabase-db",
-      });
-    } catch {
-      // We don't care about completion — just need the CREATE TABLE call
-    }
-    expect(sqlCalls.length).toBeGreaterThanOrEqual(1);
-    const ddl = sqlCalls[0] ?? "";
+    // RAW_DDL is module-private; read it through the exported reload script.
+    const ddl = buildBienestarReloadSql("/tmp/bienestar_padron.csv");
+
     // Extract column names from inside CREATE TABLE (...) body only.
     // Anchoring to the parenthesized body prevents false-positive matches
     // from any line outside the column-list (e.g. CHECK constraints, future

@@ -27,10 +27,11 @@
  * Usage:
  *   npx tsx scripts/load-bienestar-padron.ts --csv=/tmp/padron_unico_bienestar.csv
  *
- * Behavior:
- *   1. Drop+create raw table (all TEXT) idempotently.
- *   2. \copy CSV in via docker exec (with try/finally cleanup on the
- *      in-container temp file).
+ * Behavior (steps 1-3 run as ONE psql --single-transaction session, audit
+ * #145 — a failed \copy leaves the live table and views untouched):
+ *   1. Drop+create `_staging` raw table (all TEXT) idempotently.
+ *   2. \copy CSV into staging (with try/finally cleanup on the in-container
+ *      temp file), drop the two views, swap staging in.
  *   3. Replace TWO views:
  *        bienestar_estatal_trimestral (full panel, CVEENT<>99 filtered)
  *        bienestar_estatal_latest     (most-recent quarter per entidad)
@@ -44,6 +45,12 @@
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -110,8 +117,8 @@ const REQUIRED_HEADERS = [
 ];
 
 const RAW_DDL = `
-DROP TABLE IF EXISTS bienestar_padron_estatal_trimestral_raw CASCADE;
-CREATE TABLE bienestar_padron_estatal_trimestral_raw (
+DROP TABLE IF EXISTS bienestar_padron_estatal_trimestral_raw_staging;
+CREATE TABLE bienestar_padron_estatal_trimestral_raw_staging (
   cveent TEXT,
   entidad TEXT,
   beneficiarios TEXT,
@@ -190,6 +197,30 @@ FROM (
 WHERE rn = 1;
 `;
 
+const BIENESTAR_RELATIONS = [
+  "bienestar_padron_estatal_trimestral_raw",
+  "bienestar_estatal_trimestral",
+  "bienestar_estatal_latest",
+];
+
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * drop both views explicitly (latest reads trimestral, so it goes first),
+ * swap, recreate the views, grants.
+ */
+export function buildBienestarReloadSql(containerPath: string): string {
+  return [
+    RAW_DDL,
+    `\\copy bienestar_padron_estatal_trimestral_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+    swapInStagingSql("bienestar_padron_estatal_trimestral_raw", [
+      "DROP VIEW IF EXISTS bienestar_estatal_latest;",
+      "DROP VIEW IF EXISTS bienestar_estatal_trimestral;",
+    ]),
+    POST_LOAD_SQL_FOR_TEST,
+    postLoadGrants(BIENESTAR_RELATIONS),
+  ].join("\n");
+}
+
 export interface LoadBienestarConfig {
   csvPath: string;
   dbContainer: string;
@@ -215,25 +246,7 @@ export async function loadBienestarPadron(
 
   const started = Date.now();
 
-  // 1. Create raw table
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      RAW_DDL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. \copy CSV in
+  // 1-3. One transaction: staging DDL → \copy → swap → views → grants.
   const containerPath = "/tmp/bienestar_padron.csv";
   execFileSync(
     "docker",
@@ -241,23 +254,13 @@ export async function loadBienestarPadron(
     { encoding: "utf-8", timeout: 60_000 },
   );
   try {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy bienestar_padron_estatal_trimestral_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-      ],
-      // W2 audit (ronda 1): aligned to load-coneval.ts \\copy timeout (5 min).
-      // Current bienestar CSV is 114 KB and loads in <1s, but a future quarterly
-      // refresh could ship multi-year backfill or operator-supplied snapshot.
-      { encoding: "utf-8", timeout: 5 * 60_000 },
+    // W2 audit (ronda 1): aligned to load-coneval.ts \copy timeout (5 min).
+    // Current bienestar CSV is 114 KB and loads in <1s, but a future quarterly
+    // refresh could ship multi-year backfill or operator-supplied snapshot.
+    runPsqlScript(
+      config.dbContainer,
+      buildBienestarReloadSql(containerPath),
+      6 * 60_000,
     );
   } finally {
     try {
@@ -270,24 +273,6 @@ export async function loadBienestarPadron(
       // best-effort
     }
   }
-
-  // 3. Post-load: views
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL_FOR_TEST,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
 
   // 4. Verify counts + post-load duplicate guard.
   //    The bienestar_estatal_latest view ROW_NUMBER tiebreaker was removed in
@@ -334,6 +319,7 @@ export async function loadBienestarPadron(
       `loadBienestarPadron: producer invariant violated — ${duplicate_groups} (cve_ent, fecha) groups have >1 row. Source CSV is corrupted; do NOT trust panel_rows=${panel_rows}.`,
     );
   }
+  assertRelationsExist(config.dbContainer, BIENESTAR_RELATIONS);
   return {
     panel_rows,
     latest_rows,
