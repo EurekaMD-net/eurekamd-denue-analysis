@@ -8,6 +8,7 @@ import {
 } from "./client";
 import { useUiStore } from "../store";
 import { fetchJson } from "./queries";
+import { sageQueryStream } from "./sage-client";
 import { SEARCH_RESULT } from "./types";
 
 describe("validateApiPath (RH-10)", () => {
@@ -261,7 +262,7 @@ describe("abort signal forwarding (audit #176)", () => {
     useUiStore.setState({ session: null, hydrated: false });
   });
 
-  it("apiFetch combines a caller signal with the 30 s timeout", async () => {
+  it("apiFetch combines a caller signal with the 30 s timeout by default", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const ctrl = new AbortController();
     const p = apiFetch("/sage/health", { signal: ctrl.signal }, "tok");
@@ -272,6 +273,19 @@ describe("abort signal forwarding (audit #176)", () => {
     expect(sent?.aborted).toBe(false);
     ctrl.abort();
     expect(sent?.aborted).toBe(true);
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("sageQueryStream gets no client timeout, only its own signal", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const ctrl = new AbortController();
+    const p = sageQueryStream("hola", null, "tok", ctrl.signal).next();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // A Sage turn can run ~83 s server-side; a 30 s cap would cut it off.
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    const sent = (fetchMock.mock.calls[0]?.[1] as RequestInit).signal;
+    expect(sent).toBe(ctrl.signal);
+    ctrl.abort();
     await expect(p).rejects.toMatchObject({ name: "AbortError" });
   });
 

@@ -125,6 +125,7 @@ export async function* sageQueryStream(
       signal,
     },
     tokenOverride,
+    null,
   );
   if (!res.ok || !res.body) {
     throw new Error(`Sage /query ${res.status}`);

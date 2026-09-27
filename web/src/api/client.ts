@@ -100,6 +100,9 @@ export async function apiFetch(
   path: string,
   init: RequestInit = {},
   tokenOverride?: string | null,
+  // `null` = no client timeout, only the caller's signal (the Sage SSE
+  // stream: one turn can run ~83 s server-side).
+  timeoutMs: number | null = DEFAULT_TIMEOUT_MS,
 ): Promise<Response> {
   const state = useUiStore.getState();
   const token =
@@ -127,9 +130,11 @@ export async function apiFetch(
   headers.set("Authorization", `Bearer ${token}`);
   // A caller signal (TanStack's queryFn `signal`) aborts the request on
   // cancel/supersede/sign-out; the timeout still applies (audit #176).
-  const signal = init.signal
-    ? AbortSignal.any([init.signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)])
-    : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeout = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
+  const signal =
+    init.signal && timeout
+      ? AbortSignal.any([init.signal, timeout])
+      : (init.signal ?? timeout);
   const res = await fetch(`/api${path}`, { ...init, headers, signal });
   if (!res.ok) {
     let body: { error?: string; code?: string } = {};
