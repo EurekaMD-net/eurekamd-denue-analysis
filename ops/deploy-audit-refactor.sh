@@ -161,7 +161,7 @@ phase_finish() {
   [[ $(git rev-parse --short HEAD) != "$BASE_SHA" ]] || die "main is still at $BASE_SHA (not merged); run 'deploy' instead"
   git merge-base --is-ancestor HEAD "$BRANCH" || die "main is not on the $BRANCH history"
   git merge --ff-only "$BRANCH"
-  [[ $("${PSQL_RO[@]}" "SELECT coalesce((SELECT indisvalid::text FROM pg_index WHERE indexrelid=to_regclass('idx_estab_nombre_trgm')),'missing')") == t ]] || die "009 trigram index missing/invalid: run '$0 heavy' instead"
+  [[ $("${PSQL_RO[@]}" "SELECT coalesce((SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass('idx_estab_nombre_trgm')),false)") == t ]] || die "009 trigram index missing/invalid: run '$0 heavy' instead"
   local left; left=$("${PSQL_RO[@]}" "SELECT count(*) FROM establecimientos WHERE entidad='09' AND clase_actividad_id='464111' AND clase_actividad NOT ILIKE '%farmacia%'")
   [[ $left -eq 0 ]] || die "014 backfill incomplete ($left rows left): re-run $M/014-estab-scian-municipio-backfill.sql, then '$0 finish'"
   local busy; busy=$("${PSQL_RO[@]}" "SELECT count(*) FROM pg_stat_activity WHERE datname='postgres' AND state<>'idle' AND pid<>pg_backend_pid() AND query NOT ILIKE '%pg_stat_activity%'")
