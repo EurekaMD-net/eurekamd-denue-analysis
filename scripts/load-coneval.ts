@@ -30,13 +30,16 @@
  * The IRS XLSX has the "Municipios" sheet at index 1; convert with
  * Python+openpyxl (script in docs/loading-coneval.md if added).
  *
- * Behavior:
- *   1. Drop+create coneval_*_raw tables (all columns TEXT) idempotently.
- *   2. \copy CSVs in.
- *   3. Replace coneval_pobreza_municipal + coneval_irs_municipal views
+ * Behavior (ONE psql transaction — any failure leaves the DB untouched):
+ *   1. \copy CSVs into fresh coneval_*_raw_staging tables (all columns TEXT).
+ *   2. Drop the dependents explicitly (mv_sector_grade_matrix,
+ *      mv_national_treemap, both views — no CASCADE, audit #144), swap the
+ *      staging tables in.
+ *   3. Recreate coneval_pobreza_municipal + coneval_irs_municipal views
  *      that NULLIF the 'n.d' marker, strip thousand-separator commas, and
  *      cast hot-path columns to int/numeric.
  *   4. Add btree indexes on the cve_mun expression for join speed.
+ *   5. Rebuild both MVs from scripts/perf-matviews.sql + re-apply grants.
  *
  * The raw tables preserve everything verbatim — views are just the friendly
  * cast layer. To add a new exposed column: edit the view, no reload needed.
@@ -44,6 +47,12 @@
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  perfMatviewSql,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -110,9 +119,9 @@ const IRS_REQUIRED = [
   "irs_grado",
 ];
 
-const POBREZA_DDL = `
-DROP TABLE IF EXISTS coneval_pobreza_municipal_raw CASCADE;
-CREATE TABLE coneval_pobreza_municipal_raw (
+const pobrezaDdl = (table: string): string => `
+DROP TABLE IF EXISTS ${table};
+CREATE TABLE ${table} (
   clave_entidad TEXT,
   entidad_federativa TEXT,
   clave_municipio TEXT,
@@ -137,9 +146,9 @@ CREATE TABLE coneval_pobreza_municipal_raw (
 );
 `;
 
-const IRS_DDL = `
-DROP TABLE IF EXISTS coneval_irs_municipal_raw CASCADE;
-CREATE TABLE coneval_irs_municipal_raw (
+const irsDdl = (table: string): string => `
+DROP TABLE IF EXISTS ${table};
+CREATE TABLE ${table} (
   cve_ent TEXT, entidad TEXT, cve_mun_local TEXT, municipio TEXT, pob_total TEXT,
   analfabeta_15ymas TEXT, no_asisten_6a14 TEXT, edu_basica_incompleta_15ymas TEXT,
   sin_derechohab_salud TEXT, piso_tierra TEXT, sin_excusado TEXT, sin_agua TEXT,
@@ -159,7 +168,7 @@ export const POST_LOAD_SQL_FOR_TEST = `
 -- column AND the paired *_pob personas column carry 'n.d' (the personas
 -- count is derived from the %). Every numeric column needs the 'n.d'
 -- guard, including the int *_pob columns. Audit C1, 2026-05-04.
-DROP VIEW IF EXISTS coneval_pobreza_municipal CASCADE;
+DROP VIEW IF EXISTS coneval_pobreza_municipal;
 CREATE VIEW coneval_pobreza_municipal AS
 SELECT
   LPAD(clave_municipio, 5, '0')                                            AS cve_mun,
@@ -182,7 +191,7 @@ SELECT
   NULLIF(plp, 'n.d')::numeric                                              AS pob_lp_ingreso_pct
 FROM coneval_pobreza_municipal_raw;
 
-DROP VIEW IF EXISTS coneval_irs_municipal CASCADE;
+DROP VIEW IF EXISTS coneval_irs_municipal;
 CREATE VIEW coneval_irs_municipal AS
 SELECT
   cve_mun_local                                                    AS cve_mun,
@@ -242,51 +251,63 @@ export async function loadConeval(
 
   const started = Date.now();
 
-  // 1. Create raw tables
-  for (const ddl of [POBREZA_DDL, IRS_DDL]) {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        ddl,
-      ],
-      { encoding: "utf-8", timeout: 60_000 },
-    );
-  }
-
-  // 2. Copy CSVs in + \copy with try/finally cleanup
-  const copyOne = (csvPath: string, table: string): void => {
-    const containerPath = `/tmp/${table}.csv`;
-    execFileSync(
-      "docker",
-      ["cp", "--", csvPath, `${config.dbContainer}:${containerPath}`],
-      { encoding: "utf-8", timeout: 60_000 },
-    );
-    try {
+  // 1. Stage both CSVs inside the container (cleaned up in finally).
+  const loads = [
+    {
+      csvPath: config.pobrezaCsvPath,
+      table: "coneval_pobreza_municipal_raw",
+      ddl: pobrezaDdl,
+    },
+    {
+      csvPath: config.irsCsvPath,
+      table: "coneval_irs_municipal_raw",
+      ddl: irsDdl,
+    },
+  ];
+  const staged: string[] = [];
+  try {
+    for (const l of loads) {
+      const containerPath = `/tmp/${l.table}.csv`;
       execFileSync(
         "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-c",
-          `\\copy ${table} FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-        ],
-        { encoding: "utf-8", timeout: 5 * 60_000 },
+        ["cp", "--", l.csvPath, `${config.dbContainer}:${containerPath}`],
+        { encoding: "utf-8", timeout: 60_000 },
       );
-    } finally {
+      staged.push(containerPath);
+    }
+
+    // 2. ONE transaction: \copy into staging, drop dependents explicitly
+    // (no CASCADE — an unknown dependent fails the load instead of silently
+    // vanishing, audit #144), swap staging in, recreate views + indexes +
+    // the MVs that read them, re-apply grants.
+    const script = [
+      ...loads.map((l) => l.ddl(`${l.table}_staging`)),
+      ...loads.map(
+        (l) =>
+          `\\copy ${l.table}_staging FROM '/tmp/${l.table}.csv' WITH (FORMAT csv, HEADER true)`,
+      ),
+      "DROP MATERIALIZED VIEW IF EXISTS mv_sector_grade_matrix;",
+      "DROP MATERIALIZED VIEW IF EXISTS mv_national_treemap;",
+      "DROP VIEW IF EXISTS coneval_pobreza_municipal;",
+      "DROP VIEW IF EXISTS coneval_irs_municipal;",
+      ...loads.map(
+        (l) =>
+          `DROP TABLE IF EXISTS ${l.table};\nALTER TABLE ${l.table}_staging RENAME TO ${l.table};`,
+      ),
+      POST_LOAD_SQL_FOR_TEST,
+      perfMatviewSql("mv_sector_grade_matrix"),
+      perfMatviewSql("mv_national_treemap"),
+      postLoadGrants([
+        ...loads.map((l) => l.table),
+        "coneval_pobreza_municipal",
+        "coneval_irs_municipal",
+        "mv_sector_grade_matrix",
+        "mv_national_treemap",
+      ]),
+    ].join("\n");
+    runPsqlScript(config.dbContainer, script, 30 * 60_000);
+  } finally {
+    for (const containerPath of staged) {
       try {
         execFileSync(
           "docker",
@@ -297,29 +318,9 @@ export async function loadConeval(
         // best-effort
       }
     }
-  };
-  copyOne(config.pobrezaCsvPath, "coneval_pobreza_municipal_raw");
-  copyOne(config.irsCsvPath, "coneval_irs_municipal_raw");
+  }
 
-  // 3. Post-load: views + indexes
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL_FOR_TEST,
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
-
-  // 4. Verify counts
+  // 3. Verify counts
   const cnt = (sql: string): number => {
     const out = execFileSync(
       "docker",
@@ -346,6 +347,7 @@ export async function loadConeval(
   };
   const pobreza_rows = cnt("SELECT COUNT(*) FROM coneval_pobreza_municipal;");
   const irs_rows = cnt("SELECT COUNT(*) FROM coneval_irs_municipal;");
+  assertRelationsExist(config.dbContainer);
   return {
     pobreza_rows,
     irs_rows,

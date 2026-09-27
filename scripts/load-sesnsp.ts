@@ -34,13 +34,23 @@
  * from the file's 4-or-5-digit Cve.Municipio via LPAD). The DENUE join is
  * `establecimientos.area_geo = sesnsp_*.cve_mun`.
  *
- * Idempotent: rerun freely. ZIPs are the boundary of trust.
+ * Idempotent: rerun freely. ZIPs are the boundary of trust. Each variant
+ * reloads in ONE psql transaction (\copy into <raw>_staging, explicit
+ * no-CASCADE drop of the long MV + its analytics dependents, swap, rebuild)
+ * so a failed load changes nothing and never orphans
+ * mv_delitos_municipal_yearly (audit #144).
  */
 
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  assertRelationsExist,
+  perfMatviewSql,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const SAFE_PATH_RE = /^[a-zA-Z0-9_.\\/-]+$/;
@@ -132,7 +142,7 @@ export interface RnidVariant {
   hasDemographics: boolean;
 }
 
-function ddlForVariant(v: RnidVariant): string {
+function ddlForVariant(v: RnidVariant, table: string): string {
   const muniCols = v.hasMunicipio
     ? "  cve_municipio TEXT,\n  municipio TEXT,\n"
     : "";
@@ -140,8 +150,8 @@ function ddlForVariant(v: RnidVariant): string {
     ? "  sexo TEXT,\n  rango_edad TEXT,\n"
     : "";
   return `
-DROP TABLE IF EXISTS ${v.rawTable} CASCADE;
-CREATE TABLE ${v.rawTable} (
+DROP TABLE IF EXISTS ${table};
+CREATE TABLE ${table} (
   ano TEXT,
   cve_ent TEXT,
   entidad TEXT,
@@ -170,7 +180,7 @@ function longViewSql(v: RnidVariant): string {
     : "";
   const demoSelect = v.hasDemographics ? "  sexo,\n  rango_edad,\n" : "";
   return `
-DROP MATERIALIZED VIEW IF EXISTS ${v.longView} CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS ${v.longView};
 CREATE MATERIALIZED VIEW ${v.longView} AS
 SELECT
   NULLIF(ano, '')::int                              AS ano,
@@ -224,6 +234,42 @@ export const RNID_VARIANTS: readonly RnidVariant[] = [
     hasDemographics: false,
   },
 ];
+
+/**
+ * perf-matviews.sql MVs built on top of each long view. The swap drops them
+ * explicitly (no CASCADE) and rebuilds them in the same transaction.
+ */
+export const LONG_VIEW_DEPENDENTS: Readonly<Record<string, readonly string[]>> =
+  {
+    sesnsp_delitos_municipal: ["mv_delitos_municipal_yearly"],
+  };
+
+/**
+ * The single-transaction reload script for one variant: \copy every staged
+ * input into `<raw>_staging`, drop the long MV + its dependents explicitly
+ * (an unknown dependent makes DROP TABLE fail → whole load rolls back),
+ * swap staging in, rebuild long MV + dependents, re-apply grants.
+ */
+export function buildVariantReloadSql(
+  v: RnidVariant,
+  containerPaths: readonly string[],
+): string {
+  const staging = `${v.rawTable}_staging`;
+  const dependents = LONG_VIEW_DEPENDENTS[v.longView] ?? [];
+  return [
+    ddlForVariant(v, staging),
+    ...containerPaths.map(
+      (p) => `\\copy ${staging} FROM '${p}' WITH (FORMAT csv, HEADER true)`,
+    ),
+    ...dependents.map((d) => `DROP MATERIALIZED VIEW IF EXISTS ${d};`),
+    `DROP MATERIALIZED VIEW IF EXISTS ${v.longView};`,
+    `DROP TABLE IF EXISTS ${v.rawTable};`,
+    `ALTER TABLE ${staging} RENAME TO ${v.rawTable};`,
+    longViewSql(v),
+    ...dependents.map((d) => perfMatviewSql(d)),
+    postLoadGrants([v.rawTable, v.longView, ...dependents]),
+  ].join("\n");
+}
 
 export interface LoadSesnspConfig {
   rnidDir: string;
@@ -379,42 +425,25 @@ export async function loadSesnsp(
         );
       }
 
-      // Step 1: build raw table (DROP+CREATE) — once per variant before any
-      // \copy lands. Subsequent inputs append to the same table.
-      dockerExec(
-        config.dbContainer,
-        [
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-c",
-          ddlForVariant(variant),
-        ],
-        60_000,
-      );
+      // Step 1: prepare + stage every input inside the container.
+      const containerPaths: string[] = [];
+      try {
+        for (let i = 0; i < inputs.length; i++) {
+          const preparedPath = preparePreparedCsv(inputs[i]!, tempDir);
+          const containerPath = `/tmp/${variant.rawTable}_${i}.csv`;
+          dockerCp(config.dbContainer, preparedPath, containerPath, 10 * 60_000);
+          containerPaths.push(containerPath);
+        }
 
-      // Step 2: prepare + \copy each input into the raw table.
-      for (let i = 0; i < inputs.length; i++) {
-        const preparedPath = preparePreparedCsv(inputs[i]!, tempDir);
-        const containerPath = `/tmp/${variant.rawTable}_${i}.csv`;
-        dockerCp(config.dbContainer, preparedPath, containerPath, 10 * 60_000);
-        try {
-          dockerExec(
-            config.dbContainer,
-            [
-              "psql",
-              "-U",
-              "postgres",
-              "-d",
-              "postgres",
-              "-c",
-              `\\copy ${variant.rawTable} FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-            ],
-            30 * 60_000,
-          );
-        } finally {
+        // Step 2: ONE transaction — \copy into staging, swap, rebuild the
+        // long-format MV and the analytics MVs that read it.
+        runPsqlScript(
+          config.dbContainer,
+          buildVariantReloadSql(variant, containerPaths),
+          (inputs.length + 1) * 30 * 60_000,
+        );
+      } finally {
+        for (const containerPath of containerPaths) {
           try {
             dockerExec(config.dbContainer, ["rm", "-f", containerPath], 30_000);
           } catch {
@@ -423,22 +452,7 @@ export async function loadSesnsp(
         }
       }
 
-      // Step 4: build the long-format MV.
-      dockerExec(
-        config.dbContainer,
-        [
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-c",
-          longViewSql(variant),
-        ],
-        5 * 60_000,
-      );
-
-      // Step 5: counts.
+      // Step 3: counts.
       const cnt = (sql: string): number => {
         const r = dockerExec(
           config.dbContainer,
@@ -462,6 +476,7 @@ export async function loadSesnsp(
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+  assertRelationsExist(config.dbContainer);
 
   return { variants: out, duration_ms: Date.now() - started };
 }

@@ -17,13 +17,16 @@
  *   - catalogos/* (column-value lookup CSVs — not loaded; used as reference only)
  *   - diccionario_de_datos/* (column dictionary — see top comment for schema)
  *
- * Behavior:
- *   1. Drop+create inegi_edr_defunciones_raw table (74 TEXT cols) idempotently.
- *   2. \copy CSV in (~820k rows / year — 2024 = 819,672).
+ * Behavior (replace mode — ONE psql transaction, a failure changes nothing):
+ *   1. \copy CSV into a fresh inegi_edr_defunciones_raw_staging (74 TEXT
+ *      cols; ~820k rows / year — 2024 = 819,672).
+ *   2. Drop mv_mortalidad_municipal_yearly explicitly (no CASCADE, audit
+ *      #144), swap staging in as inegi_edr_defunciones_raw.
  *   3. Build cve_mun btree + anio_ocur btree on raw for fast aggregation.
- *   4. Mat-view `mv_mortalidad_municipal_yearly` (separate file
- *      scripts/perf-matviews.sql — same as the SESNSP pattern). Loader
- *      prints reminder to run scripts/refresh-matviews.sh.
+ *   4. Rebuild `mv_mortalidad_municipal_yearly` from its
+ *      scripts/perf-matviews.sql section + re-apply grants. In --append
+ *      mode the MV is untouched; the loader prints a reminder to run
+ *      scripts/refresh-matviews.sh.
  *
  * Idempotent: rerun freely. The CSV is the boundary of trust. Reloading
  * an already-loaded year DROPs and recreates — no append.
@@ -34,6 +37,12 @@
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  perfMatviewSql,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -218,11 +227,16 @@ export function expectEdrHeader(headerLine: string): void {
   }
 }
 
-const EDR_DDL = `
-DROP TABLE IF EXISTS inegi_edr_defunciones_raw CASCADE;
-CREATE TABLE inegi_edr_defunciones_raw (
+const EDR_STAGING_DDL = `
+DROP TABLE IF EXISTS inegi_edr_defunciones_raw_staging;
+CREATE TABLE inegi_edr_defunciones_raw_staging (
   ${EDR_COLUMNS.map((c) => `${c} TEXT`).join(",\n  ")}
 );
+`;
+
+// Runs after the staging table is renamed in (index names are schema-wide,
+// so they can only be created once the old table and its indexes are gone).
+const EDR_INDEXES = `
 CREATE INDEX idx_edr_ent_resid ON inegi_edr_defunciones_raw (ent_resid);
 CREATE INDEX idx_edr_anio_ocur ON inegi_edr_defunciones_raw (anio_ocur);
 CREATE INDEX idx_edr_cve_mun_resid
@@ -231,7 +245,28 @@ CREATE INDEX idx_edr_cve_mun_resid
     AND mun_resid IS NOT NULL AND mun_resid != '999';
 `;
 
-export const EDR_DDL_FOR_TEST = EDR_DDL;
+export const EDR_DDL_FOR_TEST = EDR_STAGING_DDL + EDR_INDEXES;
+
+/**
+ * Replace-mode reload script: \copy into staging, drop the one dependent MV
+ * explicitly (an unknown dependent makes DROP TABLE fail → rollback), swap,
+ * index, rebuild the MV, re-apply grants. Runs as ONE transaction.
+ */
+export function buildEdrReloadSql(containerPath: string): string {
+  return [
+    EDR_STAGING_DDL,
+    `\\copy inegi_edr_defunciones_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+    "DROP MATERIALIZED VIEW IF EXISTS mv_mortalidad_municipal_yearly;",
+    "DROP TABLE IF EXISTS inegi_edr_defunciones_raw;",
+    "ALTER TABLE inegi_edr_defunciones_raw_staging RENAME TO inegi_edr_defunciones_raw;",
+    EDR_INDEXES,
+    perfMatviewSql("mv_mortalidad_municipal_yearly"),
+    postLoadGrants([
+      "inegi_edr_defunciones_raw",
+      "mv_mortalidad_municipal_yearly",
+    ]),
+  ].join("\n");
+}
 
 export interface LoadEdrConfig {
   csvPath: string;
@@ -259,28 +294,11 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
 
   const started = Date.now();
 
-  // 1. Create raw table (skip in append mode — caller is stacking).
-  // In append mode, instead purge any prior load for the same anio_regis
-  // (audit M1 — without this, re-running the same year doubles every
-  // aggregate silently). The CSV is anio_regis-homogeneous by INEGI design.
-  if (!config.append) {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        EDR_DDL,
-      ],
-      { encoding: "utf-8", timeout: 120_000 },
-    );
-  } else {
+  // 1. Append mode: purge any prior load for the same anio_regis (audit
+  // M1 — without this, re-running the same year doubles every aggregate
+  // silently). The CSV is anio_regis-homogeneous by INEGI design.
+  // Replace mode builds the table in the step-2 transaction instead.
+  if (config.append) {
     const year = readAnioRegisFromFirstDataRow(config.csvPath);
     if (year !== null) {
       // Year value is regex-validated (^(19|20)[0-9]{2}$) so safe to inline.
@@ -312,21 +330,31 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
     { encoding: "utf-8", timeout: 10 * 60_000 },
   );
   try {
-    execFileSync(
-      "docker",
-      [
-        "exec",
+    if (config.append) {
+      execFileSync(
+        "docker",
+        [
+          "exec",
+          config.dbContainer,
+          "psql",
+          "-U",
+          "postgres",
+          "-d",
+          "postgres",
+          "-c",
+          `\\copy inegi_edr_defunciones_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+        ],
+        { encoding: "utf-8", timeout: 30 * 60_000 },
+      );
+    } else {
+      // ONE transaction: staging \copy → swap → indexes → MV rebuild
+      // (audit #144 — the old DROP ... CASCADE destroyed the MV for good).
+      runPsqlScript(
         config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy inegi_edr_defunciones_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-      ],
-      { encoding: "utf-8", timeout: 30 * 60_000 },
-    );
+        buildEdrReloadSql(containerPath),
+        30 * 60_000,
+      );
+    }
   } finally {
     try {
       execFileSync(
@@ -376,6 +404,7 @@ export async function loadEdr(config: LoadEdrConfig): Promise<LoadEdrResult> {
      WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','21','22','23','24','25','26','27','28','29','30','31','32')
        AND mun_resid IS NOT NULL AND mun_resid != '999';`,
   );
+  assertRelationsExist(config.dbContainer);
 
   return {
     raw_rows,

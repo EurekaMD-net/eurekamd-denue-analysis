@@ -1,0 +1,191 @@
+/**
+ * Shared helpers for loaders that replace a raw table other relations
+ * depend on (audit #144, 2026-09-26).
+ *
+ * The old loaders ran `DROP TABLE <raw> CASCADE` in one psql session and
+ * `\copy` in another. CASCADE silently took every dependent view / MV with
+ * it (mv_national_treemap, mv_sector_grade_matrix, mv_delitos_municipal_yearly,
+ * mv_mortalidad_municipal_yearly, censo_entidades, censo_localidades) and
+ * nothing recreated them. The pattern these helpers support instead:
+ *
+ *   1. `\copy` into `<raw>_staging` (no lock on anything live yet).
+ *   2. Drop the known dependents EXPLICITLY, without CASCADE, so an unknown
+ *      dependent makes the DROP TABLE fail instead of vanishing.
+ *   3. Swap the staging table in (`ALTER TABLE ... RENAME`).
+ *   4. Recreate every dependent from its canonical DDL (perf-matviews.sql,
+ *      migrate-censo-views.sql) and re-apply grants.
+ *
+ * All of it runs as ONE psql script under `--single-transaction` +
+ * `ON_ERROR_STOP=1`: any failure rolls back to the previous state, so a
+ * reload either fully lands or changes nothing.
+ */
+
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { assertSafeContainer } from "../src/api/handlers/_safe-container.js";
+
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
+const IDENT_RE = /^[a-z_][a-z0-9_]*$/;
+
+function readScriptFile(name: string): string {
+  return readFileSync(join(SCRIPTS_DIR, name), "utf-8");
+}
+
+function assertIdent(name: string): void {
+  if (!IDENT_RE.test(name)) {
+    throw new Error(`_psql-tx: unsafe relation name "${name}"`);
+  }
+}
+
+/**
+ * Pipe `script` into ONE psql session as a single transaction. Any error
+ * (including a failed `\copy`) stops the script and rolls everything back.
+ */
+export function runPsqlScript(
+  container: string,
+  script: string,
+  timeoutMs: number,
+): string {
+  assertSafeContainer(container);
+  return execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-X",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "--single-transaction",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-f",
+      "-",
+    ],
+    {
+      input: script,
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      maxBuffer: 50 * 1024 * 1024,
+    },
+  );
+}
+
+/** MVs the nightly refresh sweeps — parsed from the script so the lists can't drift. */
+export function refreshedMatviews(): string[] {
+  const sh = readScriptFile("refresh-matviews.sh");
+  const names = [
+    ...sh.matchAll(
+      /REFRESH MATERIALIZED VIEW (?:CONCURRENTLY )?([a-z_][a-z0-9_]*)/g,
+    ),
+  ].map((m) => m[1] as string);
+  return [...new Set(names)];
+}
+
+/** Views read by analytics + Sage that only migrate-censo-views.sql defines. */
+export const CENSO_VIEWS = [
+  "censo_municipios",
+  "censo_entidades",
+  "censo_localidades",
+] as const;
+
+/**
+ * Fail loud when any analytics MV / view is missing after a load. The MV
+ * handlers silently fall back to live aggregation (100x slower) and the
+ * censo_localidades consumers error outright, so a missing relation must
+ * surface as a non-zero loader exit, not as a slow dashboard days later.
+ */
+export function assertRelationsExist(
+  container: string,
+  names: readonly string[] = [...refreshedMatviews(), ...CENSO_VIEWS],
+): void {
+  assertSafeContainer(container);
+  for (const n of names) assertIdent(n);
+  const list = names.map((n) => `'${n}'`).join(",");
+  const out = execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-X",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-t",
+      "-A",
+      "-c",
+      `SELECT n FROM unnest(ARRAY[${list}]::text[]) AS n WHERE to_regclass(n) IS NULL ORDER BY n;`,
+    ],
+    { encoding: "utf-8", timeout: 60_000 },
+  );
+  const missing = out
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (missing.length > 0) {
+    throw new Error(
+      `relations missing after load: ${missing.join(", ")}. Recreate them from scripts/perf-matviews.sql / scripts/migrate-censo-views.sql before trusting analytics.`,
+    );
+  }
+}
+
+/**
+ * The perf-matviews.sql section that builds one MV: from its
+ * `DROP MATERIALIZED VIEW IF EXISTS <name>` up to the next `-- ====` rule
+ * (or EOF). Includes the MV's indexes, so the rebuilt MV can still be
+ * refreshed CONCURRENTLY.
+ */
+export function perfMatviewSql(name: string): string {
+  assertIdent(name);
+  const sql = readScriptFile("perf-matviews.sql");
+  const start = sql.search(
+    new RegExp(`^DROP MATERIALIZED VIEW IF EXISTS ${name}\\b`, "m"),
+  );
+  if (start === -1) {
+    throw new Error(`_psql-tx: ${name} is not defined in perf-matviews.sql`);
+  }
+  const rest = sql.slice(start);
+  const end = rest.search(/^-- =====/m);
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/** migrate-censo-views.sql verbatim: censo_municipios, censo_localidades, censo_entidades. */
+export function censoViewsSql(): string {
+  return readScriptFile("migrate-censo-views.sql");
+}
+
+/** Relations sage-role.sql allowlists for denue_sage. */
+function sageAllowlist(): Set<string> {
+  const sql = readScriptFile("sage-role.sql");
+  return new Set(
+    [...sql.matchAll(/^GRANT SELECT ON\s+([a-z_][a-z0-9_]*)\s+TO denue_sage;/gm)].map(
+      (m) => m[1] as string,
+    ),
+  );
+}
+
+/**
+ * Grants for relations the load (re)created: a recreated relation inherits
+ * the schema's default privileges, so strip them (P02 hygiene) and restore
+ * the denue_sage SELECT when sage-role.sql allowlists the relation.
+ */
+export function postLoadGrants(relations: readonly string[]): string {
+  const sage = sageAllowlist();
+  return relations
+    .map((r) => {
+      assertIdent(r);
+      const lines = [`REVOKE ALL ON ${r} FROM anon, authenticated, trustr_app;`];
+      if (sage.has(r)) lines.push(`GRANT SELECT ON ${r} TO denue_sage;`);
+      return lines.join("\n");
+    })
+    .join("\n");
+}

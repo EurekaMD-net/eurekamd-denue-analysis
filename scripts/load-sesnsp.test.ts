@@ -12,6 +12,8 @@ import {
   RNID_VARIANTS,
   listFirstCsvInZip,
   findVariantInputs,
+  buildVariantReloadSql,
+  loadSesnsp,
 } from "./load-sesnsp.js";
 
 beforeEach(() => mockExec.mockReset());
@@ -218,5 +220,93 @@ describe("findVariantInputs", () => {
       kind: "csv",
       csvPath: "raw/sesnsp/RNID-Delitos_Municipal-Historical-2015-2025.csv",
     });
+  });
+});
+
+describe("buildVariantReloadSql (audit #144)", () => {
+  const variant = RNID_VARIANTS[0]!;
+  const sql = buildVariantReloadSql(variant, ["/tmp/a_0.csv", "/tmp/a_1.csv"]);
+
+  it("\\copies every input into staging before dropping anything live", () => {
+    const lastCopy = sql.lastIndexOf(
+      "\\copy sesnsp_delitos_municipal_raw_staging FROM '/tmp/a_1.csv'",
+    );
+    expect(sql).toContain("\\copy sesnsp_delitos_municipal_raw_staging FROM '/tmp/a_0.csv'");
+    expect(lastCopy).toBeGreaterThan(-1);
+    expect(lastCopy).toBeLessThan(
+      sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_delitos_municipal_yearly;"),
+    );
+  });
+
+  it("never CASCADEs — old DROP ... CASCADE destroyed mv_delitos_municipal_yearly", () => {
+    expect(sql).not.toMatch(/DROP (TABLE|VIEW|MATERIALIZED VIEW)[^;]*sesnsp[^;]*CASCADE/);
+    expect(sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_delitos_municipal_yearly;")).toBeLessThan(
+      sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS sesnsp_delitos_municipal;"),
+    );
+  });
+
+  it("swaps staging in, then rebuilds the long MV and mv_delitos_municipal_yearly on top", () => {
+    const swap = sql.indexOf(
+      "ALTER TABLE sesnsp_delitos_municipal_raw_staging RENAME TO sesnsp_delitos_municipal_raw;",
+    );
+    const longMv = sql.indexOf("CREATE MATERIALIZED VIEW sesnsp_delitos_municipal AS");
+    const yearly = sql.indexOf("CREATE MATERIALIZED VIEW mv_delitos_municipal_yearly AS");
+    expect(swap).toBeGreaterThan(-1);
+    expect(swap).toBeLessThan(longMv);
+    expect(longMv).toBeLessThan(yearly);
+    expect(sql).toContain("GRANT SELECT ON mv_delitos_municipal_yearly TO denue_sage;");
+    // The 31.6M-row long MV stays off the Sage allowlist.
+    expect(sql).not.toContain("GRANT SELECT ON sesnsp_delitos_municipal TO");
+  });
+});
+
+describe("loadSesnsp orchestration (audit #144)", () => {
+  const HEADER =
+    "Año,Clave_Ent,Entidad,Cve. Municipio,Municipio,Bien jurídico afectado,Tipo de delito,Subtipo de delito,Modalidad,Enero,Febrero,Marzo,Abril,Mayo,Junio,Julio,Agosto,Septiembre,Octubre,Noviembre,Diciembre";
+
+  function stubAll(missing = ""): void {
+    mockExec.mockImplementation((cmd: string, args: string[] = []) => {
+      const joined = args.join(" ");
+      if (cmd === "/bin/sh" && joined.includes("ls *.zip")) {
+        return "RNID-Delitos_Municipal-Historical-2015-2025.csv\n";
+      }
+      if (cmd === "/bin/sh" && joined.includes("head -1")) return `${HEADER}\n`;
+      if (cmd === "/bin/sh") return "";
+      if (args.includes("--single-transaction") || args[0] === "cp") return "";
+      if (args.includes("rm")) return "";
+      if ((args.at(-1) ?? "").includes("to_regclass")) return missing;
+      return "10\n";
+    });
+  }
+
+  it("reloads each variant in ONE single-transaction psql session", async () => {
+    stubAll();
+    const r = await loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" });
+    expect(r.variants[0]?.raw_rows).toBe(10);
+    const tx = mockExec.mock.calls.filter((c) =>
+      ((c[1] as string[]) ?? []).includes("--single-transaction"),
+    );
+    expect(tx.length).toBe(1);
+    expect((tx[0]?.[2] as { input: string }).input).toBe(
+      buildVariantReloadSql(RNID_VARIANTS[0]!, [
+        "/tmp/sesnsp_delitos_municipal_raw_0.csv",
+      ]),
+    );
+    // No psql -c call builds or drops anything outside that transaction.
+    for (const c of mockExec.mock.calls) {
+      expect(((c[1] as string[]) ?? []).join(" ")).not.toMatch(/DROP|CREATE/);
+    }
+    const rm = mockExec.mock.calls.find((c) =>
+      ((c[1] as string[]) ?? []).includes("/tmp/sesnsp_delitos_municipal_raw_0.csv") &&
+      ((c[1] as string[]) ?? []).includes("rm"),
+    );
+    expect(rm).toBeDefined();
+  });
+
+  it("fails loud when an analytics MV is missing after the load", async () => {
+    stubAll("mv_delitos_municipal_yearly\n");
+    await expect(
+      loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/missing after load: mv_delitos_municipal_yearly/);
   });
 });
