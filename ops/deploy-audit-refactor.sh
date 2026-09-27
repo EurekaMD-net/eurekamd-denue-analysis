@@ -8,6 +8,7 @@
 #   deploy-audit-refactor.sh gotrue               # step 5 / G2: close self-signup (shared instance)
 #   deploy-audit-refactor.sh verify               # step 11 read-only checks
 #   deploy-audit-refactor.sh finish               # resume after a drop during step 4: MV refresh, 020, steps 6-8, smoke
+#   deploy-audit-refactor.sh cutover              # resume after a drop at 020's final VACUUM: vacuum, steps 6-8, smoke
 #   deploy-audit-refactor.sh all                  # push + deploy + verify (tag must already be done)
 #
 # NOT automated on purpose (shared infra, needs coordination): step 9 (Caddy paste) and
@@ -175,6 +176,25 @@ phase_finish() {
   phase_cutover
 }
 
+# Resume when everything through 020's index work is applied and only its final VACUUM
+# and the restart window remain (steps 6-8 + smoke).
+phase_cutover_only() {
+  log "cutover: pre-checks"
+  cd "$MAIN"
+  [[ $(git rev-parse --short HEAD) != "$BASE_SHA" ]] || die "main is still at $BASE_SHA (not merged); run 'deploy' instead"
+  git merge-base --is-ancestor HEAD "$BRANCH" || die "main is not on the $BRANCH history"
+  git merge --ff-only "$BRANCH"
+  [[ $("${PSQL_RO[@]}" "SELECT coalesce((SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass('idx_estab_ent_mun_cov')),false)") == t ]] || die "020 covering index missing/invalid: run '$0 finish' instead"
+  [[ $("${PSQL_RO[@]}" "SELECT to_regclass('idx_estab_nombre') IS NULL") == t ]] || die "020 did not drop idx_estab_nombre: run '$0 finish' instead"
+  local busy; busy=$("${PSQL_RO[@]}" "SELECT count(*) FROM pg_stat_activity WHERE datname='postgres' AND state<>'idle' AND pid<>pg_backend_pid() AND query NOT ILIKE '%pg_stat_activity%'")
+  [[ $busy -eq 0 ]] || die "$busy active DB session(s); let them finish first"
+  systemctl stop denue-matview-refresh.timer
+  ok "code merged, 020 indexes in place, DB idle"
+  log "020 final VACUUM (ANALYZE) establecimientos (visibility map for the covering index; minutes)"
+  "${PSQL[@]}" -c "VACUUM (ANALYZE) public.establecimientos"
+  phase_cutover
+}
+
 # 009 -> 014 -> 020, in that order (heavy IO on the 13 GB heap)
 phase_heavy() {
   log "009 trigram index (minutes of IO)"
@@ -274,6 +294,7 @@ case ${1:-} in
   gotrue) phase_gotrue ;;
   verify) phase_verify ;;
   finish) phase_finish ;;
+  cutover) phase_cutover_only ;;
   all)    phase_push; phase_deploy; phase_verify ;;
   *)      sed -n '2,14p' "$0"; exit 1 ;;
 esac
