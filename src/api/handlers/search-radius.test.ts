@@ -126,4 +126,41 @@ describe("GET /search — radius path uses the shared runner (audit C1)", () => 
     expect(body.code).toBe("validation.q");
     expect(mockExecFile).not.toHaveBeenCalled();
   });
+
+  it("prefilters with an index-usable geometry bbox and orders nearest-first (audit #35/#97)", async () => {
+    mockExecFile.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/search?from=28.2,-105.9&radius_km=1", {
+      headers: AUTH,
+    });
+    const args = mockExecFile.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1]!;
+    const pt = "ST_SetSRID(ST_MakePoint(-105.9, 28.2), 4326)";
+    expect(sql).toContain(
+      `geom && ST_Expand(${pt}, 1000 / 111320.0 / cos(radians(28.2)))`,
+    );
+    // The bbox prefilter comes before the exact geography check.
+    expect(sql.indexOf("geom && ST_Expand")).toBeLessThan(
+      sql.indexOf("ST_DWithin"),
+    );
+    expect(sql).toContain(
+      `ST_DWithin(geom::geography, ${pt}::geography, 1000)`,
+    );
+    expect(sql).toContain(`ORDER BY geom <-> ${pt}`);
+    expect(sql).not.toContain("ORDER BY clee");
+    expect(sql).toContain("AS distance_m");
+  });
+
+  it("rejects from outside Mexico, out of range or swapped with 400 validation.from_coords (audit #44)", async () => {
+    const app = createServer(CONFIG);
+    for (const from of ["195,-99", "-99,19", "19,-190", "40.7,-74.0", "0,0"]) {
+      const res = await app.request(`/search?from=${from}&radius_km=5`, {
+        headers: AUTH,
+      });
+      expect(res.status, from).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code, from).toBe("validation.from_coords");
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
 });

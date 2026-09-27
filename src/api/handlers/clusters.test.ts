@@ -117,4 +117,16 @@ describe("GET /clusters", () => {
     });
     expect(r2.status).toBe(400);
   });
+
+  it("returns 400 on k with decimals or trailing garbage (audit #53)", async () => {
+    const app = createServer(CONFIG);
+    for (const k of ["5.9", "5abc", "1e1", "+5"]) {
+      const res = await app.request(`/clusters?entidad=09&scian=46&k=${k}`, {
+        headers: AUTH,
+      });
+      expect(res.status, k).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code, k).toBe("validation.k");
+    }
+  });
 });
