@@ -5,6 +5,10 @@
  *   1. Role — psql logs in AS denue_sage (a non-superuser LOGIN role with
  *      SELECT on the allowlisted views/MVs only). The session never starts
  *      as a superuser, so RESET ROLE / set_config('role') cannot escalate.
+ *      scripts/sage-role.sql masks every custom setting stored at database
+ *      level (app.service_role_key, ...) with a role-level '' and revokes
+ *      the functions that run SQL text (ts_stat, query_to_xml, ...), so
+ *      current_setting() reads nothing whatever SQL gets through.
  *   2. Read-only transaction — every script opens with BEGIN READ ONLY, so
  *      writes (including pg_net's queue INSERT) fail even where PUBLIC has
  *      been granted them. statement_timeout is set in the same transaction.
@@ -197,6 +201,8 @@ interface SqlToken {
   value: string;
   start: number;
   end: number;
+  /** U&"..." / U&'...': the body, decoded once any UESCAPE is known. */
+  unicodeBody?: string;
 }
 
 const IDENT_START = /[A-Za-z_\u0080-\uffff]/;
@@ -204,12 +210,65 @@ const IDENT_CHAR = /[A-Za-z0-9_$\u0080-\uffff]/;
 const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
 
 /**
+ * Decode a U&"..." body the way PG's str_udeescape does: `<esc><esc>` is
+ * the escape char, `<esc>XXXX` / `<esc>+XXXXXX` a code point. Returns null
+ * for anything PG would reject, and also for surrogates (PG pairs them;
+ * Sage SQL never needs them).
+ */
+function decodeUnicodeEscapes(body: string, esc: string): string | null {
+  let out = "";
+  let i = 0;
+  while (i < body.length) {
+    if (body[i] !== esc) {
+      out += body[i];
+      i++;
+      continue;
+    }
+    if (body[i + 1] === esc) {
+      out += esc;
+      i += 2;
+      continue;
+    }
+    let hex = /^[0-9A-Fa-f]{4}/.exec(body.slice(i + 1))?.[0];
+    if (hex) {
+      i += 5;
+    } else if (body[i + 1] === "+") {
+      hex = /^[0-9A-Fa-f]{6}/.exec(body.slice(i + 2))?.[0];
+      if (!hex) return null;
+      i += 8;
+    } else {
+      return null;
+    }
+    const cp = parseInt(hex, 16);
+    if (cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+      return null;
+    }
+    out += String.fromCodePoint(cp);
+  }
+  return out;
+}
+
+/** Value of a plain '...' / E'...' / $$...$$ literal (PG SCONST), or null. */
+function simpleStringValue(t: SqlToken | undefined): string | null {
+  if (t?.kind !== "string" || t.unicodeBody !== undefined) return null;
+  const raw = t.value;
+  if (raw.startsWith("$")) {
+    const tag = DOLLAR_TAG.exec(raw)![0];
+    return raw.slice(tag.length, raw.length - tag.length);
+  }
+  const body = raw.startsWith("'") ? raw.slice(1, -1) : raw.slice(2, -1);
+  if (body.includes("\\")) return null;
+  return body.replace(/''/g, "'");
+}
+
+/**
  * One left-to-right pass over the SQL, following Postgres quoting rules:
  * '...' with '' escapes, E'...' with backslash escapes, $tag$...$tag$
- * closing only on the same tag, "idents" with "" escapes, -- line comments
- * and nested block comments. Comments are dropped. Returns a string error
- * for anything Postgres would treat as unterminated, and for a backslash
- * outside a literal (not valid SQL; psql would read it as a meta-command).
+ * closing only on the same tag, "idents" with "" escapes, U&"..." / U&'...'
+ * with an optional UESCAPE clause, -- line comments and nested block
+ * comments. Comments are dropped. Returns a string error for anything
+ * Postgres would treat as unterminated, and for a backslash outside a
+ * literal (not valid SQL; psql would read it as a meta-command).
  */
 function tokenizeSql(sql: string): SqlToken[] | string {
   const tokens: SqlToken[] = [];
@@ -246,6 +305,46 @@ function tokenizeSql(sql: string): SqlToken[] | string {
       continue;
     }
     const start = i;
+    // U&"..." / U&'...' is ONE token to PG, only at a token start (`abcU&"x"`
+    // is the word abcu). The body follows the plain "..." / '...' rules, so
+    // the UESCAPE char cannot move its end.
+    const uq = sql[i + 2];
+    if (
+      (c === "U" || c === "u") &&
+      next === "&" &&
+      (uq === '"' || uq === "'")
+    ) {
+      i += 3;
+      let body = "";
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === uq) {
+          if (sql[i + 1] === uq) {
+            body += uq;
+            i += 2;
+            continue;
+          }
+          i++;
+          closed = true;
+          break;
+        }
+        body += sql[i];
+        i++;
+      }
+      if (!closed) {
+        return uq === '"'
+          ? "unterminated quoted identifier"
+          : "unterminated string literal";
+      }
+      tokens.push({
+        kind: uq === '"' ? "qident" : "string",
+        value: sql.slice(start, i),
+        start,
+        end: i,
+        unicodeBody: body,
+      });
+      continue;
+    }
     if (c === "'" || ((c === "E" || c === "e") && next === "'")) {
       const backslashEscapes = c !== "'";
       i += backslashEscapes ? 2 : 1;
@@ -341,7 +440,44 @@ function tokenizeSql(sql: string): SqlToken[] | string {
     i++;
     tokens.push({ kind: "op", value: c, start, end: i });
   }
-  return tokens;
+
+  // PG's parser folds `UESCAPE '<c>'` after a U& token into that token and
+  // only then decodes it, so U&"current_!0073etting" UESCAPE '!' is the
+  // identifier current_setting. Do the same, so every check below sees the
+  // name PG will resolve and the stream has no stray UESCAPE tokens.
+  const out: SqlToken[] = [];
+  for (let k = 0; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (t.unicodeBody === undefined) {
+      out.push(t);
+      continue;
+    }
+    let esc = "\\";
+    const kw = tokens[k + 1];
+    if (kw?.kind === "word" && kw.value === "uescape") {
+      const escValue = simpleStringValue(tokens[k + 2]);
+      // PG: exactly one char, not a hex digit, +, a quote or whitespace.
+      // A string right after it could be a PG string continuation, which
+      // would change the value, so refuse that too.
+      if (
+        escValue === null ||
+        !/^[!-~]$/.test(escValue) ||
+        /[0-9A-Fa-f+'"]/.test(escValue) ||
+        tokens[k + 3]?.kind === "string"
+      ) {
+        return "invalid UESCAPE clause";
+      }
+      esc = escValue;
+      t.end = tokens[k + 2]!.end;
+      t.value = sql.slice(t.start, t.end);
+      k += 2;
+    }
+    const decoded = decodeUnicodeEscapes(t.unicodeBody, esc);
+    if (decoded === null) return "invalid Unicode escape";
+    if (t.kind === "qident") t.value = decoded.toLowerCase();
+    out.push(t);
+  }
+  return out;
 }
 
 function isIdent(t: SqlToken | undefined): t is SqlToken {
@@ -545,8 +681,10 @@ export function checkExplainPlan(
  * the script as a file, so preCheckSql rejects any backslash anywhere in
  * the SQL (literals and comments included): no psql meta-command (`\!`,
  * `\o`) can reach it, whatever psql's lexer makes of the text. pg_hba
- * trusts the container's local socket, so `-U denue_sage` needs no
- * password (TCP needs one the role does not have).
+ * trusts the container's local socket (and 127.0.0.1/::1 inside it), so
+ * `-U denue_sage` needs no password; connections through the published
+ * port do not come from the container's loopback, so scram-sha-256
+ * applies there and the role has no password to match.
  */
 export async function executeGatedSql(
   sql: string,

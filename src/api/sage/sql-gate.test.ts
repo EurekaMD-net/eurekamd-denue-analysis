@@ -169,6 +169,84 @@ describe("preCheckSql", () => {
     }
   });
 
+  // Audit P01 r2: PG decodes U&"..." (and UESCAPE) before resolving the
+  // name, so the denylist must see the decoded name too.
+  it("rejects U&\"...\" identifiers that decode to a denied name", () => {
+    // Default escape: a backslash, which Sage SQL may not contain at all.
+    for (const sql of [
+      "SELECT U&\"current_\\0073etting\"('app.service_role_key') AS k",
+      "SELECT word FROM U&\"t\\0073_stat\"('SELECT 1')",
+    ]) {
+      expect(preCheckSql(sql)).not.toBeNull();
+    }
+    for (const sql of [
+      "SELECT U&\"current_!0073etting\" UESCAPE '!'('app.service_role_key') AS k",
+      "SELECT word FROM U&\"t!0073_stat\" UESCAPE '!'($q$SELECT 1$q$)",
+      "SELECT u&\"current_#+000073etting\" /* a */ uescape /* b */ '#'('x')",
+      "SELECT U&\"current_!0073etting\" UESCAPE $$!$$('x')",
+      "SELECT setconfig FROM U&\"pg_db_role_s!0065tting\" UESCAPE '!'",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_FORBIDDEN_KEYWORD");
+    }
+    for (const sql of [
+      "SELECT U&\"n!0065t\" UESCAPE '!'.http_post('https://x')",
+      "SELECT 1 FROM U&\"establecimient!006Fs\" UESCAPE '!'",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_FORBIDDEN_TABLE");
+    }
+  });
+
+  it("rejects malformed U& escapes and UESCAPE clauses", () => {
+    for (const sql of [
+      "SELECT U&\"a!zz\" UESCAPE '!' FROM censo_entidades",
+      "SELECT U&\"a\" UESCAPE 'ab' FROM censo_entidades",
+      "SELECT U&\"a\" UESCAPE '+' FROM censo_entidades",
+      "SELECT U&\"a\" UESCAPE 1 FROM censo_entidades",
+      "SELECT U&\"a!d800\" UESCAPE '!' FROM censo_entidades",
+      "SELECT U&\"a\" UESCAPE '!'\n'x' FROM censo_entidades",
+      "SELECT U&\"abc",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_PARSE_FAIL");
+    }
+  });
+
+  it("accepts a harmless U& identifier or string once decoded", () => {
+    expect(
+      preCheckSql(
+        "SELECT U&\"cve!005fent\" UESCAPE '!' FROM censo_entidades LIMIT 1",
+      ),
+    ).toBeNull();
+    expect(preCheckSql("SELECT U&'caf!00e9' UESCAPE '!' AS s")).toBeNull();
+  });
+
+  it("rejects SET ROLE / RESET ROLE alone or as a second statement", () => {
+    for (const sql of [
+      "SET ROLE postgres",
+      "RESET ROLE",
+      "SELECT 1; SET ROLE postgres",
+      "SELECT 1; RESET ROLE",
+    ]) {
+      expect(preCheckSql(sql)?.code).toMatch(
+        /^SQL_(PARSE_FAIL|FORBIDDEN_KEYWORD)$/,
+      );
+    }
+  });
+
+  it("rejects a statement nested in dollar quotes", () => {
+    for (const sql of [
+      // $a$ closes on the first $a$, so the DELETE is a real statement.
+      "SELECT $a$ $b$ $a$; DELETE FROM sage_threads; -- $b$",
+      "SELECT $$x$$; DROP TABLE sage_threads; SELECT $$y$$",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_PARSE_FAIL");
+    }
+    expect(
+      preCheckSql(
+        "SELECT query_to_xml($$DELETE FROM sage_threads$$, true, false, '')",
+      )?.code,
+    ).toBe("SQL_FORBIDDEN_KEYWORD");
+  });
+
   it("rejects a mismatched dollar quote", () => {
     expect(
       preCheckSql("SELECT $a$ x; DELETE FROM y $b$ FROM censo_entidades")
@@ -532,6 +610,18 @@ describe("executeGatedSql psql invocation", () => {
       { dbContainer: "supabase-db" },
     );
     expect(res.ok).toBe(false);
+    expect(mockRunSql).not.toHaveBeenCalled();
+  });
+
+  it("never shells out for a UESCAPE-spelled current_setting (P01 r2)", async () => {
+    const res = await executeGatedSql(
+      "SELECT U&\"current_!0073etting\" UESCAPE '!'('app.service_role_key') AS k",
+      { dbContainer: "supabase-db" },
+    );
+    expect(res).toMatchObject({
+      ok: false,
+      error: { code: "SQL_FORBIDDEN_KEYWORD" },
+    });
     expect(mockRunSql).not.toHaveBeenCalled();
   });
 });
