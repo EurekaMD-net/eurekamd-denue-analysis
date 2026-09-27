@@ -1,7 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo } from "react";
 import type { Map as MapInstance } from "maplibre-gl";
-import { MapboxOverlay } from "@deck.gl/mapbox";
-import { ScatterplotLayer } from "@deck.gl/layers";
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { useUiStore } from "../store";
@@ -12,19 +10,18 @@ interface Props {
 }
 
 /**
- * deck.gl ScatterplotLayer overlay rendering cluster centroids on top
- * of the MapLibre canvas. Fires when both `entidad` AND `sector` are
- * set (k-means clusters require a single sector to be meaningful).
+ * MapLibre geojson source + circle layer rendering k-means cluster
+ * centroids on the map. Fires when both `entidad` AND `sector` are set
+ * (k-means clusters require a single sector to be meaningful).
  *
- * Uses MapboxOverlay (not @deck.gl/react's <DeckGL>) so deck.gl
- * piggy-backs on MapLibre's existing canvas + camera. No second canvas
- * means no z-order shenanigans.
+ * At most k=10 circles, so MapLibre's own circle layer is enough; no
+ * second WebGL pipeline (deck.gl) is needed.
  */
 const CLUSTER_CENTROID = z.object({
   cluster_id: z.number(),
+  lon: z.number(),
+  lat: z.number(),
   size: z.number(),
-  centroid_lat: z.number(),
-  centroid_lon: z.number(),
 });
 
 const CLUSTERS_RESULT = z.object({
@@ -36,11 +33,116 @@ const CLUSTERS_RESULT = z.object({
 
 type ClusterCentroid = z.infer<typeof CLUSTER_CENTROID>;
 
+/** Parses the GET /clusters body: { entidad, scian, k, centroids:
+ * [{cluster_id, lon, lat, size}] }. Extra fields are tolerated. */
+export function parseClustersResult(body: unknown) {
+  return CLUSTERS_RESULT.passthrough().parse(body);
+}
+
+export const CLUSTER_SOURCE_ID = "clusters";
+export const CLUSTER_LAYER_ID = "clusters-circle";
+
+/** Centroids as a FeatureCollection. `size_norm` (size / max size, 0..1)
+ * drives circle-radius so the layer paint never needs rebuilding. */
+export function centroidsToGeoJSON(
+  centroids: ClusterCentroid[],
+): GeoJSON.FeatureCollection<GeoJSON.Point> {
+  const maxSize = Math.max(...centroids.map((c) => c.size), 1);
+  return {
+    type: "FeatureCollection",
+    features: centroids.map((c) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+      properties: {
+        cluster_id: c.cluster_id,
+        size: c.size,
+        size_norm: c.size / maxSize,
+      },
+    })),
+  };
+}
+
+/** Minimal slice of the MapLibre Map API this module touches. */
+type ClusterMap = Pick<
+  MapInstance,
+  | "isStyleLoaded"
+  | "getSource"
+  | "addSource"
+  | "getLayer"
+  | "addLayer"
+  | "moveLayer"
+  | "on"
+  | "off"
+>;
+
+/**
+ * Ensures the cluster source + layer exist on the current style and
+ * pushes `centroids` into it. No-op until the style is loaded. Keeps the
+ * layer on top, since MapShell re-adds its data layers on filter change.
+ */
+export function syncClusterLayer(
+  map: ClusterMap,
+  centroids: ClusterCentroid[],
+): void {
+  if (!map.isStyleLoaded()) return;
+  const data = centroidsToGeoJSON(centroids);
+  const src = map.getSource(CLUSTER_SOURCE_ID) as
+    | { setData: (d: GeoJSON.FeatureCollection) => void }
+    | undefined;
+  if (src) {
+    src.setData(data);
+  } else {
+    map.addSource(CLUSTER_SOURCE_ID, { type: "geojson", data });
+  }
+  if (!map.getLayer(CLUSTER_LAYER_ID)) {
+    map.addLayer({
+      id: CLUSTER_LAYER_ID,
+      type: "circle",
+      source: CLUSTER_SOURCE_ID,
+      paint: {
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["get", "size_norm"],
+          0,
+          6,
+          1,
+          38,
+        ],
+        "circle-color": "rgba(251,113,133,0.78)", // rose-400
+        "circle-stroke-color": "rgba(253,224,71,0.94)", // yellow-300
+        "circle-stroke-width": 1.5,
+      },
+    });
+  } else {
+    map.moveLayer(CLUSTER_LAYER_ID);
+  }
+}
+
+/**
+ * Draws `centroids` now if the style is ready, and again on every
+ * 'load' / 'style.load' so the layer survives map recreation, a style
+ * swap, and data that arrives before the map finished loading.
+ * Returns the listener cleanup.
+ */
+export function attachClusterLayer(
+  map: ClusterMap,
+  centroids: ClusterCentroid[],
+): () => void {
+  const apply = () => syncClusterLayer(map, centroids);
+  apply();
+  map.on("load", apply);
+  map.on("style.load", apply);
+  return () => {
+    map.off("load", apply);
+    map.off("style.load", apply);
+  };
+}
+
 export function ClusterOverlay({ map }: Props) {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
-  const overlayRef = useRef<MapboxOverlay | null>(null);
 
   const enabled = accessToken !== null && entidad !== null && sector !== null;
 
@@ -54,10 +156,7 @@ export function ClusterOverlay({ map }: Props) {
         accessToken,
       );
       const body: unknown = await res.json();
-      // The backend returns { entidad, scian, k, centroids: [{cluster_id,
-      // size, centroid_lat, centroid_lon, ... }, ...] }. Be liberal in
-      // parsing — passthrough fields beyond the schema are tolerated.
-      return CLUSTERS_RESULT.passthrough().parse(body);
+      return parseClustersResult(body);
     },
     enabled,
     staleTime: 60_000,
@@ -68,65 +167,15 @@ export function ClusterOverlay({ map }: Props) {
     [data],
   );
 
-  // Mount the deck.gl overlay once map is ready. Layers are rebuilt
-  // when centroid data changes.
+  // Keyed on [map, centroids]: a recreated map (basemap toggle, token
+  // refresh) re-runs this and redraws the unchanged centroids.
   useEffect(() => {
     if (!map) return;
-    if (!overlayRef.current) {
-      const overlay = new MapboxOverlay({ layers: [] });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.addControl(overlay as any);
-      overlayRef.current = overlay;
-    }
-    return () => {
-      if (overlayRef.current && map) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          map.removeControl(overlayRef.current as any);
-        } catch {
-          // map may already be torn down by basemap toggle
-        }
-        overlayRef.current = null;
-      }
-    };
-  }, [map]);
+    return attachClusterLayer(map, centroids);
+  }, [map, centroids]);
 
-  // Layer rebuild on data change.
-  useEffect(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    if (centroids.length === 0) {
-      overlay.setProps({ layers: [] });
-      return;
-    }
-    const maxSize = Math.max(...centroids.map((c) => c.size), 1);
-    overlay.setProps({
-      layers: [
-        new ScatterplotLayer<ClusterCentroid>({
-          id: "clusters",
-          data: centroids,
-          pickable: true,
-          stroked: true,
-          filled: true,
-          radiusUnits: "pixels",
-          radiusMinPixels: 6,
-          radiusMaxPixels: 38,
-          lineWidthUnits: "pixels",
-          lineWidthMinPixels: 1.5,
-          getPosition: (d) => [d.centroid_lon, d.centroid_lat, 0],
-          getRadius: (d) => 6 + (d.size / maxSize) * 32,
-          getFillColor: () => [251, 113, 133, 200], // rose-400 alpha
-          getLineColor: () => [253, 224, 71, 240], // yellow-300
-        }),
-      ],
-    });
-  }, [centroids]);
-
-  // Visual hint: when both filters set but no data yet
-  if (!enabled || centroids.length === 0) return null;
-  // The overlay paints into MapLibre's canvas, so this component
-  // renders nothing in the DOM tree itself. The legend below is
-  // optional UI surfaced by MapMode.
+  // The layer paints into MapLibre's canvas, so this component renders
+  // nothing in the DOM tree itself.
   return null;
 }
 
