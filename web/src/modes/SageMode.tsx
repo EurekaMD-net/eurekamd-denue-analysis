@@ -80,7 +80,7 @@ export function SageMode() {
 
   const health = useQuery({
     queryKey: ["sage", "health"],
-    queryFn: () => fetchSageHealth(accessToken),
+    queryFn: ({ signal }) => fetchSageHealth(accessToken, signal),
     enabled: accessToken !== null,
     staleTime: 60_000,
   });

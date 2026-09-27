@@ -56,8 +56,9 @@ export interface SageHealth {
 
 export async function fetchSageHealth(
   tokenOverride: string | null,
+  signal?: AbortSignal,
 ): Promise<SageHealth> {
-  const res = await apiFetch("/sage/health", {}, tokenOverride);
+  const res = await apiFetch("/sage/health", { signal }, tokenOverride);
   return (await res.json()) as SageHealth;
 }
 

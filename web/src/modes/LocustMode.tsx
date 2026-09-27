@@ -655,9 +655,9 @@ function useLocustDataset(
     // field changes on one endpoint and entidad changes on the national
     // endpoints are cache hits.
     queryKey: ["locust", path],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!path) throw new Error("no endpoint for X");
-      const res = await apiFetch(path, {}, accessToken);
+      const res = await apiFetch(path, { signal }, accessToken);
       return res.json() as Promise<unknown>;
     },
     enabled:

@@ -45,10 +45,10 @@ export function useLayerValues(
   const layersKey = [...layers].sort().join(",");
   return useQuery({
     queryKey: ["layers-values", grain, layersKey, entidad],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const sp = new URLSearchParams({ grain, layers: layers.join(",") });
       if (entidad) sp.set("entidad", entidad);
-      const res = await apiFetch(`/analytics/layers/values?${sp}`, {}, accessToken);
+      const res = await apiFetch(`/analytics/layers/values?${sp}`, { signal }, accessToken);
       return res.json() as Promise<LayerValuesResult>;
     },
     enabled: layerValuesEnabled(accessToken, grain, layers, entidad),

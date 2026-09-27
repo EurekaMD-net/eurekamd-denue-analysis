@@ -159,11 +159,11 @@ export function ClusterOverlay({ map }: Props) {
 
   const { data } = useQuery({
     queryKey: ["clusters", entidad, sector],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const res = await apiFetch(
         `/clusters?entidad=${encodeURIComponent(entidad ?? "")}` +
           `&scian=${encodeURIComponent(sector ?? "")}&k=10`,
-        {},
+        { signal },
         accessToken,
       );
       const body: unknown = await res.json();

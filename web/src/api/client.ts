@@ -66,14 +66,16 @@ export function validateApiPath(path: string): {
 } {
   if (typeof path !== "string" || path.length === 0)
     return { ok: false, reason: "empty" };
-  // Defense against encoded traversal slipping through length-limited regexes.
-  const lower = path.toLowerCase();
-  if (lower.includes("..") || lower.includes("%2e%2e"))
-    return { ok: false, reason: "traversal" };
   if (path.startsWith("//")) return { ok: false, reason: "protocol-relative" };
   const qIdx = path.indexOf("?");
   const pathOnly = qIdx === -1 ? path : path.slice(0, qIdx);
   const queryOnly = qIdx === -1 ? "" : path.slice(qIdx + 1);
+  // Defense against encoded traversal slipping through length-limited regexes.
+  // Path portion only: SAFE_QUERY forbids `/`, so `..` in the querystring
+  // cannot traverse, and a search like "S.A.." must reach the API (audit #199).
+  const lower = pathOnly.toLowerCase();
+  if (lower.includes("..") || lower.includes("%2e%2e"))
+    return { ok: false, reason: "traversal" };
   // Reject paths with a second `?` (the only legal `?` is the separator).
   if (queryOnly.includes("?")) return { ok: false, reason: "extra-question" };
   if (!SAFE_PATH_ONLY.test(pathOnly)) return { ok: false, reason: "bad-path" };
@@ -123,7 +125,11 @@ export async function apiFetch(
   }
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
-  const signal = init.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  // A caller signal (TanStack's queryFn `signal`) aborts the request on
+  // cancel/supersede/sign-out; the timeout still applies (audit #176).
+  const signal = init.signal
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)])
+    : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const res = await fetch(`/api${path}`, { ...init, headers, signal });
   if (!res.ok) {
     let body: { error?: string; code?: string } = {};
