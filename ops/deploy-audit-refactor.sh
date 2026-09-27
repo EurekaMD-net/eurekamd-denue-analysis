@@ -232,7 +232,7 @@ phase_smoke() {
   local key; key=$(grep -E '^API_KEY=' "$MAIN/.env" | cut -d= -f2-)
   [[ -n $key ]] || die "API_KEY missing in $MAIN/.env"
   local bad=0 p code
-  for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010010' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455'; do
+  for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010017' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455'; do
     code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Api-Key: $key" "http://127.0.0.1:$PORT$p")
     printf '%s %s\n' "$code" "$p"
     [[ $code == 200 || ( $code == 204 && $p == /tiles/* ) ]] || bad=$((bad+1))

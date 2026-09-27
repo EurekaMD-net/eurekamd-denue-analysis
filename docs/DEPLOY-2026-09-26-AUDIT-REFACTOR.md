@@ -403,7 +403,7 @@ Run the SQL checks read-only:
 ```
 # (P31) smoke every psql-backed route: expect 200 on every line (the tile may be 204 if empty).
 # A 4xx means a wrong path or key, a 5xx a server fault; "permission denied for" in the journal means a missed GRANT
-(cd /root/claude/projects/data-intelligence/denue-data-analysis && API_KEY=$(grep -E '^API_KEY=' .env | cut -d= -f2-); for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010010' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455'; do curl -s -o /dev/null -w "%{http_code} $p\n" -H "X-Api-Key: $API_KEY" "http://127.0.0.1:3030$p"; done)
+(cd /root/claude/projects/data-intelligence/denue-data-analysis && API_KEY=$(grep -E '^API_KEY=' .env | cut -d= -f2-); for p in /entidades /sectors /summary/sector/46 /summary/entidad/09 '/analytics/municipios?entidad=09' '/analytics/agebs-by-municipio?cve_mun=09007' '/analytics/ageb-detail?cvegeo=0900700010017' '/analytics/risk-summary?entidad=09' '/analytics/mortality-trend?cve_mun=09007' '/analytics/localities-by-municipio?cve_mun=09007' '/search?q=farmacia&limit=5' '/tiles/10/230/455'; do curl -s -o /dev/null -w "%{http_code} $p\n" -H "X-Api-Key: $API_KEY" "http://127.0.0.1:3030$p"; done)
 ```
 
 - (P01, #110) Sage logs in as a non-superuser whose session cannot read the
