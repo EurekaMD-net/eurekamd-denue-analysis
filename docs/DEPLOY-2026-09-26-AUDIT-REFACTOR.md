@@ -82,6 +82,10 @@ cdf52fc (web: abort cancelled queries, allow '..' in search text; #176 #199).
 
 ## (b) Operator runbook
 
+Scripted: `ops/deploy-audit-refactor.sh` (`push`, `tag <emails>`, `deploy [--hold-heavy]`,
+`heavy`, `gotrue`, `verify`, `all`) runs steps 0-8 and the step-11 smoke with a
+confirmation before each change. Steps 9 and 10 stay manual.
+
 Step 1b (G1 user tagging) runs at least 1 h BEFORE the window. Everything
 from step 2 to step 7 happens in **one window**. The live
 `denue-analyzer` runs `npx tsx --env-file=.env scripts/serve.ts` straight
