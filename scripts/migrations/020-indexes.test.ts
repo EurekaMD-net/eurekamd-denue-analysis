@@ -86,8 +86,8 @@ describe("020-indexes.sql", () => {
     expect(guardEnd).toBeLessThan(SQL.indexOf("DROP INDEX CONCURRENTLY IF EXISTS public.idx_estab_nombre;"));
   });
 
-  it("ends with VACUUM (ANALYZE) establecimientos so index-only scans skip the heap", () => {
-    expect(SQL.trimEnd().endsWith("VACUUM (ANALYZE) public.establecimientos;")).toBe(true);
+  it("ends with VACUUM (ANALYZE, PARALLEL 0) establecimientos so index-only scans skip the heap", () => {
+    expect(SQL.trimEnd().endsWith("VACUUM (ANALYZE, PARALLEL 0) public.establecimientos;")).toBe(true);
   });
 });
 
