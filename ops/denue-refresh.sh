@@ -30,7 +30,16 @@ LOG=$STATE_DIR/denue-refresh-$RUN_TAG.log
 STALE_OUT=$STATE_DIR/denue-refresh-$RUN_TAG.stale-clees.txt
 RAW=$REPO/data/raw
 MAX_RETRIES=4
-MIN_FREE_GB=10
+RETRY_DELAYS=(120 600 1800 3600)   # seconds before retry 1..4
+MIN_FREE_GB=30
+MEM_HIGH=2560M
+MEM_MAX=3G
+# Inside the cgroup Node 22 sizes the V8 heap from memory.max/high (1328 MB measured at 2560M/3G);
+# Edomex (816k rows) needs ~1.3 GB of heap, so pin it.
+NODE_HEAP_MB=2048
+MAX_DROP_PCT=3   # truncation guard: records_extracted per estado vs the archived previous run
+TIMER=denue-matview-refresh.timer
+BUSY_RE='(VACUUM|UPDATE (public\.)?establecimientos|REFRESH MATERIALIZED)'
 # One env mechanism everywhere: tsx --env-file (pipeline.ts also parses .env itself). No EnvironmentFile=.
 TSX=("$REPO/node_modules/.bin/tsx" --env-file="$REPO/.env")
 PSQL=(docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1)
@@ -64,6 +73,10 @@ preflight() {
     if env_has "$k"; then ok ".env has $k"; else bad ".env missing $k"; fi
   done
   if [[ -x ${TSX[0]} ]]; then ok "tsx at ${TSX[0]}"; else bad "tsx missing at ${TSX[0]} (node_modules not installed?)"; fi
+  # Same memory caps + NODE_OPTIONS as the real unit, in a throwaway unit (runs node -p only).
+  local heap; heap=$(systemd-run --unit=denue-refresh-heapcheck --collect --wait --pipe -q -p MemoryHigh="$MEM_HIGH" -p MemoryMax="$MEM_MAX" \
+    --setenv=NODE_OPTIONS=--max-old-space-size="$NODE_HEAP_MB" /usr/bin/node -p 'Math.floor(v8.getHeapStatistics().heap_size_limit/2**20)' 2>/dev/null) || heap=0
+  if [[ $heap -ge 2000 ]]; then ok "V8 heap limit inside the unit caps: ${heap} MB (>= 2000)"; else bad "V8 heap limit inside the unit caps: ${heap:-?} MB (< 2000)"; fi
 
   if systemctl is-active --quiet "$ANALYZER" && curl -sf -o /dev/null "http://127.0.0.1:$PORT/health"; then
     ok "$ANALYZER active, /health 200"
@@ -100,7 +113,7 @@ preflight() {
     fi
   fi
   compgen -G "$STATE_DIR/pipeline-state.*.json" | sed 's/^/archived: /' || true
-  systemctl is-active --quiet denue-matview-refresh.timer && echo "note: denue-matview-refresh.timer is armed (04:00 UTC); a mid-run refresh is harmless, the worker refreshes again at the end"
+  if systemctl is-active --quiet "$TIMER"; then echo "$TIMER: active (start stops it; the worker starts it again after finished_at)"; else echo "$TIMER: inactive (start leaves it alone)"; fi
 
   log "baseline establecimientos"
   local row; row=$(RO_TIMEOUT=120s ro "SELECT count(*)||'|'||min(updated_at)||'|'||max(updated_at) FROM establecimientos") || { bad "baseline query failed"; return 1; }
@@ -117,9 +130,11 @@ build_unit_cmd() {
   UNIT_CMD=(systemd-run --unit="$UNIT" --description="DENUE $EDITION national refresh (ops/denue-refresh.sh)" --collect
     --property=WorkingDirectory="$REPO"
     --property=Nice=19 --property=IOSchedulingClass=idle --property=CPUQuota=150%
-    --property=MemoryHigh=2560M --property=MemoryMax=3G --property=TasksMax=256
+    --property=MemoryHigh="$MEM_HIGH" --property=MemoryMax="$MEM_MAX" --property=TasksMax=256
+    --property=OOMPolicy=continue
     --property=StandardOutput=append:"$LOG" --property=StandardError=append:"$LOG"
     --setenv=HOME=/root --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    --setenv=OUTPUT_DIR="$RAW" --setenv=NODE_OPTIONS=--max-old-space-size="$NODE_HEAP_MB"
     /bin/bash "$REPO/ops/denue-refresh.sh" _worker)
 }
 launch() {
@@ -148,6 +163,7 @@ phase_start() {
     log "dry run: nothing changed"
     [[ -n $archive ]] && echo "would archive: $STATE -> $archive"
     echo "would write:   $BASE (edition $EDITION, baseline count $B_COUNT, run_start = now)"
+    if systemctl is-active --quiet "$TIMER"; then echo "would stop:    $TIMER (timer_stopped: true; restarted after finished_at)"; else echo "timer:         $TIMER inactive, left alone (timer_stopped: false)"; fi
     echo "would launch:"
     printf '  %q' "${UNIT_CMD[@]}"; echo
     return 0
@@ -156,12 +172,16 @@ phase_start() {
   ask "launch the ~11 h national refresh (edition $EDITION) now?"
   [[ -n $archive ]] && { mv "$STATE" "$archive"; ok "archived previous state file to $archive"; }
   local now; now=$(date -u +%FT%TZ)
+  local ts=false
+  systemctl is-active --quiet "$TIMER" && ts=true
   local t; t=$(mktemp "$BASE.XXXX")
-  jq -n --arg tag "$RUN_TAG" --arg ed "$EDITION" --arg now "$now" --arg c "$B_COUNT" --arg mn "$B_MIN" --arg mx "$B_MAX" --arg ar "$archive" \
+  jq -n --arg tag "$RUN_TAG" --arg ed "$EDITION" --arg now "$now" --arg c "$B_COUNT" --arg mn "$B_MIN" --arg mx "$B_MAX" --arg ar "$archive" --argjson ts "$ts" \
     '{run_tag: $tag, edition: $ed, baseline: {count: ($c|tonumber), min_updated_at: $mn, max_updated_at: $mx, taken_at: $now},
-      run_start: $now, archived_state_file: (if $ar == "" then null else $ar end), worker_runs: [], post_steps: {}, finished_at: null}' > "$t"
+      run_start: $now, archived_state_file: (if $ar == "" then null else $ar end), timer_stopped: $ts,
+      worker_runs: [], post_steps: {}, finished_at: null}' > "$t"
   mv "$t" "$BASE"
   ok "baseline written: $BASE (run_start $now)"
+  if [[ $ts == true ]]; then systemctl stop "$TIMER"; ok "$TIMER stopped (not disabled); the worker starts it after finished_at"; fi
   launch
 }
 
@@ -169,6 +189,12 @@ phase_start() {
 phase_resume() {
   [[ -n $(base_get .run_start) ]] || die "no run_start in $BASE: nothing to resume, use '$0 start'"
   unit_active && die "$UNIT is already active"
+  # A stop during post-steps leaves the SQL running inside supabase-db (outside the unit's cgroup).
+  local busy; busy=$(ro "SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND query ~* '$BUSY_RE'")
+  if [[ $busy -gt 0 ]]; then
+    ro "SELECT pid||' '||coalesce(state,'?')||' age='||coalesce((now()-query_start)::text,'?')||' '||left(regexp_replace(query,'\s+',' ','g'),100) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND query ~* '$BUSY_RE'"
+    die "$busy DB session(s) still running post-step SQL (above); wait for pg_stat_activity to drain, then resume"
+  fi
   preflight || die "preflight failed"
   [[ -z $(base_get .finished_at) ]] || die "run already finished at $(base_get .finished_at)"
   ask "relaunch $UNIT (done estados and recorded post-steps are skipped)?"
@@ -196,8 +222,8 @@ phase_worker() {
   # --retry-failed resets failed->pending and also runs anything left pending (running->pending after a crash).
   while [[ $(state_count "done") -lt 32 && $attempt -lt $MAX_RETRIES ]]; do
     attempt=$((attempt+1))
-    wlog "retry $attempt/$MAX_RETRIES in 120 s (failed=$(state_count "failed") pending=$(state_count "pending"))"
-    sleep 120
+    wlog "retry $attempt/$MAX_RETRIES in ${RETRY_DELAYS[attempt-1]} s (failed=$(state_count "failed") pending=$(state_count "pending"))"
+    sleep "${RETRY_DELAYS[attempt-1]}"
     rc=0
     "${TSX[@]}" scripts/pipeline.ts --retry-failed --concurrency=1 || rc=$?
     wlog "pipeline --retry-failed exit $rc: done=$(state_count "done") failed=$(state_count "failed")"
@@ -207,13 +233,34 @@ phase_worker() {
     exit 1
   fi
 
+  local drops; drops=$(truncated_estados)
+  if [[ -n $drops ]]; then
+    wlog "STOP: records_extracted fell > ${MAX_DROP_PCT}% vs the previous run for:"
+    printf '%s\n' "$drops"
+    wlog "post-steps NOT run; state kept. Check the API/token, set those estados to failed in $STATE and resume; if the drop is real, set .truncation_ack=true in $BASE and resume."
+    exit 1
+  fi
+
   # Post-steps: each is recorded in the baseline json and skipped on a later resume.
   post_step geometry     step_geometry
   post_step ageb_backfill step_ageb
   post_step vacuum       step_vacuum
   post_step matviews     "$REPO/scripts/refresh-matviews.sh"
   base_set --arg t "$(date -u +%FT%TZ)" '.finished_at = $t'
+  if [[ $(base_get .timer_stopped) == true ]]; then systemctl start "$TIMER"; wlog "$TIMER started again"; fi
   wlog "FINISHED. Next: ops/denue-refresh.sh stale-report (read-only; deletion is an operator decision)"
+}
+
+# Prints "clave nombre: old -> new" for each estado whose records_extracted fell more than MAX_DROP_PCT
+# below the archived previous run. Empty = OK (or acknowledged, or no archive to compare with).
+truncated_estados() {
+  local arch; arch=$(base_get .archived_state_file)
+  [[ $(base_get .truncation_ack) == true ]] && return 0
+  [[ -n $arch && -f $arch ]] || return 0
+  jq -r --slurpfile old "$arch" --argjson pct "$MAX_DROP_PCT" '.estados | to_entries[]
+    | (.value.records_extracted) as $n | ($old[0].estados[.key].records_extracted // 0) as $o
+    | select($o > 0 and $n < $o * (1 - $pct/100))
+    | "  \(.key) \(.value.nombre): \($o) -> \($n)"' "$STATE"
 }
 
 post_step() {
@@ -251,6 +298,8 @@ phase_status() {
     echo "$UNIT: inactive (last exit: journalctl -u $UNIT -n 20)"
   fi
   echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
+  echo "$TIMER: $(systemctl is-active "$TIMER" || true)   (timer_stopped by start: $(jq -r '.timer_stopped // "n/a"' "$BASE" 2>/dev/null || echo n/a))"
+  echo "raw files: $(compgen -G "$RAW/*.json" | wc -l) in $RAW ($(du -sh "$RAW" 2>/dev/null | cut -f1))"
   if [[ -f $LOG ]]; then
     log "log tail ($LOG)"
     tail -c 20000 "$LOG" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -5
@@ -288,6 +337,8 @@ phase_stale() {
   [[ -n $rs ]] || die "no run_start in $BASE"
   unit_active && die "$UNIT is still running; wait for it to finish"
   [[ $(state_count "done") -eq 32 ]] || die "only $(state_count "done")/32 estados done: the report needs a COMPLETE extraction"
+  local drops; drops=$(truncated_estados)
+  [[ -z $drops ]] || { printf '%s\n' "$drops"; die "records_extracted fell > ${MAX_DROP_PCT}% vs the previous run (above): refusing, a short extraction would flag live rows as stale"; }
   local rs_s; rs_s=$(date -d "$rs" +%s)
   # global, not local: the EXIT trap fires after this function has returned
   STALE_WORK=$(mktemp -d "$STATE_DIR/stale-$RUN_TAG.XXXX")
