@@ -66,6 +66,10 @@ uncharted.eurekamd.cloud {
 		file_server
 	}
 	handle {
+		# Deploy 2026-09-27: a tab that kept a cached index.html after the web
+		# build asked for a chunk the new build no longer has. Assets are
+		# immutable (hashed), so the index must always revalidate.
+		header Cache-Control "no-cache"
 		root * /root/claude/projects/data-intelligence/denue-data-analysis/web/dist
 		try_files {path} /index.html
 		file_server

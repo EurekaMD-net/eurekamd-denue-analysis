@@ -286,7 +286,8 @@ Rollback: covered by the code rollback in step 2.
 
 ### Step 9: section C (Caddy), clearly separate
 
-1. Paste the header block, the `@maps` 404 matcher and the minisu-catalog
+1. Paste the header block, the `@maps` 404 matcher, the SPA-index
+   `Cache-Control "no-cache"` line and the minisu-catalog
    sandbox headers from `/root/claude/projects/data-intelligence/denue-data-analysis/ops/Caddyfile.uncharted`
    into the `uncharted.eurekamd.cloud` block of `/etc/caddy/Caddyfile`. The
    `@maps path *.map` and `respond @maps 404` lines go INSIDE the existing
