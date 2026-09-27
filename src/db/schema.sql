@@ -117,6 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_estab_nombre
 
 -- -----------------------------------------------------------------------------
 -- Trigger: actualizar updated_at automáticamente
+-- Only when the DENUE source record changes: maintenance backfills (geom,
+-- area_geo, ageb, SCIAN) must not look like fresh data (audit #127).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
@@ -129,7 +131,9 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_estab_updated_at ON establecimientos;
 CREATE TRIGGER trg_estab_updated_at
   BEFORE UPDATE ON establecimientos
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  FOR EACH ROW
+  WHEN (OLD.raw_json IS DISTINCT FROM NEW.raw_json)
+  EXECUTE FUNCTION update_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- Vista útil: establecimientos con coordenadas como GeoJSON
