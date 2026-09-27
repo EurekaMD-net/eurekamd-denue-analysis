@@ -10,8 +10,10 @@
  * Design notes:
  *  - Sliding window, in-memory Map keyed by IP.
  *  - Periodic cleanup prevents unbounded growth (entries idle >5min are GC'd).
- *  - getIp is injectable for tests; production reads x-forwarded-for first
- *    (Caddy adds it) and falls back to the socket address.
+ *  - getIp is injectable for tests. With TRUST_PROXY=1 production reads the
+ *    RIGHTMOST x-forwarded-for entry (the hop Caddy appended); without it,
+ *    the socket address (which is Caddy's loopback for every client).
+ *  - keyBy picks the bucket: client IP, authenticated principal, or both.
  */
 
 import type { MiddlewareHandler, Context } from "hono";
@@ -29,10 +31,17 @@ export interface RateLimitOptions {
   maxBuckets?: number;
   /** When false, x-forwarded-for is ignored (anti-spoof). Default reads TRUST_PROXY env. */
   trustProxy?: boolean;
+  /**
+   * Bucket key. "ip" (default) = client IP. "principal" = the authenticated
+   * caller (JWT sub, or the shared X-Api-Key), falling back to the IP for
+   * anonymous requests; register it AFTER the auth middleware. "principal+ip"
+   * = both, so one account on two networks gets two buckets.
+   */
+  keyBy?: "ip" | "principal" | "principal+ip";
 }
 
 const DEFAULT_OPTIONS: Required<
-  Omit<RateLimitOptions, "getIp" | "trustProxy">
+  Omit<RateLimitOptions, "getIp" | "trustProxy" | "keyBy">
 > = {
   windowMs: 1000,
   max: 5,
@@ -47,17 +56,15 @@ export function makeRateLimitMiddleware(
     ...DEFAULT_OPTIONS,
     ...options,
   };
-  const trustProxy =
-    options.trustProxy ??
-    (process.env["TRUST_PROXY"] === "1" ||
-      process.env["TRUST_PROXY"] === "true");
-  const getIp = options.getIp ?? makeDefaultGetIp(trustProxy);
+  const trustProxy = options.trustProxy ?? trustProxyFromEnv();
+  const getIp = options.getIp ?? ((c: Context) => clientIp(c, trustProxy));
+  const keyBy = options.keyBy ?? "ip";
   const buckets = new Map<string, number[]>();
   let lastCleanup = Date.now();
 
   return async (c, next) => {
     const now = Date.now();
-    const ip = getIp(c);
+    const key = bucketKey(c, getIp(c), keyBy);
 
     if (now - lastCleanup > cleanupAfterMs) {
       gcStale(buckets, now, cleanupAfterMs);
@@ -70,7 +77,7 @@ export function makeRateLimitMiddleware(
       if (firstKey !== undefined) buckets.delete(firstKey);
     }
 
-    const recent = (buckets.get(ip) ?? []).filter((t) => now - t < windowMs);
+    const recent = (buckets.get(key) ?? []).filter((t) => now - t < windowMs);
     if (recent.length >= max) {
       const oldest = recent[0] ?? now;
       const retryMs = Math.max(0, windowMs - (now - oldest));
@@ -84,29 +91,59 @@ export function makeRateLimitMiddleware(
       );
     }
     recent.push(now);
-    buckets.set(ip, recent);
+    buckets.set(key, recent);
     await next();
     return undefined;
   };
 }
 
-function makeDefaultGetIp(trustProxy: boolean): (c: Context) => string {
-  return (c: Context): string => {
-    if (trustProxy) {
-      const xff = c.req.header("x-forwarded-for");
-      if (xff) {
-        // Caddy may forward a comma-separated list; first entry is the client.
-        const first = xff.split(",")[0]?.trim();
-        if (first) return first;
-      }
-      const realIp = c.req.header("x-real-ip");
-      if (realIp) return realIp.trim();
+/** TRUST_PROXY=1|true: the API sits behind exactly one trusted proxy (Caddy). */
+export function trustProxyFromEnv(): boolean {
+  return (
+    process.env["TRUST_PROXY"] === "1" || process.env["TRUST_PROXY"] === "true"
+  );
+}
+
+/**
+ * Resolved client IP. With trustProxy, the RIGHTMOST x-forwarded-for entry:
+ * a proxy appends the peer it saw, so with exactly one trusted proxy that
+ * entry is the real client and everything to its left is client-supplied
+ * (spoofable). Without the header (or trustProxy), the socket address.
+ */
+export function clientIp(c: Context, trustProxy: boolean): string {
+  if (trustProxy) {
+    const xff = c.req.header("x-forwarded-for");
+    if (xff) {
+      const last = xff.split(",").pop()?.trim();
+      if (last) return last;
     }
-    // @hono/node-server exposes the raw incoming message under c.env.
-    // Always preferred when trustProxy=false to prevent header spoofing.
-    const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } };
-    return env?.incoming?.socket?.remoteAddress ?? "unknown";
-  };
+  }
+  // @hono/node-server exposes the raw incoming message under c.env.
+  const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } };
+  return env?.incoming?.socket?.remoteAddress ?? "unknown";
+}
+
+/**
+ * Authenticated caller: the JWT sub set by the auth middleware, "apikey"
+ * for the shared X-Api-Key, undefined when anonymous. Never the secret.
+ */
+export function principalOf(c: Context): string | undefined {
+  const user = c.get("user") as { user_id?: string } | undefined;
+  if (user?.user_id) return user.user_id;
+  return c.req.header("x-api-key") ? "apikey" : undefined;
+}
+
+function bucketKey(
+  c: Context,
+  ip: string,
+  keyBy: NonNullable<RateLimitOptions["keyBy"]>,
+): string {
+  if (keyBy === "ip") return ip;
+  const principal = principalOf(c);
+  if (keyBy === "principal") {
+    return principal ? `p:${principal}` : `ip:${ip}`;
+  }
+  return `p:${principal ?? "-"}|ip:${ip}`;
 }
 
 function gcStale(

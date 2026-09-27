@@ -35,6 +35,10 @@ SyslogIdentifier=denue-analyzer
 EnvironmentFile=/root/claude/projects/data-intelligence/denue-data-analysis/.env
 Environment=NODE_ENV=production
 Environment=TZ=America/Mexico_City
+# Behind Caddy (one trusted proxy): rate limits read the rightmost
+# X-Forwarded-For entry instead of the loopback socket address. Keep
+# TRUST_PROXY out of .env — EnvironmentFile would override this line.
+Environment=TRUST_PROXY=1
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]

@@ -28,6 +28,7 @@ import {
   type ApiServerConfig,
 } from "../src/api/types.js";
 import { buildSageProvider } from "../src/api/sage/providers/index.js";
+import { trustProxyFromEnv } from "../src/api/middleware/rate-limit.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -78,6 +79,14 @@ const config: ApiServerConfig = {
   // X-Api-Key only.
   supabaseJwtSecret: trimAndValidateJwtSecret(),
 };
+
+// Resolved client-IP source, logged once: without TRUST_PROXY every client
+// behind Caddy is 127.0.0.1 and shares one rate-limit bucket. Audit #2.
+console.log(
+  trustProxyFromEnv()
+    ? "   client IP: rightmost X-Forwarded-For (TRUST_PROXY on)"
+    : "   client IP: socket address (TRUST_PROXY off — behind a proxy every client shares one bucket)",
+);
 
 const port = parseInt(process.env["API_PORT"] ?? "3030", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {

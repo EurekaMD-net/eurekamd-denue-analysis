@@ -32,6 +32,7 @@
  */
 
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import type { ApiServerConfig } from "./types.js";
 import { makeAuthMiddleware } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
@@ -128,10 +129,54 @@ export function createServer(config: ApiServerConfig): Hono {
   app.use("/sage/thread/*", auth);
 
   // /sage/query is metered: each request fires 2 LLM calls (router +
-  // narrative). 6/min/IP keeps a per-API-key compromise from draining
-  // the Anthropic budget at thousands of dollars/hour, while leaving
-  // generous headroom for an interactive analyst. Closure audit C1-sec.
-  app.use("/sage/query", makeRateLimitMiddleware({ max: 6, windowMs: 60_000 }));
+  // narrative). 6/min per principal (JWT sub, or the shared API key) keeps
+  // a compromised account or key from draining the Anthropic budget at
+  // thousands of dollars/hour, while leaving generous headroom for an
+  // interactive analyst. Keyed on the account, not the IP, so switching
+  // IPs does not reset it. Registered after auth so the principal is set.
+  // Closure audit C1-sec; audit #2 #27.
+  app.use(
+    "/sage/query",
+    makeRateLimitMiddleware({ max: 6, windowMs: 60_000, keyBy: "principal" }),
+  );
+  // The handler JSON-parses the whole body before its 2000-char question
+  // check; cap the body so a huge payload is never buffered. Audit #9.
+  app.use(
+    "/sage/query",
+    bodyLimit({
+      maxSize: 16 * 1024,
+      onError: (c) =>
+        c.json({ error: "Payload too large", code: "payload_too_large" }, 413),
+    }),
+  );
+
+  // /analytics/* runs psql per request (ageb-detail opens several backends
+  // on the shared cluster), so it is limited per principal+IP: 120/min in
+  // general, 20/min on the two heaviest routes. Audit #17.
+  app.use(
+    "/analytics/*",
+    makeRateLimitMiddleware({
+      max: 120,
+      windowMs: 60_000,
+      keyBy: "principal+ip",
+    }),
+  );
+  app.use(
+    "/analytics/ageb-detail",
+    makeRateLimitMiddleware({
+      max: 20,
+      windowMs: 60_000,
+      keyBy: "principal+ip",
+    }),
+  );
+  app.use(
+    "/analytics/agebs-by-municipio",
+    makeRateLimitMiddleware({
+      max: 20,
+      windowMs: 60_000,
+      keyBy: "principal+ip",
+    }),
+  );
 
   // /tiles also gets a per-IP rate limit on top of auth. Sized for
   // MapLibre's burst pattern: a single viewport at zoom 5 covering

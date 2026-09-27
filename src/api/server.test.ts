@@ -81,3 +81,44 @@ describe("createServer — routing", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("createServer — edge limits", () => {
+  it("/sage/query rejects a 17 KB body with 413 before the handler", async () => {
+    const app = createServer(TEST_CONFIG);
+    const res = await app.request("/sage/query", {
+      method: "POST",
+      headers: { "X-Api-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "x".repeat(17 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("payload_too_large");
+  });
+
+  it("/sage/query lets a small body through to the handler", async () => {
+    const app = createServer(TEST_CONFIG);
+    const res = await app.request("/sage/query", {
+      method: "POST",
+      headers: { "X-Api-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "hola" }),
+    });
+    // No sageProvider in TEST_CONFIG → the handler's own 503.
+    expect(res.status).toBe(503);
+  });
+
+  it("/analytics/ageb-detail is limited to 20/min per principal+IP", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const app = createServer(TEST_CONFIG);
+    // Missing cvegeo → 400 from the handler without touching the DB.
+    for (let i = 0; i < 20; i++) {
+      const res = await app.request("/analytics/ageb-detail", {
+        headers: { "X-Api-Key": "test-key" },
+      });
+      expect(res.status).toBe(400);
+    }
+    const limited = await app.request("/analytics/ageb-detail", {
+      headers: { "X-Api-Key": "test-key" },
+    });
+    expect(limited.status).toBe(429);
+  });
+});
