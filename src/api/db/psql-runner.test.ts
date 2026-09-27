@@ -10,6 +10,7 @@ interface FakeChild extends EventEmitter {
   stderr: PassThrough;
   kill: ReturnType<typeof vi.fn>;
   args: string[];
+  closed: boolean;
   sql: () => string;
   finish: (stdout: string) => void;
   fail: (code: number, stderr: string) => void;
@@ -33,7 +34,10 @@ vi.mock("node:child_process", () => ({
     let sql = "";
     child.stdin.on("data", (d: Buffer) => (sql += d.toString("utf-8")));
     child.sql = () => sql;
+    child.closed = false;
     const close = (code: number) => {
+      if (child.closed) return;
+      child.closed = true;
       child.stdout.end();
       child.stderr.end();
       setImmediate(() => child.emit("close", code, null));
@@ -51,7 +55,12 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
-import { runJson, runJsonSync, runSql } from "./psql-runner.js";
+import {
+  _resetSemaphoreForTests,
+  runJson,
+  runJsonSync,
+  runSql,
+} from "./psql-runner.js";
 import { requestContext } from "../request-context.js";
 
 const SQL = "SELECT json_agg(t) FROM secret_table t WHERE x = 'marker'";
@@ -74,8 +83,19 @@ beforeEach(() => {
   mockExecFileSync.mockReset();
   errSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 });
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
+  // Isolation: settle every child a test left open (each settle frees a
+  // slot, which may spawn a queued one), then zero the semaphore, so one
+  // failing test cannot leave slots held for the next.
+  for (let i = 0; i < 50; i++) {
+    const open = spawned.filter((c) => !c.closed);
+    if (open.length === 0) break;
+    for (const c of open) c.finish("");
+    await tick();
+    await tick();
+  }
+  _resetSemaphoreForTests();
   vi.restoreAllMocks();
 });
 
@@ -293,6 +313,43 @@ describe("priority tier (X-Api-Key request context)", () => {
     expect(spawned[7]!.sql()).toContain("normal");
     for (const c of queryChildren().slice(2)) c.finish("x");
     await Promise.all([...running, normal, priority]);
+  });
+
+  it("priority holds at most 5 of 6 slots; the last one stays open to normal requests", async () => {
+    // Fails on 9966f0f: acquire() admitted any request while
+    // `inFlight < MAX_IN_FLIGHT`, so the 6th priority request spawned too
+    // and the first expectation below saw 6 children.
+    const prio = Array.from({ length: 6 }, (_, i) =>
+      asPriority(() => runSql(`SELECT 'p${i}'`, OPTS)),
+    );
+    await waitForSpawns(5);
+    await tick();
+    await tick();
+    expect(queryChildren()).toHaveLength(5);
+
+    // The reserved slot: a normal request runs immediately.
+    const n1 = runSql("SELECT 'n1'", OPTS);
+    await waitForSpawns(6);
+    expect(spawned[5]!.sql()).toContain("n1");
+
+    // Full now: a second normal request queues behind the priority one.
+    const n2 = runSql("SELECT 'n2'", OPTS);
+    await tick();
+    expect(queryChildren()).toHaveLength(6);
+
+    // A priority slot frees: the queued priority request goes first.
+    spawned[0]!.finish("x");
+    await waitForSpawns(7);
+    await tick();
+    expect(queryChildren()).toHaveLength(7);
+    expect(spawned[6]!.sql()).toContain("p5");
+
+    // The normal slot frees: now the queued normal request runs.
+    spawned[5]!.finish("x");
+    await waitForSpawns(8);
+    expect(spawned[7]!.sql()).toContain("n2");
+    for (const c of queryChildren()) if (!c.closed) c.finish("x");
+    await Promise.all([...prio, n1, n2]);
   });
 
   it("doubles the default timeout for priority requests", async () => {

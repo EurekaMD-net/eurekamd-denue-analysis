@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
 import { createServer } from "./server.js";
+import { requestContext } from "./request-context.js";
 import type { ApiServerConfig } from "./types.js";
 
 const TEST_CONFIG: ApiServerConfig = {
@@ -144,8 +145,8 @@ describe("createServer — edge limits", () => {
   });
 
   it("the X-Api-Key (Jarvis) is exempt from the /analytics limits", async () => {
-    // Pre-change: server.ts registered the ageb-detail limiter without
-    // `exempt: isPriorityPrincipal`, so request 21 here was a 429.
+    // Pre-change (before 9966f0f): the ageb-detail limiter had no
+    // `exempt`, so request 21 here was a 429.
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const app = createServer(TEST_CONFIG);
     for (let i = 0; i < 30; i++) {
@@ -159,5 +160,25 @@ describe("createServer — edge limits", () => {
       headers: { "X-Api-Key": "not-the-key" },
     });
     expect(forged.status).toBe(401);
+  });
+
+  it("a bearer user's nested Sage dispatch carrying the key is NOT exempt", async () => {
+    // Fails on 9966f0f: server.ts passed `exempt: isPriorityPrincipal`,
+    // which read the raw x-api-key header, so call 21 below was a 400.
+    // Sage's dispatcher re-enters the app with the shared key inside the
+    // browser user's (non-priority) request context.
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const app = createServer(TEST_CONFIG);
+    const statuses: number[] = [];
+    await requestContext.run({ principal: "user-1", priority: false }, async () => {
+      for (let i = 0; i < 21; i++) {
+        const res = await app.request("/analytics/ageb-detail", {
+          headers: { "X-Api-Key": "test-key" },
+        });
+        statuses.push(res.status);
+      }
+    });
+    expect(statuses.slice(0, 20).every((s) => s === 400)).toBe(true);
+    expect(statuses[20]).toBe(429);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Hono } from "hono";
-import { isPriorityPrincipal, makeRateLimitMiddleware } from "./rate-limit.js";
+import { makeRateLimitMiddleware } from "./rate-limit.js";
+import { isPriorityRequest, requestContext } from "../request-context.js";
 
 type UserEnv = { Variables: { user: { user_id: string } } };
 
@@ -193,46 +194,50 @@ describe("makeRateLimitMiddleware", () => {
   });
 });
 
-describe("exempt: isPriorityPrincipal (the X-Api-Key tier)", () => {
-  // Pre-change: no `exempt` option, so the api-key requests below hit the
-  // `if (recent.length >= max)` 429 branch on the 3rd call.
-  function exemptApp(user?: string) {
-    const app = new Hono<UserEnv>();
-    if (user) {
-      app.use("*", async (c, next) => {
-        c.set("user", { user_id: user });
-        await next();
-      });
-    }
+describe("exempt: isPriorityRequest (the X-Api-Key tier)", () => {
+  // Pre-change (before 9966f0f): no `exempt` option, so the priority
+  // requests below hit the `if (recent.length >= max)` 429 on the 3rd call.
+  // `priority` stands in for what auth.ts puts in the request context.
+  function exemptApp() {
+    const app = new Hono();
+    app.use("*", (c, next) =>
+      requestContext.run(
+        { priority: c.req.header("x-test-priority") === "1" },
+        next,
+      ),
+    );
     app.use(
       "*",
       makeRateLimitMiddleware({
         max: 2,
         windowMs: 60_000,
         getIp: () => "10.0.0.1",
-        exempt: isPriorityPrincipal,
+        exempt: isPriorityRequest,
       }),
     );
     app.get("/x", (c) => c.text("ok"));
     return app;
   }
 
-  it("never 429s the api key and does not consume the shared bucket", async () => {
+  it("never 429s a priority request and does not consume the shared bucket", async () => {
     const app = exemptApp();
     for (let i = 0; i < 10; i++) {
-      const res = await app.request("/x", { headers: { "x-api-key": "k" } });
+      const res = await app.request("/x", {
+        headers: { "x-test-priority": "1" },
+      });
       expect(res.status).toBe(200);
     }
-    // Same IP bucket: had the api-key calls counted, this would be 429.
+    // Same IP bucket: had the priority calls counted, this would be 429.
     expect((await app.request("/x")).status).toBe(200);
     expect((await app.request("/x")).status).toBe(200);
     expect((await app.request("/x")).status).toBe(429);
+  });
 
-    // A bearer principal is still limited, even with a stray x-api-key.
-    const bearer = exemptApp("user-a");
+  it("the raw x-api-key header alone does not exempt (context decides)", async () => {
+    const app = exemptApp();
     const h = { headers: { "x-api-key": "k" } };
-    expect((await bearer.request("/x", h)).status).toBe(200);
-    expect((await bearer.request("/x", h)).status).toBe(200);
-    expect((await bearer.request("/x", h)).status).toBe(429);
+    expect((await app.request("/x", h)).status).toBe(200);
+    expect((await app.request("/x", h)).status).toBe(200);
+    expect((await app.request("/x", h)).status).toBe(429);
   });
 });

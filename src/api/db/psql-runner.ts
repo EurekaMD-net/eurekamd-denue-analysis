@@ -13,7 +13,9 @@
  *  - a module-level semaphore caps in-flight psql processes;
  *  - priority requests (the shared X-Api-Key, i.e. Jarvis — see
  *    request-context.ts) are dequeued before normal waiters and get twice
- *    the timeout, capped at 60 s (an explicit longer timeout is kept);
+ *    the timeout, capped at 60 s (an explicit longer timeout is kept).
+ *    They may hold at most MAX_IN_FLIGHT - 1 slots, so the last slot is
+ *    always open to normal requests (no starvation of browser users);
  *  - every call is tagged with PGAPPNAME=denue-<uuid>. Killing the docker
  *    CLI does NOT stop psql or its backend inside the container, so on
  *    timeout or abort the runner also fires pg_cancel_backend for the tag;
@@ -130,16 +132,32 @@ export function psqlArgv(opts: RunSqlOptions, appName: string): string[] {
 
 // --- semaphore ------------------------------------------------------------
 
-// Two FIFO queues: a freed slot goes to the oldest priority waiter first,
-// then the oldest normal one. A slot is handed straight to the next waiter
-// (inFlight unchanged), so inFlight < MAX_IN_FLIGHT implies both are empty.
+// Two FIFO queues: a freed slot goes to the oldest priority waiter first
+// (when a priority slot is available), then the oldest normal one. Priority
+// holds at most MAX_PRIORITY_IN_FLIGHT slots; the rest is reserved for
+// normal requests. pump() runs after every release, so a waiter left queued
+// while a slot is free is always a priority waiter at its cap.
+const MAX_PRIORITY_IN_FLIGHT = MAX_IN_FLIGHT - 1;
 let inFlight = 0;
+let inFlightPriority = 0;
 const priorityWaiters: Array<() => void> = [];
 const waiters: Array<() => void> = [];
 
+function canTake(priority: boolean): boolean {
+  return (
+    inFlight < MAX_IN_FLIGHT &&
+    (!priority || inFlightPriority < MAX_PRIORITY_IN_FLIGHT)
+  );
+}
+
+function take(priority: boolean): void {
+  inFlight++;
+  if (priority) inFlightPriority++;
+}
+
 function acquire(priority: boolean): Promise<void> {
-  if (inFlight < MAX_IN_FLIGHT) {
-    inFlight++;
+  if (canTake(priority)) {
+    take(priority);
     return Promise.resolve();
   }
   return new Promise((resolve) =>
@@ -147,10 +165,32 @@ function acquire(priority: boolean): Promise<void> {
   );
 }
 
-function release(): void {
-  const next = priorityWaiters.shift() ?? waiters.shift();
-  if (next) next();
-  else inFlight--;
+function pump(): void {
+  for (;;) {
+    if (priorityWaiters.length > 0 && canTake(true)) {
+      take(true);
+      priorityWaiters.shift()?.();
+    } else if (waiters.length > 0 && canTake(false)) {
+      take(false);
+      waiters.shift()?.();
+    } else {
+      return;
+    }
+  }
+}
+
+function release(priority: boolean): void {
+  inFlight--;
+  if (priority) inFlightPriority--;
+  pump();
+}
+
+/** Test-only: forget every slot and waiter (queued promises never settle). */
+export function _resetSemaphoreForTests(): void {
+  inFlight = 0;
+  inFlightPriority = 0;
+  priorityWaiters.length = 0;
+  waiters.length = 0;
 }
 
 /** Priority: 2x the timeout, capped, never below what the caller asked. */
@@ -270,7 +310,7 @@ async function execTagged(
       child.stdin?.end(sql);
     });
   } finally {
-    release();
+    release(priority);
   }
 }
 

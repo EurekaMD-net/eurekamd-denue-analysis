@@ -8,8 +8,9 @@
  *    fetches scale with the visible map area).
  * Anything above a limit returns 429 with a Retry-After hint.
  * The shared X-Api-Key (Jarvis, the priority machine caller) is exempt on
- * /analytics/* and /tiles/* via `exempt: isPriorityPrincipal`; /sage/query
- * still meters it (the LLM budget guard against a leaked key).
+ * /analytics/* and /tiles/* via `exempt: isPriorityRequest` (the request
+ * context auth sets, request-context.ts); /sage/query still meters it (the
+ * LLM budget guard against a leaked key).
  *
  * Design notes:
  *  - Sliding window, in-memory Map keyed by bucket (see keyBy).
@@ -43,9 +44,9 @@ export interface RateLimitOptions {
    */
   keyBy?: "ip" | "principal" | "principal+ip";
   /**
-   * When true for a request, it is neither counted nor limited. Register
-   * the limiter AFTER the auth middleware so an exempting header has been
-   * validated (a forged one is already a 401).
+   * When true for a request, it is neither counted nor limited. Server
+   * wiring passes isPriorityRequest, which reads the context auth sets, so
+   * register the limiter AFTER the auth middleware.
    */
   exempt?: (c: Context) => boolean;
 }
@@ -145,14 +146,6 @@ export function principalOf(c: Context): string | undefined {
   const user = c.get("user") as { user_id?: string } | undefined;
   if (user?.user_id) return user.user_id;
   return c.req.header("x-api-key") ? "apikey" : undefined;
-}
-
-/**
- * The priority tier: the shared X-Api-Key, used only by machine callers
- * (Jarvis). Relies on auth having run first, like principalOf.
- */
-export function isPriorityPrincipal(c: Context): boolean {
-  return principalOf(c) === "apikey";
 }
 
 function bucketKey(

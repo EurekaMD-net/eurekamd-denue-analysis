@@ -44,8 +44,9 @@
  *   /tiles/*          60/s per IP (sized for MapLibre's viewport burst)
  * The shared X-Api-Key is machine-only (Jarvis) and the priority tier: it
  * is exempt from the /analytics/* and /tiles/* limits, and its DB queries
- * jump the psql queue with 2x the timeout (request-context.ts,
- * db/psql-runner.ts). /search and /clusters carry no limiter.
+ * jump the psql queue (at most 5 of 6 slots) with 2x the timeout
+ * (request-context.ts, db/psql-runner.ts). /search and /clusters carry no
+ * limiter.
  */
 
 import { Hono } from "hono";
@@ -54,10 +55,8 @@ import type { ApiServerConfig } from "./types.js";
 import { makeAuthMiddleware } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
 import { logMiddleware } from "./middleware/log.js";
-import {
-  isPriorityPrincipal,
-  makeRateLimitMiddleware,
-} from "./middleware/rate-limit.js";
+import { makeRateLimitMiddleware } from "./middleware/rate-limit.js";
+import { isPriorityRequest } from "./request-context.js";
 import { searchHandler } from "./handlers/search.js";
 import { establishmentHandler } from "./handlers/establishment.js";
 import { summarySectorHandler } from "./handlers/summary-sector.js";
@@ -173,14 +172,15 @@ export function createServer(config: ApiServerConfig): Hono {
   // /analytics/* runs psql per request (ageb-detail opens several backends
   // on the shared cluster), so it is limited per principal+IP: 120/min in
   // general, 20/min on the two heaviest routes. Audit #17. The X-Api-Key
-  // (Jarvis, the priority caller) is exempt; auth has already validated it.
+  // (Jarvis, the priority caller) is exempt via the request context auth
+  // set, so a browser user's Sage dispatch carrying the key is not.
   app.use(
     "/analytics/*",
     makeRateLimitMiddleware({
       max: 120,
       windowMs: 60_000,
       keyBy: "principal+ip",
-      exempt: isPriorityPrincipal,
+      exempt: isPriorityRequest,
     }),
   );
   app.use(
@@ -189,7 +189,7 @@ export function createServer(config: ApiServerConfig): Hono {
       max: 20,
       windowMs: 60_000,
       keyBy: "principal+ip",
-      exempt: isPriorityPrincipal,
+      exempt: isPriorityRequest,
     }),
   );
   app.use(
@@ -198,7 +198,7 @@ export function createServer(config: ApiServerConfig): Hono {
       max: 20,
       windowMs: 60_000,
       keyBy: "principal+ip",
-      exempt: isPriorityPrincipal,
+      exempt: isPriorityRequest,
     }),
   );
 
@@ -214,7 +214,7 @@ export function createServer(config: ApiServerConfig): Hono {
     makeRateLimitMiddleware({
       max: 60,
       windowMs: 1000,
-      exempt: isPriorityPrincipal,
+      exempt: isPriorityRequest,
     }),
   );
 
