@@ -22,6 +22,7 @@
  */
 
 import type { MiddlewareHandler, Context } from "hono";
+import { requestContext } from "../request-context.js";
 
 export interface RateLimitOptions {
   /** Window length in milliseconds. Default 1000ms (1 second). */
@@ -139,10 +140,14 @@ export function clientIp(c: Context, trustProxy: boolean): string {
 }
 
 /**
- * Authenticated caller: the JWT sub set by the auth middleware, "apikey"
- * for the shared X-Api-Key, undefined when anonymous. Never the secret.
+ * Authenticated caller: the principal auth put in the request context
+ * (for Sage's nested dispatch, the outer user's sub), else the JWT sub,
+ * "apikey" for the shared X-Api-Key, undefined when anonymous. Never the
+ * secret.
  */
 export function principalOf(c: Context): string | undefined {
+  const fromContext = requestContext.getStore()?.principal;
+  if (fromContext) return fromContext;
   const user = c.get("user") as { user_id?: string } | undefined;
   if (user?.user_id) return user.user_id;
   return c.req.header("x-api-key") ? "apikey" : undefined;

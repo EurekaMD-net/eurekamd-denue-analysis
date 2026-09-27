@@ -163,8 +163,8 @@ describe("createServer — edge limits", () => {
   });
 
   it("a bearer user's nested Sage dispatch carrying the key is NOT exempt", async () => {
-    // Fails on 9966f0f: server.ts passed `exempt: isPriorityPrincipal`,
-    // which read the raw x-api-key header, so call 21 below was a 400.
+    // Fails on 9966f0f: its limiters exempted on the raw x-api-key header
+    // (the since-removed isPriorityPrincipal), so call 21 below was a 400.
     // Sage's dispatcher re-enters the app with the shared key inside the
     // browser user's (non-priority) request context.
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -180,5 +180,35 @@ describe("createServer — edge limits", () => {
     });
     expect(statuses.slice(0, 20).every((s) => s === 400)).toBe(true);
     expect(statuses[20]).toBe(429);
+  });
+
+  it("nested Sage dispatches are metered per browser user, not in one shared bucket", async () => {
+    // Fails on 4fed1e3: auth.ts set `principal: "apikey"` on the nested
+    // path and principalOf ignored the context, so both users landed in
+    // `p:apikey|ip:unknown` and user-2's first call was already a 429.
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const app = createServer(TEST_CONFIG);
+    const nested = (user: string, n: number) =>
+      requestContext.run({ principal: user, priority: false }, async () => {
+        const statuses: number[] = [];
+        for (let i = 0; i < n; i++) {
+          const res = await app.request("/analytics/ageb-detail", {
+            headers: { "X-Api-Key": "test-key" },
+          });
+          statuses.push(res.status);
+        }
+        return statuses;
+      });
+    for (const user of ["user-1", "user-2"]) {
+      expect(await nested(user, 20)).toEqual(Array(20).fill(400));
+    }
+    expect(await nested("user-1", 1)).toEqual([429]);
+    // A direct X-Api-Key call (Jarvis) is still exempt.
+    for (let i = 0; i < 25; i++) {
+      const res = await app.request("/analytics/ageb-detail", {
+        headers: { "X-Api-Key": "test-key" },
+      });
+      expect(res.status).toBe(400);
+    }
   });
 });

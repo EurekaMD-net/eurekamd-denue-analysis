@@ -19,7 +19,8 @@
  * ../request-context.ts): the X-Api-Key path is the priority tier (its DB
  * queries jump the psql queue and get a longer timeout), the JWT path is
  * not. A nested in-process request (Sage's dispatcher re-enters the app
- * with the shared key) never escalates: it inherits the outer priority.
+ * with the shared key) never escalates: it inherits the outer principal
+ * and priority, so it is metered and queued as the user who asked.
  */
 
 import type { MiddlewareHandler } from "hono";
@@ -102,7 +103,10 @@ export function makeAuthMiddleware(
     }
     const outer = requestContext.getStore();
     return requestContext.run(
-      { principal: "apikey", priority: outer ? outer.priority : true },
+      {
+        principal: outer?.principal ?? "apikey",
+        priority: outer ? outer.priority : true,
+      },
       next,
     );
   };

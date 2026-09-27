@@ -274,7 +274,7 @@ describe("makeAuthMiddleware — request context (priority tier)", () => {
     expect(await res.json()).toEqual({ principal: "user-1", priority: false });
   });
 
-  it("a nested api-key request inherits a non-priority outer context", async () => {
+  it("a nested api-key request inherits the outer principal and priority", async () => {
     // Sage's dispatcher re-enters the app with the shared key on behalf of
     // a browser user; that must not escalate the user's queries.
     const app = ctxApp();
@@ -282,6 +282,6 @@ describe("makeAuthMiddleware — request context (priority tier)", () => {
       { principal: "user-1", priority: false },
       () => app.request("/", { headers: { "X-Api-Key": TEST_KEY } }),
     );
-    expect(await res.json()).toEqual({ principal: "apikey", priority: false });
+    expect(await res.json()).toEqual({ principal: "user-1", priority: false });
   });
 });
