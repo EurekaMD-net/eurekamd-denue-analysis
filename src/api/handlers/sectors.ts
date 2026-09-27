@@ -4,14 +4,16 @@
  * Returns one entry per 2-digit SCIAN sector that actually appears in the
  * loaded data, with the official INEGI name + national row count.
  *
- * SCIAN source: the indexed `sector_actividad_id` column on
- * `establecimientos` (backfilled from CLEE chars 6-7 by
- * src/db/loader.ts:deriveScian). See src/db/scian_2digit_names.json
- * for the human-readable catalog.
+ * SCIAN source: `sector_actividad_id`, summed from mv_sector_summary
+ * (scripts/migrations/021-summary-mvs.sql) — audit #99: the live GROUP BY
+ * over 6.1M establecimientos rows took 0.4-4.7 s per request. See
+ * src/db/scian_2digit_names.json for the human-readable catalog.
  *
  * Implementation: shells to docker exec psql for the GROUP BY since
  * PostgREST can't express GROUP-BY aggregates over a column without
  * a server-side RPC. Same pattern as src/analysis/cluster-by-sector.ts.
+ * The counts change only on reload + MV refresh, so they are memoized
+ * in-process for SECTOR_COUNTS_TTL_MS and sent with a 1 h Cache-Control.
  */
 
 import { readFileSync } from "node:fs";
@@ -55,11 +57,23 @@ export function _resetScianCache(): void {
   cachedNames = null;
 }
 
+const SECTOR_COUNTS_TTL_MS = 60 * 60 * 1000;
+let cachedCounts: { at: number; counts: Array<[string, number]> } | null =
+  null;
+
+/** Reset the sector-counts memo. For tests only. */
+export function _resetSectorCountsCache(): void {
+  cachedCounts = null;
+}
+
 export async function sectorsHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const counts = await fetchSectorCounts(config);
+  if (!cachedCounts || Date.now() - cachedCounts.at > SECTOR_COUNTS_TTL_MS) {
+    cachedCounts = { at: Date.now(), counts: await fetchSectorCounts(config) };
+  }
+  const counts = cachedCounts.counts;
   const names = loadScianNames();
 
   // Only emit sectors that are BOTH in the catalog and present in data.
@@ -74,6 +88,8 @@ export async function sectorsHandler(
   sectors.sort((a, b) => b.national_count - a.national_count);
 
   const payload: SectorsResult = { sectors };
+  c.header("Cache-Control", "private, max-age=3600");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(payload);
 }
 
@@ -81,13 +97,13 @@ async function fetchSectorCounts(
   config: ApiServerConfig,
 ): Promise<Array<[string, number]>> {
   assertSafeContainer(config.dbContainer);
-  // sector_actividad_id is backfilled from CLEE chars 6-7 (see
-  // src/db/loader.ts:deriveScian). The btree idx_estab_sector index makes
-  // this GROUP BY fast — no SUBSTR scan needed.
+  // mv_sector_summary holds one row per (entidad, sector, clase), so the
+  // national count per sector is a SUM over ~30k rows, not a 6.1M-row scan.
+  // A missing MV surfaces as 502 postgres.error (migration 021 not applied).
   const sql =
     "SELECT json_agg(row_to_json(t)) FROM (" +
-    "  SELECT sector_actividad_id AS scian, COUNT(*)::bigint AS count" +
-    "  FROM establecimientos" +
+    "  SELECT sector_actividad_id AS scian, SUM(total)::bigint AS count" +
+    "  FROM mv_sector_summary" +
     "  WHERE sector_actividad_id IS NOT NULL" +
     "  GROUP BY 1" +
     "  ORDER BY 1" +

@@ -83,7 +83,10 @@ function rowToFeature(row: Record<string, unknown>): GeoJsonFeature {
 /**
  * Exporta establecimientos como GeoJSON FeatureCollection.
  *
- * Pagina sobre /rest/v1/establecimientos en lotes de 1000.
+ * Pagina sobre /rest/v1/establecimientos en lotes de 1000, por llave
+ * (`order=clee.asc&clee=gt.<último>`, audit #47): sin ORDER BY las páginas
+ * por OFFSET se traslapan o saltan filas. El conteo exacto se pide solo en
+ * la primera página.
  * Para entidades grandes (CDMX ~600k) esto puede tardar varios minutos.
  */
 export async function exportGeoJson(
@@ -97,16 +100,16 @@ export async function exportGeoJson(
     apikey: serviceRoleKey,
     Authorization: `Bearer ${serviceRoleKey}`,
     "Content-Type": "application/json",
-    Prefer: "count=exact",
   };
 
   const PAGE_SIZE = 1000;
   const features: GeoJsonFeature[] = [];
-  let offset = 0;
+  let fetched = 0;
+  let lastClee: string | null = null;
   let totalRows = Infinity;
   let withoutGeometry = 0;
 
-  while (offset < totalRows) {
+  while (fetched < totalRows) {
     const remaining = limit !== null ? limit - features.length : PAGE_SIZE;
     if (remaining <= 0) break;
 
@@ -114,9 +117,13 @@ export async function exportGeoJson(
 
     const params = new URLSearchParams({
       select: COLUMNS,
+      order: "clee.asc",
       limit: String(pageLimit),
-      offset: String(offset),
     });
+
+    if (lastClee !== null) {
+      params.set("clee", `gt.${lastClee}`);
+    }
 
     if (entidad) {
       params.set("entidad", `eq.${entidad}`);
@@ -129,14 +136,17 @@ export async function exportGeoJson(
     }
 
     const url = `${supabaseUrl}/rest/v1/establecimientos?${params.toString()}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, {
+      headers:
+        lastClee === null ? { ...headers, Prefer: "count=exact" } : headers,
+    });
 
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`exportGeoJson: PostgREST returned HTTP ${res.status}: ${body}`);
     }
 
-    if (offset === 0) {
+    if (lastClee === null) {
       const contentRange = res.headers.get("content-range");
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
@@ -153,7 +163,8 @@ export async function exportGeoJson(
       if (feature.geometry === null) withoutGeometry++;
     }
 
-    offset += PAGE_SIZE;
+    lastClee = String(page[page.length - 1]!["clee"]);
+    fetched += page.length;
     if (page.length < pageLimit) break;
   }
 

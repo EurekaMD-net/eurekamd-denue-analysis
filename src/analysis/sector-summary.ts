@@ -1,8 +1,9 @@
 /**
  * Runner: Sector Summary
  *
- * Consulta la tabla establecimientos y agrupa por clase_actividad_id,
- * retornando los top-N sectores por número de establecimientos.
+ * Lee mv_sector_summary (una fila por entidad + sector + clase_actividad_id,
+ * scripts/migrations/021-summary-mvs.sql) y retorna los top-N
+ * clase_actividad_id por número de establecimientos.
  *
  * Usa la REST API de PostgREST (no docker exec) porque es una lectura
  * simple que no requiere SQL arbitrario.
@@ -20,13 +21,11 @@ export interface SectorSummaryOptions {
 /**
  * Obtiene el conteo de establecimientos agrupado por clase_actividad_id.
  *
- * Implementación: descarga todos los establecimientos filtrados (proyectando
- * solo clase_actividad_id + clase_actividad) y agrupa en JS.
- * PostgREST no soporta GROUP BY nativo en /rest/v1, así que usamos
- * el endpoint con select proyectado + paginación para no desbordar memoria.
- *
- * Para volúmenes > 500k se recomienda migrar a una vista materializada
- * y leer desde /rest/v1/sector_summary_mv.
+ * Implementación: pagina mv_sector_summary (~30k filas a nivel nacional, en
+ * vez de 6.1M establecimientos — audit #47) ordenado por su llave única, de
+ * modo que las páginas no se traslapan, y suma `total` por
+ * clase_actividad_id en JS (a nivel nacional una clase aparece una vez por
+ * entidad).
  */
 export async function sectorSummary(
   config: AnalysisConfig,
@@ -39,18 +38,16 @@ export async function sectorSummary(
     apikey: serviceRoleKey,
     Authorization: `Bearer ${serviceRoleKey}`,
     "Content-Type": "application/json",
-    // Ask PostgREST for exact total count
-    Prefer: "count=exact",
   };
 
   const PAGE_SIZE = 1000;
   const counts = new Map<string, { nombre: string | null; n: number }>();
   let offset = 0;
-  let totalRows = Infinity;
 
-  while (offset < totalRows) {
+  for (;;) {
     const params = new URLSearchParams({
-      select: "clase_actividad_id,clase_actividad",
+      select: "clase_actividad_id,clase_actividad,total",
+      order: "entidad.asc,sector_actividad_id.asc,clase_actividad_id.asc",
       limit: String(PAGE_SIZE),
       offset: String(offset),
     });
@@ -59,7 +56,7 @@ export async function sectorSummary(
       params.set("entidad", `eq.${entidad}`);
     }
 
-    const url = `${supabaseUrl}/rest/v1/establecimientos?${params.toString()}`;
+    const url = `${supabaseUrl}/rest/v1/mv_sector_summary?${params.toString()}`;
     const res = await fetch(url, { headers });
 
     if (!res.ok) {
@@ -67,31 +64,20 @@ export async function sectorSummary(
       throw new Error(`sectorSummary: PostgREST returned HTTP ${res.status}: ${body}`);
     }
 
-    // Extract total count from Content-Range header on first page
-    if (offset === 0) {
-      const contentRange = res.headers.get("content-range");
-      if (contentRange) {
-        const match = contentRange.match(/\/(\d+)$/);
-        if (match) {
-          totalRows = parseInt(match[1]!, 10);
-        }
-      }
-    }
-
     const page = (await res.json()) as Array<{
       clase_actividad_id: string | null;
       clase_actividad: string | null;
+      total: number | string;
     }>;
-
-    if (page.length === 0) break;
 
     for (const row of page) {
       const key = row.clase_actividad_id ?? "__unknown__";
+      const n = Number(row.total);
       const existing = counts.get(key);
       if (existing) {
-        existing.n += 1;
+        existing.n += n;
       } else {
-        counts.set(key, { nombre: row.clase_actividad, n: 1 });
+        counts.set(key, { nombre: row.clase_actividad, n });
       }
     }
 

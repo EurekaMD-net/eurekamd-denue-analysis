@@ -12,6 +12,7 @@ vi.mock("node:child_process", async () =>
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
+import { _resetSummarySectorCache } from "./summary-sector.js";
 
 const CONFIG: ApiServerConfig = {
   supabaseUrl: "http://localhost:8100",
@@ -26,6 +27,7 @@ const AUTH = { "X-Api-Key": "key" };
 // what used to call a throwing mock after the test ("Error: boom").
 beforeEach(() => {
   mockExec.mockReset();
+  _resetSummarySectorCache();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -66,6 +68,32 @@ describe("GET /summary/sector/:scian", () => {
     // never come back via this path.
     expect(sql).toMatch(/sector_actividad_id = '46'/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
+  });
+
+  it("sums mv_sector_summary instead of scanning establecimientos (audit #98)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/summary/sector/46", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/FROM mv_sector_summary/);
+    expect(sql).toMatch(/SUM\(total\)/);
+    expect(sql).not.toMatch(/FROM establecimientos/);
+  });
+
+  it("memoizes per SCIAN and sends a 1 h private Cache-Control (audit #98)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([{ entidad: "09", count: 5 }]));
+    const app = createServer(CONFIG);
+    const first = await app.request("/summary/sector/46", { headers: AUTH });
+    await app.request("/summary/sector/46", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledOnce();
+    expect(first.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(first.headers.get("vary")).toMatch(/X-Api-Key/);
+    // A different SCIAN is its own cache entry.
+    await app.request("/summary/sector/62", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    const sql = (mockExec.mock.calls[1]?.[1] as string[]).at(-1) ?? "";
+    expect(sql).toMatch(/sector_actividad_id = '62'/);
   });
 
   it("returns 400 on invalid SCIAN (not 2 digits)", async () => {

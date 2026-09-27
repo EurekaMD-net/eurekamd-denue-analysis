@@ -3,7 +3,8 @@
 #
 # Run after any loader pass that changes establecimientos / sesnsp /
 # mortalidad / sict / sedatu / cnbv:
-#   - DENUE pipeline reload         → mv_sector_grade_matrix, mv_national_treemap, mv_coverage
+#   - DENUE pipeline reload         → mv_sector_grade_matrix, mv_national_treemap, mv_coverage,
+#                                     mv_estrato_por_entidad, mv_sector_summary
 #   - SESNSP loader (load-sesnsp.ts) → mv_delitos_municipal_yearly
 #   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
@@ -78,6 +79,14 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY mv_mortalidad_municipal_yearly;
 
 \echo Refreshing mv_sinba_morbidity_municipal...
 REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sinba_morbidity_municipal;
+
+-- ===== Mid-cost (full establecimientos GROUP BY, like mv_coverage) =====
+
+\echo Refreshing mv_estrato_por_entidad...
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_estrato_por_entidad;
+
+\echo Refreshing mv_sector_summary...
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sector_summary;
 
 -- ===== Mid-cost (~22s) =====
 

@@ -155,6 +155,41 @@ describe("exportGeoJson", () => {
     await expect(exportGeoJson(CONFIG)).rejects.toThrow(/HTTP 500/);
   });
 
+  it("pagina por llave clee (order + gt) y pide count=exact solo en la primera página (audit #47)", async () => {
+    const page1 = Array.from({ length: 1000 }, (_, i) => ({
+      ...ROW_WITH_COORDS,
+      clee: `06${String(i).padStart(6, "0")}`,
+    }));
+    const page2 = [{ ...ROW_WITH_COORDS, clee: "06999999" }];
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(mockEstabResponse(page1, 1001))
+      .mockResolvedValueOnce(mockEstabResponse(page2, 1001, 1000));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await exportGeoJson(CONFIG, { entidad: "06" });
+
+    expect(result.total).toBe(1001);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const [url1, init1] = mockFetch.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    const [url2, init2] = mockFetch.mock.calls[1] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    const p1 = new URL(url1).searchParams;
+    const p2 = new URL(url2).searchParams;
+    expect(p1.get("order")).toBe("clee.asc");
+    expect(p1.get("clee")).toBeNull();
+    expect(p1.get("offset")).toBeNull();
+    expect(p2.get("clee")).toBe("gt.06000999");
+    expect(p2.get("offset")).toBeNull();
+    expect(init1.headers["Prefer"]).toBe("count=exact");
+    expect(init2.headers["Prefer"]).toBeUndefined();
+  });
+
   it("fixture real: 5 records del fixture generan 5 features con geometría", () => {
     // Usamos transform() para convertir el fixture a rows como si vinieran de Supabase
     const fixtureData = JSON.parse(

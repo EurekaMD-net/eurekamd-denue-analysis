@@ -13,7 +13,10 @@
  * that whole bug class impossible by construction.
  *
  * Implementation: shell to psql like sectors.ts / cluster-by-sector.ts.
- * One query returns the full per-entidad breakdown via json_agg.
+ * One query returns the full per-entidad breakdown via json_agg, summed
+ * from mv_sector_summary (audit #98: the live GROUP BY over establecimientos
+ * took 6-14 s per sector). Results change only on reload + MV refresh, so
+ * they are memoized per SCIAN for SECTOR_TTL_MS with a 1 h Cache-Control.
  */
 
 import type { Context } from "hono";
@@ -27,6 +30,17 @@ import {
 import { assertSafeContainer } from "./_safe-container.js";
 
 const TOP_ENTIDADES_LIMIT = 10;
+const SECTOR_TTL_MS = 60 * 60 * 1000;
+
+const cache = new Map<
+  string,
+  { at: number; counts: Array<{ entidad: string; count: number }> }
+>();
+
+/** Reset the per-SCIAN memo. For tests only. */
+export function _resetSummarySectorCache(): void {
+  cache.clear();
+}
 
 export async function summarySectorHandler(
   c: Context,
@@ -41,7 +55,12 @@ export async function summarySectorHandler(
     );
   }
 
-  const counts = await fetchPerEntidadCounts(config, scian);
+  let hit = cache.get(scian);
+  if (!hit || Date.now() - hit.at > SECTOR_TTL_MS) {
+    hit = { at: Date.now(), counts: await fetchPerEntidadCounts(config, scian) };
+    cache.set(scian, hit);
+  }
+  const counts = hit.counts;
   const total_national = counts.reduce((s, x) => s + x.count, 0);
   const top_entidades = [...counts]
     .sort((a, b) => b.count - a.count)
@@ -52,6 +71,8 @@ export async function summarySectorHandler(
     total_national,
     top_entidades,
   };
+  c.header("Cache-Control", "private, max-age=3600");
+  c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
 }
 
@@ -62,12 +83,12 @@ async function fetchPerEntidadCounts(
   assertSafeContainer(config.dbContainer);
   // scian is regex-validated (^[0-9]{2}$) BEFORE reaching here, so the
   // single-quote interpolation cannot escape into SQL.
-  // Uses sector_actividad_id (backfilled from CLEE chars 6-7) to hit the
-  // idx_estab_sector btree — much faster than a SUBSTR scan.
+  // Sums mv_sector_summary (one row per entidad/sector/clase) instead of
+  // scanning establecimientos. A missing MV surfaces as 502 postgres.error.
   const sql =
     "SELECT json_agg(row_to_json(t)) FROM (" +
-    "  SELECT entidad, COUNT(*)::bigint AS count" +
-    "  FROM establecimientos" +
+    "  SELECT entidad, SUM(total)::bigint AS count" +
+    "  FROM mv_sector_summary" +
     `  WHERE sector_actividad_id = '${scian}'` +
     "  GROUP BY entidad" +
     "  ORDER BY entidad" +

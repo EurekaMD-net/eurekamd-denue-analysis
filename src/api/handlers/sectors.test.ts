@@ -12,7 +12,7 @@ vi.mock("node:child_process", async () =>
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig, SectorsResult } from "../types.js";
-import { _resetScianCache } from "./sectors.js";
+import { _resetScianCache, _resetSectorCountsCache } from "./sectors.js";
 
 const CONFIG: ApiServerConfig = {
   supabaseUrl: "http://localhost:8100",
@@ -25,6 +25,7 @@ const AUTH = { "X-Api-Key": "key" };
 beforeEach(() => {
   mockExec.mockReset();
   _resetScianCache();
+  _resetSectorCountsCache();
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -82,6 +83,42 @@ describe("GET /sectors", () => {
     const sql = argList[argList.length - 1];
     expect(sql).toMatch(/sector_actividad_id/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
+  });
+
+  it("sums mv_sector_summary instead of scanning establecimientos (audit #99)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/sectors", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/FROM mv_sector_summary/);
+    expect(sql).toMatch(/SUM\(total\)/);
+    expect(sql).not.toMatch(/FROM establecimientos/);
+  });
+
+  it("memoizes the counts and sends a 1 h private Cache-Control (audit #99)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 100 }]));
+    const app = createServer(CONFIG);
+    const first = await app.request("/sectors", { headers: AUTH });
+    const second = await app.request("/sectors", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledOnce();
+    expect(first.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(first.headers.get("vary")).toMatch(/X-Api-Key/);
+    const body = (await second.json()) as SectorsResult;
+    expect(body.sectors[0]?.national_count).toBe(100);
+  });
+
+  it("does not memoize a failed query", async () => {
+    mockExec.mockImplementationOnce(() => {
+      throw new Error("relation does not exist");
+    });
+    mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 7 }]));
+    const app = createServer(CONFIG);
+    const failed = await app.request("/sectors", { headers: AUTH });
+    expect(failed.status).toBe(502);
+    const ok = await app.request("/sectors", { headers: AUTH });
+    expect(ok.status).toBe(200);
+    expect(mockExec).toHaveBeenCalledTimes(2);
   });
 
   it("statement_timeout reaches the container via docker exec -e (audit #94/#130)", async () => {

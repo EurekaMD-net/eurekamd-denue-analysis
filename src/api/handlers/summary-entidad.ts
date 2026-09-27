@@ -35,8 +35,14 @@ export async function summaryEntidadHandler(
     );
   }
 
-  // 1. Loaded count (from mv_coverage, falls back to direct count)
-  const loaded = await fetchLoadedCount(config, clave);
+  // 1. Loaded count (from mv_coverage, falls back to direct count),
+  // 3. top sectors + 4. estrato distribution — all three in parallel
+  // (audit #107).
+  const [loaded, top_sectors, estrato_distribution] = await Promise.all([
+    fetchLoadedCount(config, clave),
+    fetchTopSectors(config, clave),
+    fetchEstratoDistribution(config, clave),
+  ]);
 
   // 2. INEGI authoritative count (from JSON file)
   const inegi = loadInegiCounts();
@@ -46,12 +52,6 @@ export async function summaryEntidadHandler(
       ? Number(((loaded / inegi_total) * 100).toFixed(2))
       : null;
   const status = statusFor(loaded, inegi_total);
-
-  // 3. Top sectors + 4. Estrato distribution — fire in parallel
-  const [top_sectors, estrato_distribution] = await Promise.all([
-    fetchTopSectors(config, clave),
-    fetchEstratoDistribution(config, clave),
-  ]);
 
   const result: EntidadSummaryResult = {
     entidad: clave,
@@ -80,6 +80,15 @@ async function fetchLoadedCount(
   if (res.ok) {
     const rows = (await res.json()) as Array<{ loaded: number | string }>;
     if (rows.length > 0) return Number(rows[0]!.loaded);
+  } else if (res.status !== 404) {
+    // Audit #55: mirror /entidades — only a missing mv_coverage (404) falls
+    // back; a real PostgREST error must not read as a slow, possibly 0 count.
+    const body = await res.text();
+    throw new HttpError(
+      `mv_coverage returned HTTP ${res.status}: ${body.slice(0, 200)}`,
+      502,
+      "postgrest.error",
+    );
   }
 
   // Fallback: direct count via Range header
@@ -102,7 +111,15 @@ async function fetchLoadedCount(
   }
   const cr = fb.headers.get("content-range") ?? "";
   const m = cr.match(/\/(\d+)$/);
-  return m ? parseInt(m[1]!, 10) : 0;
+  if (!m) {
+    // Audit #55: no total means no count, not loaded=0 (which reads as red).
+    throw new HttpError(
+      `establecimientos count for ${clave} returned no Content-Range total`,
+      502,
+      "postgrest.error",
+    );
+  }
+  return parseInt(m[1]!, 10);
 }
 
 async function fetchTopSectors(
@@ -118,10 +135,9 @@ async function fetchTopSectors(
       Authorization: `Bearer ${config.serviceRoleKey}`,
     },
   });
-  // Audit W5: only 404 (mv missing — operator hasn't applied views yet) is
-  // silently empty. Real errors (500/502/etc) propagate so a dashboard
-  // doesn't read "no top sectors" when PostgREST is actually down.
-  if (res.status === 404) return [];
+  // Audit #39/#132: a 404 means the MV is not deployed (migration 021).
+  // Say so instead of returning [], which reads as "no sectors".
+  if (res.status === 404) throw mvMissing("mv_sector_summary");
   if (!res.ok) {
     const body = await res.text();
     throw new HttpError(
@@ -153,8 +169,8 @@ async function fetchEstratoDistribution(
       Authorization: `Bearer ${config.serviceRoleKey}`,
     },
   });
-  // Audit W5: same as fetchTopSectors — 404 = silent, others propagate
-  if (res.status === 404) return [];
+  // Audit #39/#132: same as fetchTopSectors — 404 = MV not deployed.
+  if (res.status === 404) throw mvMissing("mv_estrato_por_entidad");
   if (!res.ok) {
     const body = await res.text();
     throw new HttpError(
@@ -168,4 +184,12 @@ async function fetchEstratoDistribution(
     total: number | string;
   }>;
   return rows.map((r) => ({ estrato: r.estrato, count: Number(r.total) }));
+}
+
+function mvMissing(view: string): HttpError {
+  return new HttpError(
+    `${view} is missing — apply scripts/migrations/021-summary-mvs.sql`,
+    502,
+    "mv.missing",
+  );
 }
