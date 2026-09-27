@@ -69,7 +69,7 @@ export function buildRouterUserPrompt(
   sections.push("# Available endpoints\n");
   for (const ep of endpoints) {
     sections.push(
-      `- **${ep.name}**: ${ep.description}\n  Params: ${JSON.stringify(ep.params_schema.properties)}`,
+      `- **${ep.name}**: ${ep.description}\n  Params: ${JSON.stringify(ep.params_schema)}`,
     );
   }
 
@@ -77,6 +77,39 @@ export function buildRouterUserPrompt(
   sections.push(sqlSchemaSummary);
 
   return sections.join("\n\n");
+}
+
+// Hard backstop on the rows block of the narrative prompt. The digest is
+// already capped at 4 KB of JSON upstream; this bounds any caller that
+// hands in a bigger digest.
+export const NARRATIVE_ROWS_MAX_BYTES = 8192;
+
+function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Rows as CSV with one header line (keys are not repeated per row). */
+export function rowsToCsv(columns: string[], rows: unknown[]): string {
+  const lines = [columns.map(csvCell).join(",")];
+  for (const r of rows) {
+    const o = r !== null && typeof r === "object" ? r : { value: r };
+    lines.push(
+      columns
+        .map((c) => csvCell((o as Record<string, unknown>)[c]))
+        .join(","),
+    );
+  }
+  let out = "";
+  for (const line of lines) {
+    if (out.length + line.length + 1 > NARRATIVE_ROWS_MAX_BYTES) {
+      const room = NARRATIVE_ROWS_MAX_BYTES - out.length;
+      return `${out}${line.slice(0, room)}… (truncated)`;
+    }
+    out += `${line}\n`;
+  }
+  return out.slice(0, -1);
 }
 
 export function buildNarrativeUserPrompt(
@@ -87,6 +120,7 @@ export function buildNarrativeUserPrompt(
     row_count: number;
     first_n_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    context?: Record<string, unknown>;
   },
   history: PriorTurnDigest[],
 ): string {
@@ -106,12 +140,12 @@ export function buildNarrativeUserPrompt(
   );
 
   sections.push(
-    `# Result digest\n\nRow count: ${digest.row_count}\nColumns: ${digest.columns.join(", ")}\n\nFirst rows:\n\`\`\`json\n${JSON.stringify(digest.first_n_rows, null, 2)}\n\`\`\``,
+    `# Result digest\n\nRow count: ${digest.row_count}\nColumns: ${digest.columns.join(", ")}${digest.context ? `\nContext: ${JSON.stringify(digest.context).slice(0, 1024)}` : ""}\n\nFirst rows (${digest.first_n_rows.length} shown):\n\`\`\`csv\n${rowsToCsv(digest.columns, digest.first_n_rows)}\n\`\`\``,
   );
 
   if (digest.numeric_stats) {
     sections.push(
-      `# Numeric stats\n\n\`\`\`json\n${JSON.stringify(digest.numeric_stats, null, 2)}\n\`\`\``,
+      `# Numeric stats\n\n\`\`\`json\n${JSON.stringify(digest.numeric_stats)}\n\`\`\``,
     );
   }
 

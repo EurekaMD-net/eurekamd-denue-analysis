@@ -34,7 +34,7 @@ export type DispatchResult = DispatchSuccess | DispatchFailure;
 // Map from spec name → server-side path template. Strings inside `{…}`
 // are placeholders filled from params; the rest go into the query
 // string. Centralized here so the catalog stays free of paths.
-const ENDPOINT_PATHS: Record<string, string> = {
+export const ENDPOINT_PATHS: Record<string, string> = {
   entidades: "/entidades",
   sectors: "/sectors",
   "summary-entidad": "/summary/entidad/{clave}",
@@ -65,6 +65,20 @@ const ENDPOINT_PATHS: Record<string, string> = {
   "municipio-detail": "/analytics/municipio-detail",
   "entidad-detail": "/analytics/entidad-detail",
 };
+
+// Endpoints that return ONE record (nested layer objects, sometimes with
+// small sample arrays such as ageb-detail's top_sectors). Their digest is
+// the record flattened one level, never one of its sample arrays.
+const SINGLE_RECORD_ENDPOINTS = new Set([
+  "ageb-detail",
+  "municipio-detail",
+  "entidad-detail",
+  "locality-detail",
+]);
+
+export function isSingleRecordEndpoint(endpointName: string): boolean {
+  return SINGLE_RECORD_ENDPOINTS.has(endpointName);
+}
 
 export function buildEndpointPath(
   endpointName: string,
@@ -101,14 +115,29 @@ export async function dispatchEndpoint(
   apiKey: string,
   route: RouteOutputEndpoint,
 ): Promise<DispatchResult> {
-  const inCatalog = SAGE_ENDPOINT_CATALOG.some(
+  const spec = SAGE_ENDPOINT_CATALOG.find(
     (e) => e.name === route.endpoint_name,
   );
-  if (!inCatalog) {
+  if (!spec) {
     return {
       ok: false,
       code: "ENDPOINT_NOT_IN_CATALOG",
       message: `Endpoint "${route.endpoint_name}" is not in the Sage catalog.`,
+    };
+  }
+
+  // Catalog `required` params are checked here, before app.fetch, so a
+  // missing query param is a self-correctable ENDPOINT_PARAM_MISSING and
+  // not an opaque 400 from the handler.
+  const missing = spec.params_schema.required?.find((k) => {
+    const v = route.params[k];
+    return v === undefined || v === null || v === "";
+  });
+  if (missing) {
+    return {
+      ok: false,
+      code: "ENDPOINT_PARAM_MISSING",
+      message: `Missing required param: ${missing}`,
     };
   }
 
@@ -141,6 +170,113 @@ export async function dispatchEndpoint(
   return { ok: true, body, status: res.status, endpoint_path: built.path };
 }
 
+// Byte budget for the rows a digest carries (narrative prompt + the
+// persisted first_5_rows). Rows are cut by this as well as by count.
+export const DIGEST_ROWS_MAX_BYTES = 4096;
+
+// ID-like columns are never numeric measures: no stats, no chart axis.
+export const ID_COLUMN_RE = /^(cve_|clave|cvegeo|scian|ranking)/i;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Normalize an endpoint/SQL body to rows + scalar context.
+ *   - bare array → rows
+ *   - keyed object ({entidades:[…]}, {cve_mun, series:[…]}, …) → the
+ *     largest top-level array of objects is the rows; scalar siblings
+ *     become `context`
+ *   - single record (singleRecord, or no array of objects) → one row,
+ *     nested objects flattened one level as `parent.child`
+ */
+export function normalizeBody(
+  body: unknown,
+  opts: { singleRecord?: boolean } = {},
+): { rows: unknown[]; context?: Record<string, unknown> } {
+  if (Array.isArray(body)) return { rows: body };
+  if (!isPlainObject(body)) return { rows: body === undefined ? [] : [body] };
+
+  if (!opts.singleRecord) {
+    let rowsKey: string | undefined;
+    for (const [k, v] of Object.entries(body)) {
+      if (
+        Array.isArray(v) &&
+        v.every(isPlainObject) &&
+        (rowsKey === undefined ||
+          v.length > (body[rowsKey] as unknown[]).length)
+      ) {
+        rowsKey = k;
+      }
+    }
+    if (rowsKey !== undefined) {
+      const context: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(body)) {
+        if (k !== rowsKey && (v === null || typeof v !== "object")) {
+          context[k] = v;
+        }
+      }
+      return {
+        rows: body[rowsKey] as unknown[],
+        context: Object.keys(context).length > 0 ? context : undefined,
+      };
+    }
+  }
+
+  const flat: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (isPlainObject(v)) {
+      for (const [ck, cv] of Object.entries(v)) flat[`${k}.${ck}`] = cv;
+    } else {
+      flat[k] = v;
+    }
+  }
+  return { rows: [flat] };
+}
+
+// Keep a row's entries, in order, while the serialized row fits `maxBytes`.
+function trimRow(row: unknown, maxBytes: number): unknown {
+  if (!isPlainObject(row)) {
+    return (JSON.stringify(row) ?? "null").slice(0, maxBytes);
+  }
+  const out: Record<string, unknown> = {};
+  let used = 2;
+  for (const [k, v] of Object.entries(row)) {
+    const size = JSON.stringify({ [k]: v }).length - 1;
+    if (used + size > maxBytes) continue;
+    out[k] = v;
+    used += size;
+  }
+  return out;
+}
+
+function capRows(rows: unknown[], maxRows: number, maxBytes: number) {
+  const out: unknown[] = [];
+  let used = 2;
+  for (const r of rows.slice(0, maxRows)) {
+    const size = (JSON.stringify(r) ?? "null").length + 1;
+    if (used + size > maxBytes) {
+      if (out.length === 0) out.push(trimRow(r, maxBytes));
+      break;
+    }
+    out.push(r);
+    used += size;
+  }
+  return out;
+}
+
+// Numeric value of a cell, or undefined when it is not a measure: NULL,
+// empty strings and zero-padded codes ("01001") are not numbers.
+function toMeasure(v: unknown): number | undefined {
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v !== "string" || v.length >= 32 || v.trim() === "") {
+    return undefined;
+  }
+  if (/^[-+]?0\d/.test(v.trim())) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * Build a digest from raw endpoint or SQL rows. The digest is what gets
  * passed to the narrative writer AND back to the router on subsequent
@@ -149,21 +285,15 @@ export async function dispatchEndpoint(
 export function buildDigest(
   rowsOrBody: unknown,
   firstN: number = 20,
+  opts: { singleRecord?: boolean } = {},
 ): {
   columns: string[];
   row_count: number;
   first_n_rows: unknown[];
   numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+  context?: Record<string, unknown>;
 } {
-  // Endpoint bodies are sometimes objects (composite endpoints) and
-  // sometimes {rows:[...]} or arrays. Normalize to "array of rows".
-  const rows: unknown[] = Array.isArray(rowsOrBody)
-    ? rowsOrBody
-    : rowsOrBody &&
-        typeof rowsOrBody === "object" &&
-        Array.isArray((rowsOrBody as Record<string, unknown>)["rows"])
-      ? ((rowsOrBody as Record<string, unknown>)["rows"] as unknown[])
-      : [rowsOrBody];
+  const { rows, context } = normalizeBody(rowsOrBody, opts);
 
   const columns = Array.from(
     new Set(
@@ -180,18 +310,21 @@ export function buildDigest(
     { min: number; max: number; mean: number }
   > = {};
   for (const col of columns) {
+    if (ID_COLUMN_RE.test(col)) continue;
     const vals: number[] = [];
+    let present = 0;
     for (const r of rows) {
       if (r && typeof r === "object") {
         const v = (r as Record<string, unknown>)[col];
-        if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
-        else if (typeof v === "string" && v.length < 32) {
-          const n = Number(v);
-          if (Number.isFinite(n)) vals.push(n);
-        }
+        if (v === null || v === undefined) continue;
+        present++;
+        const n = toMeasure(v);
+        if (n !== undefined) vals.push(n);
       }
     }
-    if (vals.length >= 2 && vals.length === rows.length) {
+    // NULLs are skipped, not counted as 0; every non-NULL cell must be
+    // a number for the column to be numeric.
+    if (vals.length >= 2 && vals.length === present) {
       const min = Math.min(...vals);
       const max = Math.max(...vals);
       const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
@@ -201,8 +334,9 @@ export function buildDigest(
   return {
     columns,
     row_count: rows.length,
-    first_n_rows: rows.slice(0, firstN),
+    first_n_rows: capRows(rows, firstN, DIGEST_ROWS_MAX_BYTES),
     numeric_stats:
       Object.keys(numericStats).length > 0 ? numericStats : undefined,
+    ...(context ? { context } : {}),
   };
 }

@@ -1,6 +1,35 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+
+const { mockDispatch, mockSql, mockAppendTurn } = vi.hoisted(() => ({
+  mockDispatch: vi.fn(),
+  mockSql: vi.fn(),
+  mockAppendTurn: vi.fn(),
+}));
+vi.mock("./dispatcher.js", async (orig) => ({
+  ...(await orig<typeof import("./dispatcher.js")>()),
+  dispatchEndpoint: mockDispatch,
+}));
+vi.mock("./sql-gate.js", async (orig) => ({
+  ...(await orig<typeof import("./sql-gate.js")>()),
+  executeGatedSql: mockSql,
+}));
+vi.mock("./thread-store.js", () => ({
+  createThread: () => "00000000-0000-0000-0000-000000000001",
+  getThread: () => [],
+  appendTurn: mockAppendTurn,
+  appendAudit: vi.fn(),
+  deleteThread: vi.fn(),
+}));
+
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
+import { pickChartType } from "./sage-handler.js";
+import { buildDigest, DIGEST_ROWS_MAX_BYTES } from "./dispatcher.js";
+import type {
+  NarrativeInput,
+  RouteOutput,
+  SageProvider,
+} from "./providers/provider.js";
 
 const CONFIG_NO_SAGE: ApiServerConfig = {
   supabaseUrl: "http://localhost:8100",
@@ -119,5 +148,150 @@ describe("/sage/query — max_rows defensive validation (R1 W3-sec)", () => {
       body: JSON.stringify({ question: "valid question", max_rows: 999999 }),
     });
     expect([400, 503]).toContain(res.status);
+  });
+});
+
+describe("pickChartType (audit #81)", () => {
+  it("never puts an ID or rank column on the y axis", () => {
+    const d = buildDigest([
+      { cve_ent: "02", nom_ent: "Baja California", ranking: "1", total: "40" },
+      { cve_ent: "17", nom_ent: "Morelos", ranking: "2", total: "30" },
+      { cve_ent: "09", nom_ent: "CDMX", ranking: "3", total: "20" },
+    ]);
+    expect(pickChartType(d)).toEqual({
+      chart_type: "bar",
+      x_col: "nom_ent",
+      y_col: "total",
+    });
+  });
+
+  it("draws a line for a numeric year column", () => {
+    const d = buildDigest([
+      { ano: 2022, total_defunciones: 5 },
+      { ano: 2023, total_defunciones: 7 },
+      { ano: 2024, total_defunciones: 6 },
+    ]);
+    expect(pickChartType(d)).toEqual({
+      chart_type: "line",
+      x_col: "ano",
+      y_col: "total_defunciones",
+    });
+  });
+});
+
+describe("/sage/query table + digest caps (audit #76/#87)", () => {
+  const usage = {
+    input_tokens: 1,
+    output_tokens: 1,
+    cost_usd: 0,
+    latency_ms: 1,
+    provider: "fake",
+    model: "fake",
+  };
+  function fakeProvider(route: RouteOutput) {
+    const narrativeInputs: NarrativeInput[] = [];
+    const provider: SageProvider = {
+      name: "fake",
+      routerModel: "fake",
+      narrativeModel: "fake",
+      routeAndDraft: async () => ({ output: route, usage }),
+      async *writeNarrativeStream(input: NarrativeInput) {
+        narrativeInputs.push(input);
+        yield { text: "ok", usage };
+      },
+      countTokens: () => 0,
+    };
+    return { provider, narrativeInputs };
+  }
+  function events(text: string) {
+    return text
+      .trim()
+      .split("\n\n")
+      .map((block) => {
+        const [ev, data] = block.split("\n");
+        return {
+          event: ev!.slice("event: ".length),
+          data: JSON.parse(data!.slice("data: ".length)) as Record<
+            string,
+            unknown
+          >,
+        };
+      });
+  }
+  async function ask(provider: SageProvider, body: object = {}) {
+    const app = createServer({ ...CONFIG_NO_SAGE, sageProvider: provider });
+    const res = await app.request("/sage/query", {
+      method: "POST",
+      headers: { ...AUTH, "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "serie de delitos", ...body }),
+    });
+    return events(await res.text());
+  }
+
+  it("endpoint route: keyed body is unwrapped; table carries up to 200 rows with truncated; narrative + persisted digest stay small", async () => {
+    const series = Array.from({ length: 250 }, (_, i) => ({
+      ano: 2015 + Math.floor(i / 12),
+      mes: (i % 12) + 1,
+      total: i,
+      nota: "n".repeat(60),
+    }));
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      endpoint_path: "/analytics/risk-trend?cve_mun=20067",
+      body: { cve_mun: "20067", municipio: "Oaxaca", series },
+    });
+    const { provider, narrativeInputs } = fakeProvider({
+      kind: "endpoint",
+      endpoint_name: "risk-trend",
+      params: { cve_mun: "20067" },
+      reasoning: "",
+      confidence: 1,
+    } as RouteOutput);
+    const evs = await ask(provider);
+    const table = evs.find((e) => e.event === "table")!.data;
+    expect(table.row_count).toBe(250);
+    expect((table.rows as unknown[]).length).toBe(200);
+    expect(table.truncated).toBe(true);
+    expect(evs.find((e) => e.event === "chart")?.data).toEqual({
+      chart_type: "line",
+      x_col: "ano",
+      y_col: "total",
+    });
+
+    const digest = narrativeInputs[0]!.digest;
+    expect(digest.row_count).toBe(250);
+    expect(digest.first_n_rows.length).toBeLessThanOrEqual(20);
+    expect(JSON.stringify(digest.first_n_rows).length).toBeLessThanOrEqual(
+      DIGEST_ROWS_MAX_BYTES,
+    );
+    const persisted = mockAppendTurn.mock.calls[0]![2] as {
+      digest: { row_count: number; first_5_rows: unknown[] };
+    };
+    expect(persisted.digest.row_count).toBe(250);
+    expect(persisted.digest.first_5_rows).toHaveLength(5);
+  });
+
+  it("SQL route: default cap is 200 (+1 probe row) and the table says when it was cut", async () => {
+    const rows = Array.from({ length: 201 }, (_, i) => ({
+      cve_mun: String(i).padStart(5, "0"),
+      total: String(i),
+    }));
+    mockSql.mockResolvedValue({
+      ok: true,
+      data: { rows, columns: ["cve_mun", "total"] },
+    });
+    const { provider } = fakeProvider({
+      kind: "sql",
+      sql: "SELECT cve_mun, total FROM x",
+      reasoning: "",
+      confidence: 1,
+    } as RouteOutput);
+    const evs = await ask(provider);
+    expect(mockSql.mock.calls[0]![1]).toMatchObject({ rowCap: 201 });
+    const table = evs.find((e) => e.event === "table")!.data;
+    expect((table.rows as unknown[]).length).toBe(200);
+    expect(table.row_count).toBe(200);
+    expect(table.truncated).toBe(true);
   });
 });

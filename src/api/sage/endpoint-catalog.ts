@@ -8,10 +8,19 @@
  * list — only routes the LLM should be allowed to call appear here.
  * Excluded: /tiles (binary), /health (no-op), /search (free-text, the
  * LLM should compose answers itself), /establishment/:clee (single-row,
- * usually a follow-up).
+ * usually a follow-up). The full exclusion list, with reasons, is in
+ * dispatcher.test.ts; that test fails when a new route is in neither.
  */
 
 import type { EndpointSpec } from "./providers/provider.js";
+import {
+  AGEBS_ORDER_BY,
+  COLONIAS_ORDER_BY,
+  LOCALITIES_ORDER_BY,
+  MANZANAS_ORDER_BY,
+  OPPORTUNITY_AGEB_ORDER_BY,
+  OPPORTUNITY_COLONIA_ORDER_BY,
+} from "../types.js";
 
 export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
   {
@@ -132,6 +141,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       type: "object",
       properties: {
         entidad: { type: "string" },
+        ano: {
+          type: "number",
+          description: "Año (default: más reciente cargado).",
+        },
       },
       required: ["entidad"],
     },
@@ -169,6 +182,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
         order_by: {
           type: "string",
           description: "establecimientos | farmacias | clues | area",
+          enum: [...AGEBS_ORDER_BY],
         },
         limit: { type: "number" },
       },
@@ -211,7 +225,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
           type: "string",
           description: "Códigos SCIAN coma-separados, todos del mismo tamaño.",
         },
-        order_by: { type: "string" },
+        order_by: { type: "string", enum: [...OPPORTUNITY_AGEB_ORDER_BY] },
         limit: { type: "number" },
         rezago_grado: {
           type: "string",
@@ -230,6 +244,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       properties: {
         cve_mun: { type: "string" },
         target_scian: { type: "string" },
+        order_by: {
+          type: "string",
+          enum: [...OPPORTUNITY_COLONIA_ORDER_BY],
+        },
+        limit: { type: "number" },
       },
       required: ["cve_mun", "target_scian"],
     },
@@ -239,7 +258,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Lista colonias DENUE en un municipio.",
     params_schema: {
       type: "object",
-      properties: { cve_mun: { type: "string" } },
+      properties: {
+        cve_mun: { type: "string" },
+        order_by: { type: "string", enum: [...COLONIAS_ORDER_BY] },
+        limit: { type: "number" },
+      },
       required: ["cve_mun"],
     },
   },
@@ -269,7 +292,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       type: "object",
       properties: {
         cvegeo: { type: "string" },
-        order_by: { type: "string" },
+        order_by: { type: "string", enum: [...MANZANAS_ORDER_BY] },
         limit: { type: "number" },
       },
       required: ["cvegeo"],
@@ -280,7 +303,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Colonias DENUE dentro de una AGEB.",
     params_schema: {
       type: "object",
-      properties: { cvegeo: { type: "string" } },
+      properties: {
+        cvegeo: { type: "string" },
+        limit: { type: "number" },
+      },
       required: ["cvegeo"],
     },
   },
@@ -298,7 +324,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Localidades INEGI en un municipio (rural/urbana).",
     params_schema: {
       type: "object",
-      properties: { cve_mun: { type: "string" } },
+      properties: {
+        cve_mun: { type: "string" },
+        order_by: { type: "string", enum: [...LOCALITIES_ORDER_BY] },
+        limit: { type: "number" },
+      },
       required: ["cve_mun"],
     },
   },
@@ -327,8 +357,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       "Detalle completo de una entidad: 6 capas estatales (CNBV Panorama estatal, CNBV Crédito estatal, SICT estatal, SEDATU estatal, ENIGH, ENOE).",
     params_schema: {
       type: "object",
-      properties: { clave: { type: "string" } },
-      required: ["clave"],
+      properties: {
+        cve_ent: { type: "string", description: "Clave 2-digit de entidad." },
+      },
+      required: ["cve_ent"],
     },
   },
 ];

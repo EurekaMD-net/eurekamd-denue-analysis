@@ -61,9 +61,12 @@ export interface SqlGateConfig {
   timeoutMs?: number;
   /** EXPLAIN cost rejection threshold. Default 5e6. */
   maxCost?: number;
-  /** Force LIMIT N at the outer level. Default 5000. */
+  /** Force LIMIT N at the outer level. Default DEFAULT_ROW_CAP. */
   rowCap?: number;
 }
+
+/** Outer LIMIT when the caller passes no rowCap. */
+export const DEFAULT_ROW_CAP = 200;
 
 // Forbidden keywords at the lexical level. Matched case-insensitively
 // outside string literals. Block list, not allow list, so legitimate
@@ -531,7 +534,7 @@ function sagePsqlArgs(): string[] {
  *   - BEGIN READ ONLY  (writes fail, including pg_net queue inserts)
  *   - SET LOCAL statement_timeout  (so runaway queries die)
  *   - ON_ERROR_STOP  (psql stops at the first failing statement)
- *   - Outer LIMIT 5000  (so result payload stays bounded)
+ *   - Outer LIMIT (default 200)  (so result payload stays bounded)
  *
  * We shell out to `docker exec ... psql` rather than using node-postgres
  * because the rest of the API already uses this pattern. The script goes
@@ -548,7 +551,7 @@ export async function executeGatedSql(
   const preErr = preCheckSql(sql);
   if (preErr) return { ok: false, error: preErr };
 
-  const rowCap = config.rowCap ?? 5000;
+  const rowCap = config.rowCap ?? DEFAULT_ROW_CAP;
   const timeoutMs = config.timeoutMs ?? 8000;
   const maxCost = config.maxCost ?? 5_000_000;
 
@@ -674,11 +677,14 @@ COMMIT;
 
 // Minimal CSV parser sufficient for psql COPY output. Handles
 // double-quoted fields, escaped quotes (""), and newlines inside
-// quoted values. Result rows are objects keyed by column name.
+// quoted values. Result rows are objects keyed by column name. COPY
+// writes NULL as an unquoted empty field and '' as `""`, so an unquoted
+// empty field parses to null and a quoted one to "".
 export function parseCsv(csv: string): SqlGateSuccess {
-  const rows: string[][] = [];
-  let cur: string[] = [];
+  const rows: (string | null)[][] = [];
+  let cur: (string | null)[] = [];
   let field = "";
+  let quoted = false;
   let inQuotes = false;
   let i = 0;
   while (i < csv.length) {
@@ -700,20 +706,23 @@ export function parseCsv(csv: string): SqlGateSuccess {
     }
     if (c === '"') {
       inQuotes = true;
+      quoted = true;
       i++;
       continue;
     }
     if (c === ",") {
-      cur.push(field);
+      cur.push(field === "" && !quoted ? null : field);
       field = "";
+      quoted = false;
       i++;
       continue;
     }
     if (c === "\n") {
-      cur.push(field);
+      cur.push(field === "" && !quoted ? null : field);
       rows.push(cur);
       cur = [];
       field = "";
+      quoted = false;
       i++;
       continue;
     }
@@ -724,20 +733,20 @@ export function parseCsv(csv: string): SqlGateSuccess {
     field += c;
     i++;
   }
-  if (field.length > 0 || cur.length > 0) {
-    cur.push(field);
+  if (field.length > 0 || quoted || cur.length > 0) {
+    cur.push(field === "" && !quoted ? null : field);
     rows.push(cur);
   }
   const header = rows[0] ?? [];
   const dataRows = rows.slice(1).filter((r) => r.length === header.length);
   const objects = dataRows.map((row) => {
-    const o: Record<string, string> = {};
+    const o: Record<string, string | null> = {};
     for (let j = 0; j < header.length; j++) {
-      o[header[j] ?? ""] = row[j] ?? "";
+      o[header[j] ?? ""] = row[j] ?? null;
     }
     return o;
   });
-  return { rows: objects, columns: header };
+  return { rows: objects, columns: header.map((h) => h ?? "") };
 }
 
 // Map Postgres errors to opaque codes so schema/role internals never

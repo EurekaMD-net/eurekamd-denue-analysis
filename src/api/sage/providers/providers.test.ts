@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { buildSageProvider } from "./index.js";
+import {
+  buildRouterUserPrompt,
+  buildNarrativeUserPrompt,
+  NARRATIVE_ROWS_MAX_BYTES,
+} from "./prompts.js";
+import { SAGE_ENDPOINT_CATALOG } from "../endpoint-catalog.js";
 
 describe("buildSageProvider — factory", () => {
   beforeEach(() => {
@@ -56,5 +62,59 @@ describe("buildSageProvider — factory", () => {
     expect(() =>
       buildSageProvider({ SAGE_PROVIDER: "definitely-not-real" }),
     ).toThrow(/Unknown SAGE_PROVIDER/);
+  });
+});
+
+describe("buildRouterUserPrompt — params schema (audit #86)", () => {
+  it("tells the model which params are required", () => {
+    const p = buildRouterUserPrompt("q", SAGE_ENDPOINT_CATALOG, [], "");
+    const line = p
+      .split("\n\n")
+      .find((s) => s.startsWith("- **opportunity-by-ageb**"));
+    expect(line).toContain('"required":["cve_mun","target_scian"]');
+  });
+});
+
+describe("buildNarrativeUserPrompt — rows block (audit #209/#76)", () => {
+  const route = { kind: "endpoint", endpoint_name: "municipios" };
+
+  it("renders rows as CSV with one header line, not pretty JSON", () => {
+    const p = buildNarrativeUserPrompt(
+      "q",
+      route,
+      {
+        columns: ["municipio", "total"],
+        row_count: 2,
+        first_n_rows: [
+          { municipio: "Oaxaca, centro", total: 10 },
+          { municipio: "Tlaxiaco", total: null },
+        ],
+        context: { entidad: "20" },
+      },
+      [],
+    );
+    expect(p).toContain(
+      '```csv\nmunicipio,total\n"Oaxaca, centro",10\nTlaxiaco,\n```',
+    );
+    expect(p).toContain('Context: {"entidad":"20"}');
+    expect(p).not.toContain('\n  {\n    "municipio"');
+  });
+
+  it("hard-caps the rows block whatever digest it is handed", () => {
+    const rows = Array.from({ length: 500 }, (_, i) => ({
+      id: i,
+      txt: "z".repeat(100),
+    }));
+    const p = buildNarrativeUserPrompt(
+      "q",
+      route,
+      { columns: ["id", "txt"], row_count: 500, first_n_rows: rows },
+      [],
+    );
+    const block = p.split("```csv\n")[1]!.split("\n```")[0]!;
+    expect(block.length).toBeLessThanOrEqual(
+      NARRATIVE_ROWS_MAX_BYTES + "… (truncated)".length,
+    );
+    expect(block.endsWith("… (truncated)")).toBe(true);
   });
 });

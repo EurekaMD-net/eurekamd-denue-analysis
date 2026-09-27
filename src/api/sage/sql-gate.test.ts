@@ -393,6 +393,14 @@ describe("parseCsv", () => {
     expect((out.rows[0] as Record<string, string>).a).toBe('he said "hi"');
   });
 
+  it("keeps NULL (unquoted empty) distinct from '' (quoted empty) (audit #81)", () => {
+    const out = parseCsv('a,b,c\n,"",x\n"",,\n');
+    expect(out.rows).toEqual([
+      { a: null, b: "", c: "x" },
+      { a: "", b: null, c: null },
+    ]);
+  });
+
   it("returns empty rows for header-only CSV", () => {
     const out = parseCsv("a,b\n");
     expect(out.columns).toEqual(["a", "b"]);
@@ -427,7 +435,8 @@ describe("executeGatedSql psql invocation", () => {
       const script = args[args.indexOf("-c") + 1]!;
       expect(script.startsWith("BEGIN READ ONLY;")).toBe(true);
       expect(script).not.toMatch(/SET\s+(LOCAL\s+)?ROLE/i);
-      expect(script).toContain("\n) AS sage_wrapped LIMIT 5000");
+      // Default outer cap is DEFAULT_ROW_CAP=200, not 5000 (audit #87).
+      expect(script).toContain("\n) AS sage_wrapped LIMIT 200");
     }
   });
 

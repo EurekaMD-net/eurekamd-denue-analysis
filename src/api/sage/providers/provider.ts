@@ -53,7 +53,10 @@ export interface EndpointSpec {
    */
   params_schema: {
     type: "object";
-    properties: Record<string, { type: string; description?: string }>;
+    properties: Record<
+      string,
+      { type: string; description?: string; enum?: string[] }
+    >;
     required?: string[];
   };
 }
@@ -93,6 +96,8 @@ export interface NarrativeInput {
     row_count: number;
     first_n_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    /** Scalar fields beside the rows array of a keyed endpoint body. */
+    context?: Record<string, unknown>;
   };
   /** Last N turns, for cohesion. */
   history: PriorTurnDigest[];

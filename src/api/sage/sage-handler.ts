@@ -4,7 +4,7 @@
  * Event sequence per turn:
  *   thread → { thread_id }       (always; first event)
  *   route  → RouteOutput payload (router decision)
- *   table  → { columns, rows }   (only if data was retrieved)
+ *   table  → { columns, rows, row_count, truncated } (only if data was retrieved)
  *   chart  → { chart_type, x_col, y_col, … } (only if table emitted)
  *   narrative → { text }         (streamed token-by-token in `delta` events)
  *   delta  → { text }            (intermediate narrative tokens)
@@ -19,8 +19,14 @@ import {
   SAGE_ENDPOINT_CATALOG,
   SAGE_SQL_SCHEMA_SUMMARY,
 } from "./endpoint-catalog.js";
-import { dispatchEndpoint, buildDigest } from "./dispatcher.js";
-import { executeGatedSql } from "./sql-gate.js";
+import {
+  dispatchEndpoint,
+  buildDigest,
+  normalizeBody,
+  isSingleRecordEndpoint,
+  ID_COLUMN_RE,
+} from "./dispatcher.js";
+import { executeGatedSql, DEFAULT_ROW_CAP } from "./sql-gate.js";
 import {
   appendAudit,
   appendTurn,
@@ -46,6 +52,9 @@ const MAX_TURNS_PER_THREAD = 50;
 // integer/range check below kills that pathway (closure audit W3-sec).
 const MIN_ROW_CAP = 1;
 const MAX_ROW_CAP = 5000;
+// Rows the `table` event carries when the caller sets no max_rows. The
+// narrative digest still sees only its own 20 rows.
+const TABLE_ROW_CAP = DEFAULT_ROW_CAP;
 
 export interface SageQueryBody {
   thread_id?: string | null;
@@ -57,9 +66,10 @@ export interface SageQueryBody {
  * Render the result digest's most likely chart by inspecting columns.
  * Heuristics, not magic: if there are >=2 columns and one is numeric
  * and the other looks categorical, prefer a bar chart. Time-like cols
- * pick line. Otherwise table-only.
+ * pick line. Otherwise table-only. The y axis is never a time column
+ * or an ID-like column (cve_*, clave, cvegeo, scian, ranking).
  */
-function pickChartType(digest: {
+export function pickChartType(digest: {
   columns: string[];
   first_n_rows: unknown[];
   numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
@@ -70,17 +80,20 @@ function pickChartType(digest: {
   const allCols = digest.columns;
   const nonNumeric = allCols.filter((c) => !numericCols.includes(c));
 
-  // Time-series shape: column named like ano/year/fecha/mes
-  const timeCol = nonNumeric.find((c) =>
-    /^(ano|year|fecha|mes|month|date|periodo)$/i.test(c),
-  );
-  if (timeCol && numericCols[0]) {
-    return { chart_type: "line", x_col: timeCol, y_col: numericCols[0] };
+  // Time-series shape: column named like ano/year/fecha/mes. Searched
+  // across ALL columns: ano/year is numeric on both routes.
+  const isTime = (c: string) =>
+    /^(ano|year|fecha|mes|month|date|periodo)$/i.test(c);
+  const timeCol = allCols.find(isTime);
+  const yCol = numericCols.find((c) => !isTime(c) && !ID_COLUMN_RE.test(c));
+  if (timeCol && yCol) {
+    return { chart_type: "line", x_col: timeCol, y_col: yCol };
   }
 
-  // Default bar: first categorical × first numeric
-  if (nonNumeric[0] && numericCols[0]) {
-    return { chart_type: "bar", x_col: nonNumeric[0], y_col: numericCols[0] };
+  // Default bar: first categorical (a name before an ID) × first measure
+  const xCol = nonNumeric.find((c) => !ID_COLUMN_RE.test(c)) ?? nonNumeric[0];
+  if (xCol && yCol) {
+    return { chart_type: "bar", x_col: xCol, y_col: yCol };
   }
   return null;
 }
@@ -113,7 +126,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
     // be interpolated into `LIMIT ${cap}` in applyRowCap; the SQL parser
     // rejects the resulting query, but the wrapped-SQL single-statement
     // invariant is violated upstream. Closure audit W3-sec.
-    let maxRows: number = MAX_ROW_CAP;
+    let maxRows: number | undefined;
     if (body.max_rows !== undefined && body.max_rows !== null) {
       if (
         !Number.isInteger(body.max_rows) ||
@@ -249,17 +262,30 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               controller.close();
               return;
             }
-            const digest = buildDigest(dispatched.body);
+            const bodyOpts = {
+              singleRecord: isSingleRecordEndpoint(route.endpoint_name),
+            };
+            const digest = buildDigest(dispatched.body, undefined, bodyOpts);
             digestForNarrative = digest;
             columns = digest.columns;
-            rows = digest.first_n_rows;
-            send("table", { columns, rows, row_count: digest.row_count });
+            rows = normalizeBody(dispatched.body, bodyOpts).rows.slice(
+              0,
+              TABLE_ROW_CAP,
+            );
+            send("table", {
+              columns,
+              rows,
+              row_count: digest.row_count,
+              truncated: digest.row_count > rows.length,
+            });
           } else {
-            // SQL fallback. `maxRows` is the validated caller cap; the
-            // gate clamps to MAX_ROW_CAP=5000 anyway via its own default.
+            // SQL fallback. `maxRows` is the validated caller cap
+            // (default TABLE_ROW_CAP). One extra row is fetched so the
+            // table can say whether the cap cut the result.
+            const cap = maxRows ?? TABLE_ROW_CAP;
             const result = await executeGatedSql(route.sql, {
               dbContainer: config.dbContainer,
-              rowCap: maxRows,
+              rowCap: cap + 1,
             });
             if (!result.ok) {
               send("error", {
@@ -269,14 +295,15 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               controller.close();
               return;
             }
-            const digest = buildDigest(result.data.rows);
+            rows = result.data.rows.slice(0, cap);
+            const digest = buildDigest(rows);
             digestForNarrative = digest;
             columns = result.data.columns;
-            rows = digest.first_n_rows;
             send("table", {
               columns,
               rows,
-              row_count: result.data.rows.length,
+              row_count: rows.length,
+              truncated: result.data.rows.length > cap,
             });
           }
 
