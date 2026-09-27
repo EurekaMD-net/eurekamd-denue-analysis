@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { buildSectorFilter, parseSectorParam } from "./tiles.js";
+import {
+  _resetTileCache,
+  buildSectorFilter,
+  parseSectorParam,
+} from "./tiles.js";
 
 // Tile handler runs psql via the shared runner (async spawn, SQL on
 // stdin). The bridge (psql-bridge.test-helper.ts) routes each call into
@@ -38,6 +42,7 @@ function setStdout(stdout: string): void {
 }
 
 beforeEach(() => {
+  _resetTileCache();
   mockExec.mockClear();
   setStdout("");
   (mockExec as unknown as { __error?: Error }).__error = undefined;
@@ -339,4 +344,153 @@ describe("buildSectorFilter (RH-5)", () => {
     expect(i).toBeGreaterThan(0);
     expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
   });
+});
+
+// ----------- Audit P22: payload, caps, index scan, margin, LRU -----------
+async function tileCall(
+  path: string,
+): Promise<{ res: Response; sql: string; pgoptions: string }> {
+  const app = createServer(CONFIG);
+  const res = await app.request(path, { headers: AUTH });
+  const argList = (mockExec.mock.calls.at(-1)?.[1] ?? []) as string[];
+  const pgoptions =
+    argList.find((a) => a.startsWith("PGOPTIONS=")) ?? "";
+  return { res, sql: argList[argList.length - 1] ?? "", pgoptions };
+}
+
+describe("tile payload + planner settings (audit #100 #136 #52)", () => {
+  it("never selects nombre or clase_actividad (#100)", async () => {
+    for (const path of [
+      "/tiles/5/7/14.mvt",
+      "/tiles/14/3680/7280.mvt",
+      "/tiles/10/230/455.mvt?entidad=09&sector=62",
+    ]) {
+      const { sql } = await tileCall(path);
+      expect(sql).not.toMatch(/nombre|clase_actividad\b/);
+    }
+  });
+
+  it("unfiltered below circle minzoom 11: geometry only (#100)", async () => {
+    const { sql } = await tileCall("/tiles/10/230/455.mvt");
+    expect(sql).not.toMatch(/clee/);
+    expect(sql).toMatch(/SELECT geom {2}FROM establecimientos/);
+    expect(sql).toMatch(/LIMIT 50000/);
+  });
+
+  it("unfiltered at circle minzoom 11: clee, no other attribute (#100)", async () => {
+    const { sql } = await tileCall("/tiles/11/460/910.mvt");
+    expect(sql).toMatch(/SELECT clee, geom {2}FROM establecimientos/);
+    expect(sql).toMatch(/AS geom, f\.clee {2}FROM filtered f/);
+  });
+
+  it("filtered: clee from z5, geometry only below (#100)", async () => {
+    const at5 = await tileCall("/tiles/5/7/14.mvt?sector=46");
+    expect(at5.sql).toMatch(/SELECT clee, geom/);
+    expect(at5.sql).toMatch(/LIMIT 50000/);
+    const at4 = await tileCall("/tiles/4/3/7.mvt?sector=46");
+    expect(at4.sql).not.toMatch(/clee/);
+    expect(at4.sql).toMatch(/LIMIT 10000/);
+  });
+
+  it("heatmap-only tiles below z9 are capped at 10k (#100)", async () => {
+    expect((await tileCall("/tiles/5/7/14.mvt")).sql).toMatch(/LIMIT 10000/);
+    expect((await tileCall("/tiles/8/57/113.mvt")).sql).toMatch(
+      /LIMIT 10000/,
+    );
+    expect((await tileCall("/tiles/9/115/227.mvt")).sql).toMatch(
+      /LIMIT 50000/,
+    );
+  });
+
+  it("unfiltered below z12 forces a GiST index scan; z12+ and filtered do not (#136)", async () => {
+    for (const path of ["/tiles/5/7/14.mvt", "/tiles/11/460/910.mvt"]) {
+      const { pgoptions } = await tileCall(path);
+      expect(pgoptions).toMatch(/-c enable_bitmapscan=off/);
+      expect(pgoptions).toMatch(/-c enable_seqscan=off/);
+    }
+    for (const path of [
+      "/tiles/12/920/1820.mvt",
+      "/tiles/10/230/455.mvt?entidad=09",
+    ]) {
+      const { pgoptions } = await tileCall(path);
+      expect(pgoptions).not.toMatch(/enable_bitmapscan|enable_seqscan/);
+    }
+  });
+
+  it("prefilter includes the 64-px MVT buffer; ST_AsMVTGeom clips to the bare tile (#52)", async () => {
+    const { sql } = await tileCall("/tiles/10/512/512.mvt");
+    expect(sql).toMatch(
+      /geom && ST_Transform\(ST_TileEnvelope\(10, 512, 512, margin => 0\.015625\), 4326\)/,
+    );
+    expect(sql).toMatch(
+      /ST_AsMVTGeom\(ST_Transform\(f\.geom, 3857\), ST_TileEnvelope\(10, 512, 512\), 4096, 64, true\)/,
+    );
+  });
+});
+
+describe("tile LRU (audit #100)", () => {
+  const b64 = Buffer.from([0x1a, 0x05, 0x68, 0x69]).toString("base64");
+
+  it("serves a repeat request from memory without a DB call", async () => {
+    setStdout(b64);
+    const first = await tileCall("/tiles/12/1900/2300.mvt?entidad=09");
+    expect((await first.res.arrayBuffer()).byteLength).toBe(4);
+    setStdout("");
+    const again = await tileCall("/tiles/12/1900/2300.mvt?entidad=09");
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    expect(again.res.status).toBe(200);
+    expect(again.res.headers.get("content-type")).toBe(
+      "application/x-protobuf",
+    );
+    expect(new Uint8Array(await again.res.arrayBuffer())).toEqual(
+      new Uint8Array([0x1a, 0x05, 0x68, 0x69]),
+    );
+  });
+
+  it("keys on z/x/y and both filters", async () => {
+    setStdout(b64);
+    await tileCall("/tiles/12/1900/2300.mvt");
+    await tileCall("/tiles/12/1900/2301.mvt");
+    await tileCall("/tiles/12/1900/2300.mvt?entidad=09");
+    await tileCall("/tiles/12/1900/2300.mvt?sector=46");
+    await tileCall("/tiles/12/1900/2300.mvt?entidad=09&sector=46");
+    expect(mockExec).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not cache a failed tile", async () => {
+    (mockExec as unknown as { __error?: Error }).__error = new Error("boom");
+    expect((await tileCall("/tiles/12/1900/2300.mvt")).res.status).toBe(502);
+    (mockExec as unknown as { __error?: Error }).__error = undefined;
+    setStdout(b64);
+    expect((await tileCall("/tiles/12/1900/2300.mvt")).res.status).toBe(200);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("expires entries after the 1 h TTL", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    setStdout(b64);
+    await tileCall("/tiles/12/1900/2300.mvt");
+    now.mockReturnValue(1_000_000 + 3_599_000);
+    await tileCall("/tiles/12/1900/2300.mvt");
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_000_000 + 3_600_000);
+    await tileCall("/tiles/12/1900/2300.mvt");
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts the least recently used tile past 100 MB", async () => {
+    // 34 MB tiles: three fit (102 MB > 100 MB evicts one), so after
+    // touching A the next insert must evict B, not A.
+    setStdout(Buffer.alloc(34 * 1024 * 1024, 1).toString("base64"));
+    await tileCall("/tiles/12/0/0.mvt"); // A
+    await tileCall("/tiles/12/0/1.mvt"); // B
+    await tileCall("/tiles/12/0/0.mvt"); // A hit, now MRU
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    await tileCall("/tiles/12/0/2.mvt"); // C → evicts B
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    await tileCall("/tiles/12/0/0.mvt"); // A still cached
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    await tileCall("/tiles/12/0/1.mvt"); // B was evicted
+    expect(mockExec).toHaveBeenCalledTimes(4);
+  }, 30_000);
 });

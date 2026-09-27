@@ -252,6 +252,10 @@ function isFiltered(filters: {
  * Circle minzoom 11 → 5 when filtered: dots appear at the default
  * Mexico-overview zoom. The 50k/tile cap is the same either way, but
  * filtered tiles return far fewer features so the canvas isn't overwhelmed.
+ *
+ * The backend mirrors these circle minzooms (CIRCLE_MIN_ZOOM_* in
+ * src/api/handlers/tiles.ts): tiles below them carry no `clee`, so change
+ * both together or circle clicks stop resolving.
  */
 function applyFilterZoomRanges(
   map: MapInstance,
