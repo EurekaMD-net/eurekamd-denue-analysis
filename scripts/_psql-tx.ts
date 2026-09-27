@@ -253,7 +253,9 @@ export function censoViewsSql(): string {
 function sageAllowlist(): Set<string> {
   const sql = readScriptFile("sage-role.sql");
   return new Set(
-    [...sql.matchAll(/^GRANT SELECT ON\s+([a-z_][a-z0-9_]*)\s+TO denue_sage;/gm)].map(
+    // `^\s*` also counts the existence-guarded GRANT inside a DO block
+    // (osm_ageb_aggregates).
+    [...sql.matchAll(/^\s*GRANT SELECT ON\s+([a-z_][a-z0-9_]*)\s+TO denue_sage;/gm)].map(
       (m) => m[1] as string,
     ),
   );

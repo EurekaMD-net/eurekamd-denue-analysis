@@ -288,7 +288,7 @@ describe("SageMode streaming renders (#186)", () => {
     click(exampleButtons()[0]);
     await s.push(
       { type: "thread", thread_id: "t-1" },
-      { type: "table", columns: ["n"], rows: [{ n: 5000 }], row_count: 1 },
+      { type: "table", columns: ["n"], rows: [{ n: 5000 }], row_count: 1, truncated: false },
       { type: "done", turn_id: null },
     );
     await s.end();

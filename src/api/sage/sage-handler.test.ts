@@ -556,6 +556,8 @@ describe("thread ownership and strict UUIDs (audit #11 #28 #92)", () => {
         sub,
         role: "authenticated",
         aud: "authenticated",
+        // bearer auth requires uncharted app membership (audit #1 #191).
+        app_metadata: { apps: ["uncharted"] },
         iat: now,
         exp: now + 3600,
       }),
