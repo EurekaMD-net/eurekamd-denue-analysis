@@ -23,6 +23,8 @@ interface ChatTurn {
   columns: string[];
   rows: unknown[];
   rowCount: number;
+  /** The server's row cap cut the result: rowCount is a floor. */
+  truncated: boolean;
   chart: { chart_type: string; x_col?: string; y_col?: string } | null;
   narrative: string;
   error: { code: string; message: string } | null;
@@ -102,6 +104,7 @@ export function SageMode() {
         columns: [],
         rows: [],
         rowCount: 0,
+        truncated: false,
         chart: null,
         narrative: "",
         error: null,
@@ -140,6 +143,7 @@ export function SageMode() {
                   columns: ev.columns,
                   rows: ev.rows,
                   rowCount: ev.row_count,
+                  truncated: ev.truncated,
                 };
                 break;
               case "chart":
@@ -266,6 +270,7 @@ export function SageMode() {
           columns: t.digest?.columns ?? [],
           rows: t.digest?.first_5_rows ?? [],
           rowCount: t.digest?.row_count ?? 0,
+          truncated: t.digest?.truncated === true,
           chart: null,
           narrative: t.narrative,
           error: null,
@@ -546,7 +551,10 @@ function TurnCard({ turn }: { turn: ChatTurn }) {
                 active={tab === "table"}
                 onClick={() => setTab("table")}
               >
-                Tabla{turn.rowCount > 0 ? ` (${turn.rowCount})` : ""}
+                Tabla
+                {turn.rowCount > 0
+                  ? ` (${turn.rowCount}${turn.truncated ? "+" : ""})`
+                  : ""}
               </TabButton>
               <TabButton
                 active={tab === "route"}
@@ -604,7 +612,7 @@ function ResultTable({ turn }: { turn: ChatTurn }) {
   // with >100 rows (we render at most 100). Surface the gap so the
   // badge count and the visible rows don't silently disagree.
   const shown = Math.min(turn.rows.length, 100);
-  const isSample = shown < turn.rowCount;
+  const isSample = shown < turn.rowCount || turn.truncated;
   return (
     <div>
       <div className="max-h-72 overflow-auto rounded border border-slate-800">
@@ -637,7 +645,8 @@ function ResultTable({ turn }: { turn: ChatTurn }) {
       {isSample && (
         <div className="mt-1 font-mono text-[10px] text-slate-500">
           muestra: {shown.toLocaleString("es-MX")} de{" "}
-          {turn.rowCount.toLocaleString("es-MX")} filas
+          {turn.rowCount.toLocaleString("es-MX")}
+          {turn.truncated ? "+" : ""} filas
         </div>
       )}
     </div>

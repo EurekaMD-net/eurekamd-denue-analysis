@@ -17,6 +17,8 @@ export type SageEvent =
       columns: string[];
       rows: unknown[];
       row_count: number;
+      /** The row cap cut the result: row_count is a floor, not the total. */
+      truncated: boolean;
     }
   | {
       type: "chart";
@@ -81,6 +83,7 @@ export interface SageStoredTurn {
     first_5_rows: unknown[];
     row_count: number;
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    truncated?: boolean;
   } | null;
   narrative: string;
 }
@@ -172,6 +175,7 @@ function parseEventBlock(block: string): SageEvent | null {
         columns: (d["columns"] as string[]) ?? [],
         rows: (d["rows"] as unknown[]) ?? [],
         row_count: Number(d["row_count"] ?? 0),
+        truncated: d["truncated"] === true,
       };
     case "chart":
       return {

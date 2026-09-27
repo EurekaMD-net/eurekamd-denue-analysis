@@ -17,19 +17,21 @@
  * blocks. We flatten to the shared RouteOutput shape at this boundary.
  *
  * Pricing: every provider reports usage differently. We rely on the
- * upstream's `usage` block when present; cost_usd computation requires
- * a SAGE_PRICE_TABLE override env (provider-specific) or stays 0.
+ * upstream's `usage` block when present; cost_usd uses the `pricing`
+ * parsed from the SAGE_PRICE_TABLE env (index.ts) or stays 0.
  */
 
 import {
   ROUTER_SYSTEM_PROMPT,
   NARRATIVE_SYSTEM_PROMPT,
+  buildRouterCatalogPrompt,
   buildRouterUserPrompt,
   buildNarrativeUserPrompt,
 } from "./prompts.js";
 import { ROUTER_TOOL_LIST } from "./tools.js";
 import {
   approximateTokens,
+  attachSageUsage,
   type NarrativeInput,
   type NarrativeStreamChunk,
   type RouteInput,
@@ -107,12 +109,13 @@ export class OpenAICompatibleProvider implements SageProvider {
     input: RouteInput,
     signal?: AbortSignal,
   ): Promise<RouteResult> {
-    const userPrompt = buildRouterUserPrompt(
-      input.question,
+    // Static catalog + schema first (system), per-request part last
+    // (user), so providers with prefix caching can reuse it (audit #204).
+    const systemPrompt = `${ROUTER_SYSTEM_PROMPT}\n\n${buildRouterCatalogPrompt(
       input.endpoints,
-      input.history,
       input.sql_schema_summary,
-    );
+    )}`;
+    const userPrompt = buildRouterUserPrompt(input.question, input.history);
 
     const tools: ChatToolDef[] = ROUTER_TOOL_LIST.map((t) => ({
       type: "function",
@@ -128,29 +131,45 @@ export class OpenAICompatibleProvider implements SageProvider {
     // Closure audit C3-perf.
     const t0 = Date.now();
     const fetchSignal = combineSignals(signal, AbortSignal.timeout(30_000));
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      signal: fetchSignal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.routerModel,
-        max_tokens: 1024,
-        messages: [
-          { role: "system", content: ROUTER_SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
-        ] satisfies ChatMessage[],
-        tools,
-        tool_choice: "required",
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        signal: fetchSignal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.routerModel,
+          max_tokens: 1024,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ] satisfies ChatMessage[],
+          tools,
+          tool_choice: "required",
+        }),
+      });
+    } catch (err) {
+      // Timeout or client abort after the prompt was sent: audit an
+      // estimate of the input it cost (audit #83).
+      throw attachSageUsage(
+        err,
+        this.normalizeUsage(
+          this.routerModel,
+          approximateTokens(systemPrompt + userPrompt),
+          0,
+          Date.now() - t0,
+        ),
+      );
+    }
     const latency_ms = Date.now() - t0;
 
     if (!res.ok) {
-      throw new Error(
-        `OpenAI-compat router ${res.status}: ${await res.text()}`,
+      throw attachSageUsage(
+        new Error(`OpenAI-compat router ${res.status}: ${await res.text()}`),
+        this.normalizeUsage(this.routerModel, 0, 0, latency_ms),
       );
     }
 
@@ -164,12 +183,17 @@ export class OpenAICompatibleProvider implements SageProvider {
 
     const toolCall = body.choices[0]?.message.tool_calls?.[0];
     if (!toolCall) {
-      const text = body.choices[0]?.message.content ?? "";
+      // A text-only reply is shown as a clarification; nothing at all is
+      // a router error, not a decline (audit #84).
+      const text = (body.choices[0]?.message.content ?? "").trim();
       return {
-        output: {
-          kind: "decline",
-          reasoning: text || "Modelo no devolvió tool_call; declinando.",
-        },
+        output: text
+          ? { kind: "clarify", reasoning: text }
+          : {
+              kind: "error",
+              code: "ROUTER_NO_TOOL",
+              detail: `no tool_call and no text (finish_reason ${body.choices[0]?.finish_reason ?? "none"})`,
+            },
         usage,
       };
     }
@@ -178,12 +202,13 @@ export class OpenAICompatibleProvider implements SageProvider {
     try {
       parsedArgs = JSON.parse(toolCall.function.arguments);
     } catch {
-      // Malformed JSON from the upstream — decline gracefully so the
-      // caller can retry or fall back to a different provider/model.
+      // Malformed JSON from the upstream: a router error (audit #84).
+      // The raw arguments go to the audit only, never to the user.
       return {
         output: {
-          kind: "decline",
-          reasoning: `Tool args malformados: ${toolCall.function.arguments.slice(0, 200)}`,
+          kind: "error",
+          code: "ROUTER_BAD_ARGS",
+          detail: `${toolCall.function.name}: malformed arguments: ${toolCall.function.arguments.slice(0, 200)}`,
         },
         usage,
       };
@@ -211,28 +236,41 @@ export class OpenAICompatibleProvider implements SageProvider {
     // takes precedence when the client disconnects.
     const t0 = Date.now();
     const fetchSignal = combineSignals(signal, AbortSignal.timeout(45_000));
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      signal: fetchSignal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.narrativeModel,
-        max_tokens: 512,
-        stream: true,
-        stream_options: { include_usage: true },
-        messages: [
-          { role: "system", content: NARRATIVE_SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
-        ] satisfies ChatMessage[],
-      }),
-    });
+    const partialUsage = (inTok: number, outTok: number) =>
+      this.normalizeUsage(
+        this.narrativeModel,
+        inTok || approximateTokens(NARRATIVE_SYSTEM_PROMPT + userPrompt),
+        outTok,
+        Date.now() - t0,
+      );
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        signal: fetchSignal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.narrativeModel,
+          max_tokens: 512,
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: [
+            { role: "system", content: NARRATIVE_SYSTEM_PROMPT },
+            { role: "user", content: userPrompt },
+          ] satisfies ChatMessage[],
+        }),
+      });
+    } catch (err) {
+      throw attachSageUsage(err, partialUsage(0, 0));
+    }
 
     if (!res.ok) {
-      throw new Error(
-        `OpenAI-compat narrative ${res.status}: ${await res.text()}`,
+      throw attachSageUsage(
+        new Error(`OpenAI-compat narrative ${res.status}: ${await res.text()}`),
+        this.normalizeUsage(this.narrativeModel, 0, 0, Date.now() - t0),
       );
     }
     if (!res.body) {
@@ -244,33 +282,45 @@ export class OpenAICompatibleProvider implements SageProvider {
     let buf = "";
     let totalIn = 0;
     let totalOut = 0;
+    let emittedChars = 0;
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (payload === "[DONE]") continue;
-        try {
-          const obj = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string } }>;
-            usage?: { prompt_tokens?: number; completion_tokens?: number };
-          };
-          const text = obj.choices?.[0]?.delta?.content;
-          if (text) yield { text, usage: null };
-          if (obj.usage) {
-            totalIn = obj.usage.prompt_tokens ?? totalIn;
-            totalOut = obj.usage.completion_tokens ?? totalOut;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const payload = trimmed.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          try {
+            const obj = JSON.parse(payload) as {
+              choices?: Array<{ delta?: { content?: string } }>;
+              usage?: { prompt_tokens?: number; completion_tokens?: number };
+            };
+            const text = obj.choices?.[0]?.delta?.content;
+            if (text) {
+              emittedChars += text.length;
+              yield { text, usage: null };
+            }
+            if (obj.usage) {
+              totalIn = obj.usage.prompt_tokens ?? totalIn;
+              totalOut = obj.usage.completion_tokens ?? totalOut;
+            }
+          } catch {
+            // Ignore non-JSON keepalive lines.
           }
-        } catch {
-          // Ignore non-JSON keepalive lines.
         }
       }
+    } catch (err) {
+      // Stream cut (timeout, client abort): audit what it had cost so far.
+      throw attachSageUsage(
+        err,
+        partialUsage(totalIn, totalOut || Math.ceil(emittedChars / 4)),
+      );
     }
 
     const latency_ms = Date.now() - t0;
@@ -343,10 +393,15 @@ function parseToolCall(name: string, args: unknown): RouteOutput {
         confidence: Number(obj["confidence"] ?? 0),
       };
     case "decline":
-    default:
       return {
         kind: "decline",
         reasoning: String(obj["reasoning"] ?? "Sin razón provista."),
+      };
+    default:
+      return {
+        kind: "error",
+        code: "ROUTER_BAD_ARGS",
+        detail: `unknown tool: ${name.slice(0, 100)}`,
       };
   }
 }
