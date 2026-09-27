@@ -40,6 +40,23 @@ function isHttpError(err: unknown): err is HttpError {
 }
 
 export const errorHandler: ErrorHandler = (err, c) => {
+  if (isHttpError(err) && err.status >= 500) {
+    // 5xx messages can carry upstream internals (SQL, stderr, container
+    // names): log them server-side only and return a generic body.
+    process.stderr.write(
+      `[api] ${err.status} ${err.code}: ${err.message}${
+        err.details !== undefined
+          ? ` details=${JSON.stringify(err.details)}`
+          : ""
+      }\n`,
+    );
+    const payload: ApiError = {
+      error:
+        err.status === 500 ? "Internal server error" : "Upstream query failed",
+      code: err.code,
+    };
+    return c.json(payload, err.status as 500);
+  }
   if (isHttpError(err)) {
     const payload: ApiError = {
       error: err.message,

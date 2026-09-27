@@ -3,11 +3,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 // vi.mock is hoisted above all imports — define the mock via vi.hoisted so
 // the factory can reference it (same bridge as sibling handler tests).
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
-  execFileSync: mockExec,
-  execFile: vi.fn(),
-}));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";

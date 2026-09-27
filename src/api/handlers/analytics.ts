@@ -39,18 +39,17 @@
  * max-age=300 to bound staleness when the operator forgets to refresh
  * mv_delitos_municipal_yearly after a SESNSP loader rerun (audit M2).
  *
- * SQL is built with bound parameters via psql -v + a CHECK regex on the
- * caller's `entidad` arg — same defense as the other handlers (ENTIDAD_RE
- * gate before the SQL ever sees the value). risk-* endpoints add
- * RISK_ANO_RE + CVE_MUN_RE for their respective inputs.
+ * SQL values are INLINED into the query text (no bind parameters): every
+ * request-derived value must first pass an anchored regex or an allowlist
+ * at the handler boundary (ENTIDAD_RE, CVE_MUN_RE, RISK_ANO_RE, the
+ * *_ORDER_BY allowlists, ...) before the SQL ever sees it. Queries run
+ * through the shared psql runner (src/api/db/psql-runner.ts) in a
+ * read-only session.
  */
 
-import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
 import type { Context } from "hono";
 import { HttpError } from "../middleware/error.js";
+import { runJson, runJsonSync } from "../db/psql-runner.js";
 import {
   AGEB_DETAIL_CLUES_CAP,
   AGEB_FARMACIA_DEFAULT_LIMIT,
@@ -134,8 +133,6 @@ import {
 import { ESTADOS, type EstadoClave } from "../../extractor/types.js";
 import { loadScianNames } from "./sectors.js";
 
-// Defense in depth: a final allowlist for any value we expand into psql -c.
-const SAFE_CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const VALID_GRADOS: ReadonlySet<string> = new Set([
   "Muy bajo",
   "Bajo",
@@ -155,11 +152,12 @@ function normalizeGrado(g: string | null | undefined): IrsGrado {
  * fingerprint (psql code 42P01). Used by analytics handlers to fall
  * back from a missing mat-view to the live aggregation. We test the
  * combined message+stderr so it works regardless of which path the
- * error text arrived through (formatPsqlError appends both).
+ * error text arrived through (message, or the raw `stderr` field).
  *
  * Audit hardening note: this is a substring check, not a code match —
- * but `runJsonQuery` already wraps the throw in HttpError("postgres.error")
- * so this helper only sees postgres-origin errors. Safe.
+ * but the psql runner already wraps the throw in HttpError("postgres.error")
+ * (raw stderr on its `stderr` field) so this helper only sees
+ * postgres-origin errors. Safe.
  */
 export function isRelationMissingError(err: unknown): boolean {
   if (err === null || err === undefined) return false;
@@ -181,158 +179,6 @@ export function isRelationMissingError(err: unknown): boolean {
 }
 
 /**
- * Format a thrown error into a 502-message-friendly string, surfacing
- * the spawned process's stderr when present. execFileSync attaches
- * stderr to the thrown Error as a Buffer; some non-Node runtimes ship
- * it as a string. When stderr is absent (e.g., timeout, EAGAIN, OOM)
- * we fall back to err.message.
- *
- * Audit Locust-R1 (2026-05-04). Exported so tests can cover all 3
- * branches without needing to actually throw inside execFileSync (which
- * trips a vitest 4 unhandled-exception quirk in this codebase).
- */
-export function formatPsqlError(err: unknown): string {
-  const baseMsg = err instanceof Error ? err.message : String(err);
-  const stderr = (err as { stderr?: unknown }).stderr;
-  let stderrText = "";
-  if (stderr instanceof Buffer) {
-    stderrText = stderr.toString("utf-8").trim();
-  } else if (typeof stderr === "string") {
-    stderrText = stderr.trim();
-  }
-  return stderrText
-    ? `${baseMsg} | psql stderr: ${stderrText.slice(0, 500)}`
-    : baseMsg;
-}
-
-// Defense-in-depth statement_timeout (audit v0.2.4-A W3): the spawned psql
-// session caps every query at 25s server-side via libpq startup param. Set
-// 5s below the 30s execFile wall-clock so the DB-side abort fires FIRST and
-// surfaces a structured psql error (preserved by formatPsqlError) instead
-// of execFile's SIGTERM. Without this gap both timers race the same wall
-// and stmt_timeout buys nothing.
-// `PGOPTIONS` is the silent path; an in-band `SET statement_timeout` prefix
-// makes psql emit "SET\n" before tuple output and corrupts JSON.parse.
-const PG_OPTIONS_TIMEOUT = "-c statement_timeout=25000";
-
-// Shared exec options: parity required between sync + async (audit M1, R1).
-// 64MB maxBuffer accommodates dense ageb-detail / manzanas-by-ageb payloads;
-// Node's 1MB default would ENOBUFS on the largest urban AGEBs.
-const EXEC_OPTS = {
-  encoding: "utf-8" as const,
-  timeout: 30_000,
-  maxBuffer: 64 * 1024 * 1024,
-};
-
-function dockerExecArgs(container: string, sql: string): string[] {
-  return [
-    "exec",
-    "-e",
-    `PGOPTIONS=${PG_OPTIONS_TIMEOUT}`,
-    container,
-    "psql",
-    "-U",
-    "postgres",
-    "-d",
-    "postgres",
-    "-t",
-    "-A",
-    "-c",
-    sql,
-  ];
-}
-
-function runJsonQuery<T>(config: ApiServerConfig, sql: string): T {
-  if (!SAFE_CONTAINER_RE.test(config.dbContainer)) {
-    throw new HttpError(
-      `analytics: dbContainer inválido "${config.dbContainer}"`,
-      500,
-      "config.bad_container",
-    );
-  }
-  let stdout: string;
-  try {
-    stdout = execFileSync(
-      "docker",
-      dockerExecArgs(config.dbContainer, sql),
-      EXEC_OPTS,
-    ).trim();
-  } catch (err) {
-    throw new HttpError(
-      `analytics query failed: ${formatPsqlError(err)}`,
-      502,
-      "postgres.error",
-    );
-  }
-  if (!stdout || stdout === "null") return [] as unknown as T;
-  try {
-    return JSON.parse(stdout) as T;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new HttpError(
-      `analytics: malformed JSON from psql: ${msg}`,
-      502,
-      "postgres.parse_error",
-    );
-  }
-}
-
-/**
- * Async sibling of `runJsonQuery` (v0.2.4-A audit W4). Uses promisify(execFile)
- * so multiple queries in the same handler can fan out via Promise.all instead
- * of blocking the Node event loop sequentially. Same SQL, same timeouts, same
- * error-shape contract. The sync version stays for handlers that only run one
- * query — promoting them costs latency from the await microtask scheduling.
- *
- * Optional `signal` lets callers abort this query early — e.g., when a
- * Promise.all sibling rejects, an AbortController shared across the fan-out
- * can cancel the remaining 6 in-flight psql clients instead of leaving them
- * to run out their 30s timeout (audit W4 follow-up).
- */
-async function runJsonQueryAsync<T>(
-  config: ApiServerConfig,
-  sql: string,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (!SAFE_CONTAINER_RE.test(config.dbContainer)) {
-    throw new HttpError(
-      `analytics: dbContainer inválido "${config.dbContainer}"`,
-      500,
-      "config.bad_container",
-    );
-  }
-  let stdout: string;
-  try {
-    const result = await execFileAsync(
-      "docker",
-      dockerExecArgs(config.dbContainer, sql),
-      { ...EXEC_OPTS, ...(signal ? { signal } : {}) },
-    );
-    // `encoding: "utf-8"` guarantees string stdout in production. The bridge
-    // mock already coerces non-strings to "" so the cast below is dead code,
-    // kept only as a belt-and-suspenders read for foreign callers/tests.
-    stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
-  } catch (err) {
-    throw new HttpError(
-      `analytics query failed: ${formatPsqlError(err)}`,
-      502,
-      "postgres.error",
-    );
-  }
-  if (!stdout || stdout === "null") return [] as unknown as T;
-  try {
-    return JSON.parse(stdout) as T;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new HttpError(
-      `analytics: malformed JSON from psql: ${msg}`,
-      502,
-      "postgres.parse_error",
-    );
-  }
-}
-
-/**
  * Mat-view-first read with graceful fallback to live aggregation.
  *
  * Tries the (typically 100ms) materialized-view SELECT. If the mat-view
@@ -345,16 +191,16 @@ async function runJsonQueryAsync<T>(
  * keeps the handlers working on a fresh DB before the operator runs the
  * mat-view bootstrap.
  */
-export function runJsonQueryMvFirst<T>(
+export async function runJsonQueryMvFirst<T>(
   config: ApiServerConfig,
   mvSql: string,
   liveSql: string,
-): T {
+): Promise<T> {
   try {
-    return runJsonQuery<T>(config, mvSql);
+    return await runJson<T>(mvSql, { container: config.dbContainer });
   } catch (err) {
     if (isRelationMissingError(err)) {
-      return runJsonQuery<T>(config, liveSql);
+      return await runJson<T>(liveSql, { container: config.dbContainer });
     }
     throw err;
   }
@@ -395,7 +241,7 @@ SELECT json_build_array(MAX(ano)) FROM (
 
 /**
  * Resolve the "latest fully-reported year" for risk-summary defaults.
- * Synchronous — uses the same execFileSync path as the handlers. Always
+ * Synchronous (boot-time only) — uses the runner's runJsonSync. Always
  * returns a valid 4-digit year in `RISK_ANO_RE` range; never throws.
  *
  * Returns a discriminated result so the caller can log honestly: when
@@ -420,7 +266,7 @@ export function resolveCurrentRiskAno(config: ApiServerConfig): {
 function tryResolveAno(config: ApiServerConfig, sql: string): number | null {
   let raw: number[] | null;
   try {
-    raw = runJsonQuery<number[] | null>(config, sql);
+    raw = runJsonSync<number[] | null>(sql, { container: config.dbContainer });
   } catch {
     // Caller decides whether to try the next source or fall through to the
     // hardcoded constant — neither outcome should escalate to a thrown error.
@@ -496,7 +342,7 @@ export async function nationalTreemapHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const rows = runJsonQueryMvFirst<RawNationalRow[]>(
+  const rows = await runJsonQueryMvFirst<RawNationalRow[]>(
     config,
     NATIONAL_TREEMAP_MV_SQL,
     NATIONAL_TREEMAP_SQL,
@@ -550,7 +396,7 @@ export async function sectorGradeMatrixHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const rows = runJsonQueryMvFirst<RawMatrixCell[]>(
+  const rows = await runJsonQueryMvFirst<RawMatrixCell[]>(
     config,
     SECTOR_GRADE_MATRIX_MV_SQL,
     SECTOR_GRADE_MATRIX_SQL,
@@ -636,7 +482,9 @@ export async function municipiosAnalyticsHandler(
       "validation.entidad",
     );
   }
-  const rows = runJsonQuery<RawMunicipioRow[]>(config, municipiosSql(entidad));
+  const rows = await runJson<RawMunicipioRow[]>(municipiosSql(entidad), {
+    container: config.dbContainer,
+  });
   const result: MunicipiosAnalyticsResult = {
     entidad,
     municipios: rows.map((r) => ({
@@ -713,10 +561,9 @@ export async function topSectorsByEntidadHandler(
     limit = n;
   }
 
-  const rows = runJsonQuery<RawTopSectorRow[]>(
-    config,
-    topSectorsSql(entidad, limit),
-  );
+  const rows = await runJson<RawTopSectorRow[]>(topSectorsSql(entidad, limit), {
+    container: config.dbContainer,
+  });
   const names = loadScianNames();
   const result: TopSectorsResult = {
     entidad,
@@ -908,7 +755,7 @@ export async function riskSummaryHandler(
 
   // Mat-view first → falls back to live aggregation if the operator hasn't
   // run scripts/perf-matviews.sql yet. Same pattern as nationalTreemapHandler.
-  const rows = runJsonQueryMvFirst<RawRiskSummaryRow[]>(
+  const rows = await runJsonQueryMvFirst<RawRiskSummaryRow[]>(
     config,
     riskSummaryMvSql(entidad, currentAno, baselineAno),
     riskSummaryLiveSql(entidad, currentAno, baselineAno),
@@ -1028,14 +875,12 @@ export async function riskTrendHandler(
     );
   }
 
-  const series = runJsonQuery<RawRiskTrendPoint[]>(
-    config,
-    riskTrendSql(cveMun),
-  );
-  const meta = runJsonQuery<RawMunicipioMeta[]>(
-    config,
-    municipioMetaSql(cveMun),
-  );
+  const series = await runJson<RawRiskTrendPoint[]>(riskTrendSql(cveMun), {
+    container: config.dbContainer,
+  });
+  const meta = await runJson<RawMunicipioMeta[]>(municipioMetaSql(cveMun), {
+    container: config.dbContainer,
+  });
   const metaRow = meta[0] ?? null;
 
   const result: RiskTrendResult = {
@@ -1107,11 +952,12 @@ export async function locustAgebHandler(
     );
   }
 
-  const rows = runJsonQuery<RawLocustAgebRow[]>(config, locustAgebSql(cveMun));
-  const meta = runJsonQuery<RawMunicipioMeta[]>(
-    config,
-    municipioMetaSql(cveMun),
-  );
+  const rows = await runJson<RawLocustAgebRow[]>(locustAgebSql(cveMun), {
+    container: config.dbContainer,
+  });
+  const meta = await runJson<RawMunicipioMeta[]>(municipioMetaSql(cveMun), {
+    container: config.dbContainer,
+  });
   const metaRow = meta[0] ?? null;
 
   const result: LocustAgebResult = {
@@ -1291,7 +1137,7 @@ export async function mortalitySummaryHandler(
     config.currentMortalityAno ?? MORTALITY_DEFAULT_CURRENT_ANO;
   const ano = parseAnoArg(anoRaw, defaultAno, "ano");
 
-  const rows = runJsonQueryMvFirst<RawMortalitySummaryRow[]>(
+  const rows = await runJsonQueryMvFirst<RawMortalitySummaryRow[]>(
     config,
     mortalitySummaryMvSql(entidad, ano),
     mortalitySummaryLiveSql(entidad, ano),
@@ -1400,7 +1246,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.ano) FROM (
 function mortalityTrendMetaSql(cveMun: string): string {
   // Audit C1 (2026-05-05): use json_agg + index-into-array, mirroring
   // riskTrendHandler. row_to_json on a 0-row inner SELECT emits an empty
-  // stdout string that runJsonQuery normalizes to `[]` — the handler then
+  // stdout string that runJson normalizes to `[]` — the handler then
   // dereferences `meta?.municipio` on what's actually an array. Today
   // it works by accident; multi-row censo (or a json shape change)
   // could break it silently.
@@ -1429,15 +1275,15 @@ export async function mortalityTrendHandler(
   // Audit C2 (2026-05-05): mat-view-first read with live aggregation
   // fallback so a fresh DB without `scripts/perf-matviews.sql` still
   // serves trend (same M1 pattern as mortality-summary).
-  const series = runJsonQueryMvFirst<RawMortalityTrendPoint[]>(
+  const series = await runJsonQueryMvFirst<RawMortalityTrendPoint[]>(
     config,
     mortalityTrendSql(cveMun),
     mortalityTrendLiveSql(cveMun),
   );
   // Audit C1: meta SQL now returns json_agg([]) — match riskTrendHandler's shape.
-  const metaRows = runJsonQuery<RawMortalityTrendMeta[]>(
-    config,
+  const metaRows = await runJson<RawMortalityTrendMeta[]>(
     mortalityTrendMetaSql(cveMun),
+    { container: config.dbContainer },
   );
   const meta = metaRows[0] ?? null;
 
@@ -1505,7 +1351,7 @@ function stateCalibratorsSql(entidad: string): string {
   // so a partial load (only ENIGH or only ENOE) still returns a populated
   // row — the missing-source columns just come back null. Each side picks
   // its own latest ano_levantamiento independently. json_agg + read [0]
-  // avoids the C1-class shape bug where runJsonQuery normalizes empty
+  // avoids the C1-class shape bug where runJson normalizes empty
   // stdout to []. COALESCE(...,0) on entidad-equality lets each side miss
   // its row table entirely (caught by isRelationMissingError separately).
   return `
@@ -1609,9 +1455,9 @@ export async function stateCalibratorsHandler(
   // valid entidad — null values mean "not loaded yet."
   let raw: RawStateCalibratorsRow | null;
   try {
-    const rows = runJsonQuery<RawStateCalibratorsRow[]>(
-      config,
+    const rows = await runJson<RawStateCalibratorsRow[]>(
       stateCalibratorsSql(entidad),
+      { container: config.dbContainer },
     );
     raw = rows[0] ?? null;
   } catch (err) {
@@ -1793,9 +1639,9 @@ export async function agebsByMunicipioHandler(
     limit = parsed;
   }
 
-  const rows = runJsonQuery<RawAgebsByMunicipioRow[]>(
-    config,
+  const rows = await runJson<RawAgebsByMunicipioRow[]>(
     agebsByMunicipioSql(cveMun, orderBy, limit),
+    { container: config.dbContainer },
   );
   const result: AgebsByMunicipioResult = {
     cve_mun: cveMun,
@@ -2094,11 +1940,11 @@ export async function agebDetailHandler(
     );
   }
 
-  // Identity must run first — it gates the 404 response. Keeping it sync
-  // also means a non-existent AGEB never spawns the 7 detail queries.
-  const idRows = runJsonQuery<RawAgebDetailIdentity[]>(
-    config,
+  // Identity must run first — it gates the 404 response. Awaiting it before
+  // the fan-out means a non-existent AGEB never spawns the 7 detail queries.
+  const idRows = await runJson<RawAgebDetailIdentity[]>(
     agebIdentitySql(cvegeo),
+    { container: config.dbContainer },
   );
   const id = idRows[0];
   if (!id) {
@@ -2116,8 +1962,10 @@ export async function agebDetailHandler(
   // so a reorder triggers a comment conflict, not a silent test drift.
   // v0.2.4-B: censo_ageb may miss rural AGEBs not in RESAGEBURB urbana.
   // v0.2.6: CONEVAL Grado de Rezago Social ~95% urban AGEB coverage.
-  // W4 follow-up: shared AbortController so a Promise.all rejection cancels
-  // the in-flight siblings instead of letting them run to their 30s timeout.
+  // W4 follow-up: shared AbortController so a Promise.all rejection aborts
+  // the in-flight siblings: the runner kills each docker CLI and fires
+  // pg_cancel_backend for its tagged session (killing the CLI alone leaves
+  // the backend running).
   const ac = new AbortController();
   let parallelResults: [
     RawAgebDetailLocMeta[],
@@ -2131,47 +1979,43 @@ export async function agebDetailHandler(
   try {
     parallelResults = await Promise.all([
       // 1. locMeta
-      runJsonQueryAsync<RawAgebDetailLocMeta[]>(
-        config,
-        agebLocMetaSql(cvegeo),
-        ac.signal,
-      ),
+      runJson<RawAgebDetailLocMeta[]>(agebLocMetaSql(cvegeo), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
       // 2. summary
-      runJsonQueryAsync<RawAgebDetailEstabSummary[]>(
-        config,
-        agebEstabSummarySql(cvegeo),
-        ac.signal,
-      ),
+      runJson<RawAgebDetailEstabSummary[]>(agebEstabSummarySql(cvegeo), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
       // 3. sectors
-      runJsonQueryAsync<RawAgebDetailTopSector[]>(
-        config,
-        agebTopSectorsSql(cvegeo, 10),
-        ac.signal,
-      ),
+      runJson<RawAgebDetailTopSector[]>(agebTopSectorsSql(cvegeo, 10), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
       // 4. cluesSample
-      runJsonQueryAsync<RawAgebDetailClues[]>(
-        config,
+      runJson<RawAgebDetailClues[]>(
         agebCluesSql(cvegeo, AGEB_DETAIL_CLUES_CAP),
-        ac.signal,
+        {
+          container: config.dbContainer,
+          signal: ac.signal,
+        },
       ),
       // 5. cluesCount
-      runJsonQueryAsync<number[] | null>(
-        config,
-        agebCluesCountSql(cvegeo),
-        ac.signal,
-      ),
+      runJson<number[] | null>(agebCluesCountSql(cvegeo), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
       // 6. census
-      runJsonQueryAsync<RawAgebCensusRow[]>(
-        config,
-        agebCensusSql(cvegeo),
-        ac.signal,
-      ),
+      runJson<RawAgebCensusRow[]>(agebCensusSql(cvegeo), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
       // 7. rezago
-      runJsonQueryAsync<RawAgebRezagoRow[]>(
-        config,
-        agebRezagoSql(cvegeo),
-        ac.signal,
-      ),
+      runJson<RawAgebRezagoRow[]>(agebRezagoSql(cvegeo), {
+        container: config.dbContainer,
+        signal: ac.signal,
+      }),
     ]);
   } catch (err) {
     ac.abort();
@@ -2446,9 +2290,9 @@ export async function agebFarmaciaOpportunityHandler(
     limit = parsed;
   }
 
-  const rows = runJsonQuery<RawAgebOpportunityRow[]>(
-    config,
+  const rows = await runJson<RawAgebOpportunityRow[]>(
     agebFarmaciaOpportunitySql(cveMun, limit),
+    { container: config.dbContainer },
   );
   const result: AgebFarmaciaOpportunityResult = {
     cve_mun: cveMun,
@@ -2810,9 +2654,9 @@ export async function opportunityByAgebHandler(
   );
   const rezagoFilter = parseRezagoGradoFilter(c.req.query("rezago_grado"));
 
-  const rows = runJsonQuery<RawOpportunityAgebRow[]>(
-    config,
+  const rows = await runJson<RawOpportunityAgebRow[]>(
     opportunityByAgebSql(cveMun, column, codes, orderBy, limit, rezagoFilter),
+    { container: config.dbContainer },
   );
   const result: OpportunityByAgebResult = {
     cve_mun: cveMun,
@@ -2968,9 +2812,9 @@ export async function opportunityByColoniaHandler(
     OPPORTUNITY_COLONIA_MAX_LIMIT,
   );
 
-  const rows = runJsonQuery<RawOpportunityColoniaRow[]>(
-    config,
+  const rows = await runJson<RawOpportunityColoniaRow[]>(
     opportunityByColoniaSql(cveMun, column, codes, orderBy, limit),
+    { container: config.dbContainer },
   );
   const colonias = rows
     .filter((r): r is RawOpportunityColoniaRow & { colonia: string } =>
@@ -3065,9 +2909,9 @@ export async function coloniasByMunicipioHandler(
     COLONIAS_MAX_LIMIT,
   );
 
-  const rows = runJsonQuery<RawColoniaListRow[]>(
-    config,
+  const rows = await runJson<RawColoniaListRow[]>(
     coloniasByMunicipioSql(cveMun, orderBy, limit),
+    { container: config.dbContainer },
   );
   const colonias = rows
     .filter((r): r is RawColoniaListRow & { colonia: string } =>
@@ -3137,7 +2981,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
   WHERE cve_mun = '${cveMun}'
 ) r;
 `;
-  const rows = runJsonQuery<
+  const rows = await runJson<
     Array<{
       cve_mun: string;
       total_licenciadas: number;
@@ -3151,7 +2995,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
       boticas: number;
       droguerias: number;
     }>
-  >(config, sql);
+  >(sql, { container: config.dbContainer });
   const row = rows[0];
   const result: LicensedPharmaciesByMunicipioResult = row
     ? {
@@ -3217,13 +3061,13 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
   WHERE cvegeo_ageb = '${cvegeo}'
 ) r;
 `;
-  const rows = runJsonQuery<
+  const rows = await runJson<
     Array<{
       cvegeo: string;
       total_licenciadas: number;
       con_controlados: number;
     }>
-  >(config, sql);
+  >(sql, { container: config.dbContainer });
   const row = rows[0];
   const result: LicensedPharmaciesByAgebResult = row
     ? {
@@ -3304,7 +3148,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
   LIMIT ${limit}
 ) r;
 `;
-  const rows = runJsonQuery<
+  const rows = await runJson<
     Array<{
       cvegeo_mza: string;
       mza: string;
@@ -3315,7 +3159,7 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
       vph_inter: number | null;
       vph_autom: number | null;
     }>
-  >(config, sql);
+  >(sql, { container: config.dbContainer });
 
   const manzanas = rows.map((r) => ({
     cvegeo_mza: r.cvegeo_mza,
@@ -3390,9 +3234,9 @@ SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
   LIMIT ${limit}
 ) r;
 `;
-  const rows = runJsonQuery<
+  const rows = await runJson<
     Array<{ colonia: string; num_establecimientos: number | string }>
-  >(config, sql);
+  >(sql, { container: config.dbContainer });
 
   const colonias = rows.map((r) => ({
     colonia: r.colonia,
@@ -3470,7 +3314,7 @@ SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC N
 ) r;
 `;
 
-  const airports = runJsonQuery<
+  const airports = await runJson<
     Array<{
       airport_name: string;
       mar_flights_2026: number;
@@ -3478,7 +3322,7 @@ SELECT COALESCE(json_agg(row_to_json(r) ORDER BY r.mar_flights_recent_avg DESC N
       mar_flights_2019: number | null;
       pct_change_vs_2019: number | null;
     }>
-  >(config, sql);
+  >(sql, { container: config.dbContainer });
 
   const formatted: AirportInMunicipio[] = airports.map((a) => ({
     airport_name: a.airport_name,
@@ -3591,7 +3435,7 @@ SELECT json_build_object(
   ), '[]'::json)
 );
 `;
-  const payload = runJsonQuery<{
+  const payload = await runJson<{
     total_localities: number;
     localities: Array<{
       cve_loc: string;
@@ -3602,10 +3446,10 @@ SELECT json_build_object(
       tvivpar: number | null;
       vph_inter: number | null;
     }>;
-  }>(config, sql);
+  }>(sql, { container: config.dbContainer });
 
   // psql -t -A returns json_build_object as a single object (not wrapped in
-  // an array). runJsonQuery's empty-stdout fallback returns []; gate that.
+  // an array). runJson's empty-stdout fallback returns []; gate that.
   const totalLocalities =
     payload && !Array.isArray(payload) && "total_localities" in payload
       ? Number(payload.total_localities ?? 0)
@@ -3678,9 +3522,9 @@ SELECT json_agg(row_to_json(t)) FROM (
   WHERE cve_loc = '${cveLoc}'
 ) t;
 `;
-  const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
-    config,
+  const rows = await runJson<Array<Record<string, string | number | null>>>(
     sql,
+    { container: config.dbContainer },
   );
   if (!rows || rows.length === 0) {
     throw new HttpError(
@@ -4578,9 +4422,9 @@ SELECT json_agg(row_to_json(t)) FROM (
   WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
-  const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
-    config,
+  const rows = await runJson<Array<Record<string, string | number | null>>>(
     sql,
+    { container: config.dbContainer },
   );
   if (!rows || rows.length === 0) {
     throw new HttpError(
@@ -4758,9 +4602,9 @@ SELECT json_agg(row_to_json(t)) FROM (
   WHERE ce.cve_ent = '${cveEnt}'
 ) t;
 `;
-  const rows = runJsonQuery<Array<Record<string, string | number | null>>>(
-    config,
+  const rows = await runJson<Array<Record<string, string | number | null>>>(
     sql,
+    { container: config.dbContainer },
   );
   if (!rows || rows.length === 0) {
     throw new HttpError(
@@ -5041,7 +4885,9 @@ export async function locustMuniHandler(
       "validation.entidad",
     );
   }
-  const rows = runJsonQuery<RawLocustMuniRow[]>(config, locustMuniSql(entidad));
+  const rows = await runJson<RawLocustMuniRow[]>(locustMuniSql(entidad), {
+    container: config.dbContainer,
+  });
   const num = (v: number | string | null | undefined): number | null =>
     v === null || v === undefined ? null : Number(v);
   const result: LocustMuniResult = {
@@ -5130,7 +4976,9 @@ export async function locustEstadoHandler(
   c: Context,
   config: ApiServerConfig,
 ): Promise<Response> {
-  const rows = runJsonQuery<RawLocustEstadoRow[]>(config, LOCUST_ESTADO_SQL);
+  const rows = await runJson<RawLocustEstadoRow[]>(LOCUST_ESTADO_SQL, {
+    container: config.dbContainer,
+  });
   const num = (v: number | string | null | undefined): number | null =>
     v === null || v === undefined ? null : Number(v);
   const result: LocustEstadoResult = {
@@ -5189,10 +5037,10 @@ interface RawResolveAgebRow {
   cve_mun: string;
 }
 
-export function resolveAgebHandler(
+export async function resolveAgebHandler(
   c: Context,
   config: ApiServerConfig,
-): Response {
+): Promise<Response> {
   const lat = c.req.query("lat") ?? "";
   const lon = c.req.query("lon") ?? "";
   if (!COORD_LAT_RE.test(lat)) {
@@ -5224,10 +5072,9 @@ export function resolveAgebHandler(
     );
   }
 
-  const rows = runJsonQuery<RawResolveAgebRow[]>(
-    config,
-    resolveAgebSql(lat, lon),
-  );
+  const rows = await runJson<RawResolveAgebRow[]>(resolveAgebSql(lat, lon), {
+    container: config.dbContainer,
+  });
   if (rows.length === 0) {
     throw new HttpError(
       `Ningún AGEB del Marco Geoestadístico contiene el punto (${lat}, ${lon}).`,

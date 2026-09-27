@@ -1,47 +1,23 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
-// `mockExec` doubles as the queue for both `execFileSync` (sync handlers) and
-// `execFile` (async handlers via promisify). Tests seed responses via
-// `mockExec.mockReturnValueOnce(stdout)` and the bridge below calls mockExec()
-// from inside the async-callback path so the same FIFO queue drains both.
+// `mockExec` is the single FIFO queue for every psql call made through
+// src/api/db/psql-runner.ts. The bridge (psql-bridge.test-helper.ts)
+// appends the stdin SQL to the recorded argv, so tests read it as
+// `mockExec.mock.calls[N][1].at(-1)`; the real argv never carries it.
 // Order in agebDetailHandler's Promise.all MUST match the queue order.
-const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-const { mockExecAsync } = vi.hoisted(() => ({
-  mockExecAsync: vi.fn(
-    (
-      file: string,
-      args: string[],
-      opts: unknown,
-      cb: (
-        err: Error | null,
-        result: { stdout: string; stderr: string },
-      ) => void,
-    ) => {
-      // Forward args to mockExec so tests reading `mockExec.mock.calls[N][1]`
-      // can inspect the SQL passed via either sync or async path.
-      try {
-        const stdout = (
-          mockExec as unknown as (f: string, a: string[], o: unknown) => unknown
-        )(file, args, opts);
-        cb(null, {
-          stdout: typeof stdout === "string" ? stdout : "",
-          stderr: "",
-        });
-      } catch (err) {
-        cb(err as Error, { stdout: "", stderr: "" });
-      }
-    },
+const { mockExec, mockCancel } = vi.hoisted(() => ({
+  mockExec: vi.fn(),
+  mockCancel: vi.fn(),
+}));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+    mockCancel,
   ),
-}));
-vi.mock("node:child_process", () => ({
-  execFileSync: mockExec,
-  execSync: vi.fn(),
-  execFile: mockExecAsync,
-}));
+);
 
 import { createServer } from "../server.js";
 import {
-  formatPsqlError,
   isRelationMissingError,
   resolveCurrentMortalityAno,
   resolveCurrentRiskAno,
@@ -192,6 +168,39 @@ describe("GET /analytics/national-treemap", () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("postgres.parse_error");
+  });
+
+  // Audit #16/#6 (2026-09-26): a psql failure used to return
+  // `analytics query failed: Command failed: docker exec ... <SQL> | psql
+  // stderr: ...` to the caller. The body must now be generic.
+  it("502 body is generic: no SQL, stderr, container or role", async () => {
+    mockExec.mockImplementationOnce(() => {
+      throw Object.assign(new Error("Command failed"), {
+        stderr: Buffer.from(
+          "ERROR:  canceling statement due to statement timeout",
+        ),
+      });
+    });
+    const errSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/national-treemap", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body).toEqual({
+      error: "Upstream query failed",
+      code: "postgres.error",
+    });
+    const raw = JSON.stringify(body);
+    expect(raw).not.toMatch(
+      /statement timeout|SELECT|test-supabase-db|postgres -d/,
+    );
+    // ...but the real stderr is still logged server-side.
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("");
+    expect(logged).toContain("canceling statement due to statement timeout");
   });
 
   it("returns empty when DB returns null", async () => {
@@ -535,61 +544,6 @@ describe("GET /analytics/top-sectors?entidad=", () => {
 });
 
 // ---------------------------------------------------------------------------
-// formatPsqlError — pure function, all 3 stderr branches
-// (audit W1 2026-05-04: cover all branches without the vitest-4 throw quirk)
-// ---------------------------------------------------------------------------
-
-describe("formatPsqlError", () => {
-  it("appends Buffer stderr to the base message (truncated to 500)", () => {
-    const err = Object.assign(new Error("Command failed"), {
-      stderr: Buffer.from('ERROR:  relation "x" does not exist\nLINE 1: ...'),
-    });
-    const out = formatPsqlError(err);
-    expect(out).toBe(
-      'Command failed | psql stderr: ERROR:  relation "x" does not exist\nLINE 1: ...',
-    );
-  });
-
-  it("appends string stderr (non-Node Buffer environments)", () => {
-    const err = Object.assign(new Error("Command failed"), {
-      stderr: "FATAL:  password authentication failed\n",
-    });
-    expect(formatPsqlError(err)).toBe(
-      "Command failed | psql stderr: FATAL:  password authentication failed",
-    );
-  });
-
-  it("falls back to message when stderr is undefined", () => {
-    const err = new Error("ETIMEDOUT");
-    expect(formatPsqlError(err)).toBe("ETIMEDOUT");
-  });
-
-  it("falls back to message when stderr is empty Buffer", () => {
-    const err = Object.assign(new Error("EAGAIN"), {
-      stderr: Buffer.from(""),
-    });
-    expect(formatPsqlError(err)).toBe("EAGAIN");
-  });
-
-  it("truncates stderr at 500 chars to bound the 502 response size", () => {
-    const big = "a".repeat(2000);
-    const err = Object.assign(new Error("Command failed"), {
-      stderr: Buffer.from(big),
-    });
-    const out = formatPsqlError(err);
-    expect(out.length).toBeLessThanOrEqual(
-      "Command failed | psql stderr: ".length + 500,
-    );
-    expect(out).toContain("psql stderr: " + "a".repeat(500));
-    expect(out).not.toContain("a".repeat(501));
-  });
-
-  it("stringifies non-Error throws (e.g., a thrown string)", () => {
-    expect(formatPsqlError("naked string throw")).toBe("naked string throw");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // isRelationMissingError + runJsonQueryMvFirst
 // (audit P3-perf 2026-05-04: mat-view-first read with live-SQL fallback)
 // ---------------------------------------------------------------------------
@@ -646,16 +600,16 @@ describe("runJsonQueryMvFirst", () => {
   const mvSql = "SELECT * FROM mv_x;";
   const liveSql = "WITH t AS (...) SELECT FROM t;";
 
-  it("succeeds via mat-view (one psql call, live SQL untouched)", () => {
+  it("succeeds via mat-view (one psql call, live SQL untouched)", async () => {
     mockExec.mockReturnValueOnce(JSON.stringify([{ scian: "46", count: 1 }]));
-    const rows = runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
+    const rows = await runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
     expect(rows).toEqual([{ scian: "46", count: 1 }]);
     expect(mockExec).toHaveBeenCalledTimes(1);
     const args = mockExec.mock.calls[0]?.[1] as string[];
     expect(args[args.length - 1]).toBe(mvSql);
   });
 
-  it("falls back to live SQL when mat-view is missing", () => {
+  it("falls back to live SQL when mat-view is missing", async () => {
     // First call (mat-view) throws relation-missing
     mockExec
       .mockImplementationOnce(() => {
@@ -668,7 +622,7 @@ describe("runJsonQueryMvFirst", () => {
       // Second call (live SQL) returns the data
       .mockReturnValueOnce(JSON.stringify([{ scian: "46", count: 999 }]));
 
-    const rows = runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
+    const rows = await runJsonQueryMvFirst<unknown[]>(CONFIG, mvSql, liveSql);
     expect(rows).toEqual([{ scian: "46", count: 999 }]);
     expect(mockExec).toHaveBeenCalledTimes(2);
     // Verify second call was the live SQL
@@ -676,13 +630,13 @@ describe("runJsonQueryMvFirst", () => {
     expect(liveCallArgs[liveCallArgs.length - 1]).toBe(liveSql);
   });
 
-  it("propagates non-relation errors without retrying", () => {
+  it("propagates non-relation errors without retrying", async () => {
     mockExec.mockImplementationOnce(() => {
       throw Object.assign(new Error("Command failed"), {
         stderr: Buffer.from("ERROR:  syntax error at or near 'FROM'"),
       });
     });
-    expect(() => runJsonQueryMvFirst(CONFIG, mvSql, liveSql)).toThrow();
+    await expect(runJsonQueryMvFirst(CONFIG, mvSql, liveSql)).rejects.toThrow();
     expect(mockExec).toHaveBeenCalledTimes(1);
   });
 });
