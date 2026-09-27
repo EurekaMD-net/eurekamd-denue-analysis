@@ -10,14 +10,18 @@ const { mockMkdtemp, mockWriteFile, mockRm } = vi.hoisted(() => ({
   mockWriteFile: vi.fn(),
   mockRm: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   mkdtempSync: mockMkdtemp,
   writeFileSync: mockWriteFile,
   rmSync: mockRm,
 }));
 
 import {
+  buildCnbvPanoramaReloadSql,
   loadCnbvPanorama,
+  PANORAMA_DUP_GUARD_SQL,
   POST_LOAD_SQL_FOR_TEST,
   MUNI_RAW_DDL,
   ESTADO_RAW_DDL,
@@ -38,48 +42,34 @@ afterEach(() => vi.restoreAllMocks());
  * exec sequence:
  *   1. python3 cnbv-panorama-xlsx-to-csv.py --sheet=muni
  *   2. python3 cnbv-panorama-xlsx-to-csv.py --sheet=estado
- *   3. psql DROP/CREATE muni raw
- *   4. psql DROP/CREATE estado raw
- *   5. docker cp muni csv
- *   6. \copy muni
- *   7. rm muni csv inside container
- *   8. docker cp estado csv
- *   9. \copy estado
- *   10. rm estado csv inside container
- *   11. psql DROP/CREATE muni view
- *   12. psql DROP/CREATE estado view
- *   13-16. count(muni view) / count(estado view) / muni dup guard / estado dup guard
+ *   3. docker cp muni csv
+ *   4. docker cp estado csv
+ *   5. ONE psql --single-transaction session: staging DDL, both \copy,
+ *      swap, views, indexes, grants (audit #145)
+ *   6-7. rm muni / estado csv inside container
+ *   8-9. count(muni view) / count(estado view)
+ *   10. assertRelationsExist (none missing)
+ * The dup guards run inside the reload transaction (audit #154).
  */
 function stubHappyPath(
   opts: {
     muniRows?: number;
     estadoRows?: number;
-    muniDups?: number;
-    estadoDups?: number;
   } = {},
 ): void {
   const muniRows = opts.muniRows ?? 2469;
   const estadoRows = opts.estadoRows ?? 32;
-  const muniDups = opts.muniDups ?? 0;
-  const estadoDups = opts.estadoDups ?? 0;
   mockExec
     .mockReturnValueOnce("clave_municipio_num,cve_mun,...\n1001,01001,...\n") // py muni
     .mockReturnValueOnce("cve_estado_num,nom_ent,...\n1,Aguascalientes,...\n") // py estado
-    .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // muni raw DDL
-    .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // estado raw DDL
     .mockReturnValueOnce("") // docker cp muni
-    .mockReturnValueOnce("COPY 2469\n") // \copy muni
-    .mockReturnValueOnce("") // rm muni
     .mockReturnValueOnce("") // docker cp estado
-    .mockReturnValueOnce("COPY 32\n") // \copy estado
+    .mockReturnValueOnce("COPY 2469\nCOPY 32\n") // one reload transaction
+    .mockReturnValueOnce("") // rm muni
     .mockReturnValueOnce("") // rm estado
-    .mockReturnValueOnce("DROP VIEW\nCREATE VIEW\n") // muni view
-    .mockReturnValueOnce("DROP VIEW\nCREATE VIEW\n") // estado view
-    .mockReturnValueOnce("CREATE INDEX\nCREATE INDEX\n") // index DDL (SV1)
     .mockReturnValueOnce(`${muniRows}\n`) // muni count
     .mockReturnValueOnce(`${estadoRows}\n`) // estado count
-    .mockReturnValueOnce(`${muniDups}\n`) // muni dup guard
-    .mockReturnValueOnce(`${estadoDups}\n`); // estado dup guard
+    .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 }
 
 describe("loadCnbvPanorama (orchestration)", () => {
@@ -138,14 +128,61 @@ describe("loadCnbvPanorama (orchestration)", () => {
       xlsxPath: "/x.xlsx",
       dbContainer: "supabase-db",
     });
-    // \copy invocations are at exec calls 5 and 8 (0-indexed). Both should
-    // include FORMAT csv, HEADER true, NULL '*'.
-    const call5 = mockExec.mock.calls[5]?.[1] as string[];
-    const call8 = mockExec.mock.calls[8]?.[1] as string[];
-    expect(call5.join(" ")).toContain("FORMAT csv, HEADER true, NULL '*'");
-    expect(call5.join(" ")).toContain("cnbv_panorama_municipal_raw");
-    expect(call8.join(" ")).toContain("FORMAT csv, HEADER true, NULL '*'");
-    expect(call8.join(" ")).toContain("cnbv_panorama_estatal_raw");
+    // Both \copy lines live in the single reload transaction (exec call 4).
+    // Both should include FORMAT csv, HEADER true, NULL '*'.
+    const tx = mockExec.mock.calls[4];
+    expect(tx?.[1] as string[]).toContain("--single-transaction");
+    const copies = String((tx?.[2] as { input: string }).input)
+      .split("\n")
+      .filter((l) => l.startsWith("\\copy"));
+    expect(copies).toHaveLength(2);
+    expect(copies[0]).toContain("FORMAT csv, HEADER true, NULL '*'");
+    expect(copies[0]).toContain("cnbv_panorama_municipal_raw_staging");
+    expect(copies[1]).toContain("FORMAT csv, HEADER true, NULL '*'");
+    expect(copies[1]).toContain("cnbv_panorama_estatal_raw_staging");
+  });
+
+  it("reloads both anexos in ONE psql session (audit #145)", async () => {
+    stubHappyPath();
+    await loadCnbvPanorama({ xlsxPath: "/x.xlsx", dbContainer: "supabase-db" });
+    const txs = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(txs).toHaveLength(1);
+    expect((txs[0]?.[2] as { input: string }).input).toBe(
+      buildCnbvPanoramaReloadSql(
+        "/tmp/cnbv_panorama_municipal_raw.csv",
+        "/tmp/cnbv_panorama_estatal_raw.csv",
+      ),
+    );
+    // No other psql session touches DDL (every other psql call is a -c read).
+    const ddlOutsideTx = mockExec.mock.calls.filter(
+      (c) =>
+        !(c[1] as string[]).includes("--single-transaction") &&
+        /DROP|CREATE|\\copy/.test((c[1] as string[]).join(" ")),
+    );
+    expect(ddlOutsideTx).toHaveLength(0);
+  });
+
+  it("removes both in-container CSVs even when the reload transaction fails", async () => {
+    mockExec
+      .mockReturnValueOnce("hdr\n") // py muni
+      .mockReturnValueOnce("hdr\n") // py estado
+      .mockReturnValueOnce("") // docker cp muni
+      .mockReturnValueOnce("") // docker cp estado
+      .mockImplementationOnce(() => {
+        throw new Error("psql: ERROR: extra data after last expected column");
+      });
+    await expect(
+      loadCnbvPanorama({ xlsxPath: "/x.xlsx", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/extra data/);
+    const rms = mockExec.mock.calls
+      .map((c) => c[1] as string[])
+      .filter((a) => Array.isArray(a) && a.includes("rm"));
+    expect(rms.map((a) => a[a.length - 1])).toEqual([
+      "/tmp/cnbv_panorama_municipal_raw.csv",
+      "/tmp/cnbv_panorama_estatal_raw.csv",
+    ]);
   });
 
   it("returns counts from psql and tracks duration", async () => {
@@ -159,41 +196,50 @@ describe("loadCnbvPanorama (orchestration)", () => {
     expect(typeof result.duration_ms).toBe("number");
   });
 
-  it("hard-fails when muni view has duplicate cve_mun groups", async () => {
-    stubHappyPath({ muniDups: 3 });
+  it("a duplicate-key RAISE inside the reload transaction fails the load with nothing after it (audit #154)", async () => {
+    mockExec
+      .mockReturnValueOnce("hdr\n") // py muni
+      .mockReturnValueOnce("hdr\n") // py estado
+      .mockReturnValueOnce("") // docker cp muni
+      .mockReturnValueOnce("") // docker cp estado
+      .mockImplementationOnce(() => {
+        throw new Error(
+          "ERROR:  loadCnbvPanorama: producer invariant violated - 3 cve_mun groups have >1 row. Reload rolled back.",
+        );
+      }) // reload transaction: the guard RAISEs, psql rolls back
+      .mockReturnValueOnce("") // rm muni
+      .mockReturnValueOnce(""); // rm estado
     await expect(
       loadCnbvPanorama({
         xlsxPath: "/x.xlsx",
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/3 cve_mun groups have >1 row/);
+    expect(mockExec).toHaveBeenCalledTimes(7); // no post-commit count or probe
   });
 
-  it("hard-fails when estado view has duplicate cve_ent groups", async () => {
-    stubHappyPath({ estadoDups: 1 });
-    await expect(
-      loadCnbvPanorama({
-        xlsxPath: "/x.xlsx",
-        dbContainer: "supabase-db",
-      }),
-    ).rejects.toThrow(/1 cve_ent groups have >1 row/);
+  it("the dup guards cover cve_mun and cve_ent and sit after the views, before the grants (audit #154)", () => {
+    const sql = buildCnbvPanoramaReloadSql("/tmp/m.csv", "/tmp/e.csv");
+    const guard = sql.indexOf(PANORAMA_DUP_GUARD_SQL);
+    expect(guard).toBeGreaterThan(sql.indexOf("CREATE VIEW cnbv_panorama_estatal AS"));
+    expect(guard).toBeLessThan(sql.indexOf("GRANT SELECT ON cnbv_panorama_estatal TO denue_sage;"));
+    expect(PANORAMA_DUP_GUARD_SQL).toMatch(
+      /FROM cnbv_panorama_municipal\s+GROUP BY cve_mun HAVING COUNT\(\*\) > 1[\s\S]*IF muni_dups > 0 THEN\s+RAISE EXCEPTION/,
+    );
+    expect(PANORAMA_DUP_GUARD_SQL).toMatch(
+      /FROM cnbv_panorama_estatal\s+GROUP BY cve_ent HAVING COUNT\(\*\) > 1[\s\S]*IF estado_dups > 0 THEN\s+RAISE EXCEPTION/,
+    );
   });
 
   it("hard-fails on non-numeric count output (psql producing garbage)", async () => {
     mockExec
       .mockReturnValueOnce("hdr\n") // py muni
       .mockReturnValueOnce("hdr\n") // py estado
-      .mockReturnValueOnce("") // muni raw DDL
-      .mockReturnValueOnce("") // estado raw DDL
       .mockReturnValueOnce("") // docker cp muni
-      .mockReturnValueOnce("COPY\n") // \copy muni
-      .mockReturnValueOnce("") // rm muni
       .mockReturnValueOnce("") // docker cp estado
-      .mockReturnValueOnce("COPY\n") // \copy estado
+      .mockReturnValueOnce("COPY\n") // reload transaction
+      .mockReturnValueOnce("") // rm muni
       .mockReturnValueOnce("") // rm estado
-      .mockReturnValueOnce("") // muni view
-      .mockReturnValueOnce("") // estado view
-      .mockReturnValueOnce("") // index DDL (SV1)
       .mockReturnValueOnce("not-a-number\n"); // muni count → garbage
     await expect(
       loadCnbvPanorama({
@@ -239,13 +285,15 @@ describe("loadCnbvPanorama (orchestration)", () => {
 
   it("aborts and cleans up tempdir when raw-table DDL fails", async () => {
     // W2 audit follow-up: parallel to "python converter failed" but at the
-    // psql DDL step (call #3). If a future schema migration breaks the
+    // psql DDL step (the reload transaction). If a future schema migration breaks the
     // muni raw DDL, the loader must NOT leak the tempdir or the python
     // CSV outputs. This test pins the finally-block invariant at the
     // first psql call rather than the python converter call.
     mockExec
       .mockReturnValueOnce("hdr\n") // py muni
       .mockReturnValueOnce("hdr\n") // py estado
+      .mockReturnValueOnce("") // docker cp muni
+      .mockReturnValueOnce("") // docker cp estado
       .mockImplementationOnce(() => {
         throw new Error("psql: ERROR — relation already exists");
       });
@@ -260,6 +308,33 @@ describe("loadCnbvPanorama (orchestration)", () => {
       recursive: true,
       force: true,
     });
+  });
+});
+
+describe("buildCnbvPanoramaReloadSql (audit #145)", () => {
+  it("fills both staging tables before any live DROP; explicit view drops; no CASCADE", () => {
+    const sql = buildCnbvPanoramaReloadSql("/tmp/m.csv", "/tmp/e.csv");
+    const lastCopy = sql.indexOf("\\copy cnbv_panorama_estatal_raw_staging");
+    const firstLiveDrop = sql.indexOf("DROP VIEW IF EXISTS cnbv_panorama_municipal;");
+    expect(sql.indexOf("\\copy cnbv_panorama_municipal_raw_staging")).toBeGreaterThan(-1);
+    expect(lastCopy).toBeGreaterThan(-1);
+    expect(lastCopy).toBeLessThan(firstLiveDrop);
+    for (const [view, raw] of [
+      ["cnbv_panorama_municipal", "cnbv_panorama_municipal_raw"],
+      ["cnbv_panorama_estatal", "cnbv_panorama_estatal_raw"],
+    ] as const) {
+      const dropView = sql.indexOf(`DROP VIEW IF EXISTS ${view};`);
+      const dropRaw = sql.indexOf(`DROP TABLE IF EXISTS ${raw};`);
+      const swap = sql.indexOf(`ALTER TABLE ${raw}_staging RENAME TO ${raw};`);
+      const create = sql.indexOf(`CREATE VIEW ${view} AS`);
+      expect(dropView).toBeGreaterThan(-1);
+      expect(dropView).toBeLessThan(dropRaw);
+      expect(dropRaw).toBeLessThan(swap);
+      expect(swap).toBeLessThan(create);
+    }
+    expect(sql).not.toMatch(/DROP TABLE[^;]*CASCADE/);
+    expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
+    expect(sql).toContain("GRANT SELECT ON cnbv_panorama_estatal TO denue_sage;");
   });
 });
 

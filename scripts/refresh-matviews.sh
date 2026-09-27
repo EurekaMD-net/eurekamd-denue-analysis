@@ -46,8 +46,15 @@ CONTAINER="${SUPABASE_DB_CONTAINER:-supabase-db}"
 
 echo "[refresh-matviews] using container: $CONTAINER"
 
+# ON_ERROR_STOP (audit #115, 2026-09-26): without it psql prints a failed
+# REFRESH (dropped MV, lock timeout, CONCURRENTLY unique violation), carries
+# on and exits 0, so the systemd unit reports success on a stale MV. Now the
+# first failure stops the run and fails the unit. lock_timeout bounds the
+# wait behind a loader transaction that holds the MV.
 start=$(date +%s)
-docker exec -i "$CONTAINER" psql -U postgres -d postgres <<'SQL'
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<'SQL'
+SET lock_timeout = '60s';
+
 -- ===== Cheap MVs first (sub-second each) =====
 
 \echo Refreshing mv_national_treemap...

@@ -5,6 +5,7 @@
  * - transform(): normalización de campos crudos → fila DB
  * - loadRecords(): upsert via PostgREST (mockeado)
  * - readExtractorOutput(): lectura de archivo JSON
+ * - scripts/load.ts loadAndUpdateGeometry(): error vs geometry branch (#165)
  */
 
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
@@ -15,9 +16,20 @@ import {
   transform,
   loadRecords,
   readExtractorOutput,
+  updateGeometry,
   type DenueRawRecord,
   type LoaderConfig,
 } from "./loader.js";
+import { loadAndUpdateGeometry } from "../../scripts/load.js";
+
+// updateGeometry shells out to docker; never let a test reach the real one.
+const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
+vi.mock("child_process", () => ({
+  execFileSync: execFileSyncMock,
+  execSync: vi.fn(() => {
+    throw new Error("execSync must not be used");
+  }),
+}));
 
 // ---------------------------------------------------------------------------
 // Fixture base
@@ -98,9 +110,37 @@ describe("transform()", () => {
     expect(row.entidad).toBe("09");
   });
 
-  it("extrae municipio del campo Ubicacion", () => {
+  it("extrae municipio (2º segmento), no la localidad, del campo Ubicacion", () => {
+    // Audit #40: "LOCALIDAD, Municipio, ESTADO" — the first segment is the
+    // locality. The old code returned "TLALPAN" (the locality).
     const row = transform(BASE_RECORD);
-    expect(row.municipio).toBe("TLALPAN");
+    expect(row.municipio).toBe("Tlalpan");
+    const cuisillos: DenueRawRecord = {
+      ...BASE_RECORD,
+      Ubicacion: "CUISILLOS, Tala, JALISCO",
+    };
+    expect(transform(cuisillos).municipio).toBe("Tala");
+  });
+
+  it("municipio correcto cuando la localidad o el municipio contienen comas", () => {
+    const sauz: DenueRawRecord = {
+      ...BASE_RECORD,
+      Ubicacion: "EL SAUZ (SAUZ ALTO, SAUZ BAJO), Pedro Escobedo, QUERÉTARO",
+    };
+    expect(transform(sauz).municipio).toBe("Pedro Escobedo");
+    const tezoatlan: DenueRawRecord = {
+      ...BASE_RECORD,
+      Ubicacion:
+        "HEROICA VILLA TEZOATLÁN DE SEGURA Y LUNA, CUNA DE LA INDEPENDENCIA DE OAXACA, Heroica Villa Tezoatlán de Segura y Luna, Cuna de la Independencia de Oaxaca, OAXACA",
+    };
+    expect(transform(tezoatlan).municipio).toBe(
+      "Heroica Villa Tezoatlán de Segura y Luna, Cuna de la Independencia de Oaxaca",
+    );
+  });
+
+  it("municipio usa el primer segmento cuando Ubicacion tiene menos de 3", () => {
+    const raw: DenueRawRecord = { ...BASE_RECORD, Ubicacion: "TLALPAN, CDMX" };
+    expect(transform(raw).municipio).toBe("TLALPAN");
   });
 
   it("convierte strings vacíos a null", () => {
@@ -226,6 +266,29 @@ describe("transform()", () => {
     expect(row.subsector_actividad_id).toBe("461");
     expect(row.rama_actividad_id).toBe("4611");
     expect(row.subrama_actividad_id).toBe("46112");
+  });
+
+  it("deriva SCIAN ids de la etiqueta Clase_actividad (catálogo) antes que del CLEE", () => {
+    // Audit #131: live CLEE 09007464111011731000000000U7 encodes 464111
+    // (farmacias) but its current label is abarrotes. The old code stored
+    // 464111 / 46 / 464 / 4641 / 46411 from the CLEE.
+    const raw: DenueRawRecord = {
+      ...BASE_RECORD,
+      CLEE: "09007464111011731000000000U7",
+      Clase_actividad:
+        "Comercio al por menor en tiendas de abarrotes, ultramarinos y misceláneas",
+      CLASE_ACTIVIDAD_ID: undefined,
+      SECTOR_ACTIVIDAD_ID: undefined,
+      SUBSECTOR_ACTIVIDAD_ID: undefined,
+      RAMA_ACTIVIDAD_ID: undefined,
+      SUBRAMA_ACTIVIDAD_ID: undefined,
+    };
+    const row = transform(raw);
+    expect(row.clase_actividad_id).toBe("461110");
+    expect(row.sector_actividad_id).toBe("46");
+    expect(row.subsector_actividad_id).toBe("461");
+    expect(row.rama_actividad_id).toBe("4611");
+    expect(row.subrama_actividad_id).toBe("46111");
   });
 
   it("prefiere los campos API sobre la derivación cuando están presentes", () => {
@@ -354,6 +417,54 @@ describe("loadRecords()", () => {
     expect("geom" in body[0]!).toBe(false);
   });
 
+  it("omite ageb del payload para no borrar el AGEB del backfill en el upsert", async () => {
+    // Audit #142: merge-duplicates = ON CONFLICT DO UPDATE SET <payload
+    // columns>; the old payload carried ageb:null and wiped the CVEGEO.
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedBody = JSON.parse(opts.body as string);
+        return Promise.resolve({ ok: true, json: async () => [{ id: 1 }] });
+      }),
+    );
+
+    await loadRecords([BASE_RECORD], config);
+
+    const body = capturedBody as Array<Record<string, unknown>>;
+    expect("ageb" in body[0]!).toBe(false);
+    expect(body[0]!["clee"]).toBe(BASE_RECORD.CLEE);
+  });
+
+  it("pide return=minimal y cuenta el chunk en 2xx sin leer el cuerpo", async () => {
+    // Audit #51: the old code asked for return=representation and counted
+    // response.json().length.
+    let capturedHeaders: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: unknown, opts: RequestInit) => {
+        capturedHeaders = opts.headers as Record<string, string>;
+        return Promise.resolve({
+          ok: true,
+          json: async () => {
+            throw new Error("no body with return=minimal");
+          },
+        });
+      }),
+    );
+
+    const result = await loadRecords(
+      Array(3).fill(BASE_RECORD) as DenueRawRecord[],
+      config,
+    );
+
+    expect(capturedHeaders["Prefer"]).toBe(
+      "resolution=merge-duplicates,return=minimal",
+    );
+    expect(result.inserted).toBe(3);
+    expect(result.errors).toHaveLength(0);
+  });
+
   it("registra error si la API retorna !ok", async () => {
     vi.stubGlobal(
       "fetch",
@@ -452,5 +563,163 @@ describe("loadRecords()", () => {
 
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.inserted).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateGeometry() — docker exec mockeado
+// ---------------------------------------------------------------------------
+describe("updateGeometry()", () => {
+  const config: LoaderConfig = {
+    supabaseUrl: "http://localhost:8100",
+    serviceRoleKey: "fake-service-key",
+  };
+  const prevContainer = process.env["SUPABASE_DB_CONTAINER"];
+
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+    process.env["SUPABASE_DB_CONTAINER"] = "denue-test-no-such-container";
+  });
+
+  afterEach(() => {
+    if (prevContainer === undefined) delete process.env["SUPABASE_DB_CONTAINER"];
+    else process.env["SUPABASE_DB_CONTAINER"] = prevContainer;
+  });
+
+  it("ejecuta psql con argv (sin shell), timeout y ON_ERROR_STOP, y reporta el conteo", async () => {
+    execFileSyncMock.mockReturnValue("UPDATE 29\n");
+
+    const result = await updateGeometry(config);
+
+    expect(result).toEqual({ updated: 29 });
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    const [cmd, args, opts] = execFileSyncMock.mock.calls[0]! as [
+      string,
+      string[],
+      { timeout?: number },
+    ];
+    expect(cmd).toBe("docker");
+    expect(args.slice(0, 3)).toEqual([
+      "exec",
+      "denue-test-no-such-container",
+      "psql",
+    ]);
+    expect(args).toContain("ON_ERROR_STOP=1");
+    expect(opts.timeout).toBeGreaterThan(0);
+  });
+
+  it("también reescribe geom cuando ya no coincide con latitud/longitud", async () => {
+    // Audit #42: the old predicate was `AND geom IS NULL` only, so a moved
+    // establishment kept its old point.
+    execFileSyncMock.mockReturnValue("UPDATE 0\n");
+
+    await updateGeometry(config);
+
+    const args = execFileSyncMock.mock.calls[0]![1] as string[];
+    const sql = args[args.indexOf("-c") + 1]!.replace(/\s+/g, " ");
+    expect(sql).toContain(
+      "(geom IS NULL OR NOT ST_Equals(geom, ST_SetSRID(ST_MakePoint(longitud::float8, latitud::float8), 4326)))",
+    );
+  });
+
+  it("rechaza un nombre de contenedor inseguro antes de ejecutar nada", async () => {
+    // Audit #43/#161: the old code interpolated it into a shell string.
+    process.env["SUPABASE_DB_CONTAINER"] = "--rm";
+
+    await expect(updateGeometry(config)).rejects.toThrow(/unsafe container/);
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("propaga el fallo de psql en vez de devolver { updated: 0 }", async () => {
+    // Audit #43: the old code caught the error and resolved { updated: 0 },
+    // so the orchestrator reported success with rows missing geom.
+    execFileSyncMock.mockImplementation(() => {
+      throw new Error("psql: connection refused");
+    });
+
+    await expect(updateGeometry(config)).rejects.toThrow(/connection refused/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scripts/load.ts — the CLI's error and geometry branches (audit #165)
+// ---------------------------------------------------------------------------
+describe("loadAndUpdateGeometry() (scripts/load.ts)", () => {
+  const config: LoaderConfig = {
+    supabaseUrl: "http://localhost:8100",
+    serviceRoleKey: "fake-service-key",
+    batchSize: 1,
+  };
+  const prevContainer = process.env["SUPABASE_DB_CONTAINER"];
+
+  beforeEach(() => {
+    execFileSyncMock.mockReset();
+    process.env["SUPABASE_DB_CONTAINER"] = "denue-test-no-such-container";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    if (prevContainer === undefined) delete process.env["SUPABASE_DB_CONTAINER"];
+    else process.env["SUPABASE_DB_CONTAINER"] = prevContainer;
+  });
+
+  it("importing the CLI module does not run main()", () => {
+    // isMain guard: a regression would have read --file / exited on import.
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("all batches OK → rewrites geometry and reports the count", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    execFileSyncMock.mockReturnValue("UPDATE 2\n");
+
+    const out = await loadAndUpdateGeometry([BASE_RECORD, BASE_RECORD], config);
+
+    expect(out.result.inserted).toBe(2);
+    expect(out.result.errors).toHaveLength(0);
+    expect(out.geometryUpdated).toBe(2);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    expect((execFileSyncMock.mock.calls[0]![1] as string[]).join(" ")).toContain(
+      "UPDATE establecimientos",
+    );
+  });
+
+  it("any failed batch → reports the errors and skips the geometry update", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          ++n === 1
+            ? { ok: false, text: async () => "duplicate key value" }
+            : { ok: true },
+        ),
+      ),
+    );
+
+    const out = await loadAndUpdateGeometry([BASE_RECORD, BASE_RECORD], config);
+
+    expect(out.result.inserted).toBe(1);
+    expect(out.result.errors).toEqual([
+      { clee: BASE_RECORD.CLEE, error: "duplicate key value" },
+    ]);
+    expect(out.geometryUpdated).toBeNull();
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+    const logged = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0]))
+      .join("\n");
+    expect(logged).toContain(`CLEE ${BASE_RECORD.CLEE}: duplicate key value`);
+  });
+
+  it("a geometry failure propagates instead of reporting success", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    execFileSyncMock.mockImplementation(() => {
+      throw new Error("psql: connection refused");
+    });
+
+    await expect(
+      loadAndUpdateGeometry([BASE_RECORD], config),
+    ).rejects.toThrow(/connection refused/);
   });
 });

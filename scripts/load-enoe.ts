@@ -21,14 +21,18 @@
  * `ent`/`mun`/`loc`/`ageb`; Q3+Q4 use `cve_ent`/`cve_mun`/`cve_loc`/`cve_ageb`
  * + add a `cvegeo` 115th column. Calibration-relevant column INDICES are
  * identical across all 4 quarters (positions 11/25/53/55/56/97/107), so the
- * loader sidesteps the rename by extracting 7 columns by position via
- * `awk -F,` rather than relying on header names.
+ * loader sidesteps the rename by extracting 7 columns by position with a
+ * quote-aware awk split rather than relying on header names.
  *
  * Behavior:
- *   1. Drop+create enoe_sdem_raw idempotently (7 typed cols + trimestre tag).
- *   2. For each quarter ZIP, awk-project the 7 columns + tag trimestre, \copy.
- *   3. Aggregate to calibrators_enoe_state keyed by (entidad,
- *      ano_levantamiento), idempotent via DELETE-then-INSERT.
+ *   1. Drop+create enoe_sdem_raw_staging idempotently (7 typed cols +
+ *      trimestre tag). The live table is untouched until step 3.
+ *   2. For each quarter ZIP, awk-project the 7 columns + tag trimestre, \copy
+ *      into staging.
+ *   3. ONE psql --single-transaction session (audit #145): swap staging in,
+ *      index it, and aggregate to calibrators_enoe_state keyed by (entidad,
+ *      ano_levantamiento), idempotent via DELETE-then-INSERT. A failed quarter
+ *      never reaches this step, so the live table and calibrators survive it.
  *   4. Variables computed per entidad averaged across the 4 quarters:
  *      - tasa_desocupacion = desocupada/PEA*100
  *      - tasa_participacion = PEA/pob_15mas*100
@@ -37,6 +41,12 @@
  */
 
 import { execFileSync } from "node:child_process";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const ANIO_RE = /^(19|20)[0-9]{2}$/;
@@ -76,9 +86,12 @@ export const ENOE_SDEM_COL_INDEX = {
   emp_ppal: 107,
 } as const;
 
+// Builds the `_staging` table; buildEnoeSwapSql swaps it in (audit #145).
+// Indexes are created after the swap so their names never collide with the
+// live table's while both tables exist.
 const ENOE_RAW_DDL = `
-DROP TABLE IF EXISTS enoe_sdem_raw CASCADE;
-CREATE TABLE enoe_sdem_raw (
+DROP TABLE IF EXISTS enoe_sdem_raw_staging;
+CREATE TABLE enoe_sdem_raw_staging (
   trimestre INT NOT NULL,
   ent TEXT,
   fac_tri TEXT,
@@ -88,6 +101,9 @@ CREATE TABLE enoe_sdem_raw (
   ingocup TEXT,
   emp_ppal TEXT
 );
+`;
+
+const ENOE_RAW_INDEX_SQL = `
 CREATE INDEX idx_enoe_sdem_ent ON enoe_sdem_raw (ent);
 CREATE INDEX idx_enoe_sdem_trim ON enoe_sdem_raw (trimestre);
 `;
@@ -206,6 +222,19 @@ export function calibratorsDdlForTest(year: number): string {
   return calibratorsDdl(year);
 }
 
+/**
+ * The single-transaction swap script (audit #145), run only after every
+ * quarter reached staging: swap (no dependents), indexes, calibrators, grants.
+ */
+export function buildEnoeSwapSql(year: number): string {
+  return [
+    swapInStagingSql("enoe_sdem_raw", []),
+    ENOE_RAW_INDEX_SQL,
+    calibratorsDdl(year),
+    postLoadGrants(["enoe_sdem_raw"]),
+  ].join("\n");
+}
+
 export interface LoadEnoeQuarter {
   /** 1, 2, 3, or 4 */
   trimestre: number;
@@ -228,18 +257,41 @@ export interface LoadEnoeResult {
 }
 
 /**
- * Per-quarter shell pipeline that projects the 7 calibration columns from
- * the full sdem CSV. Output: `trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal`
- * (header included). Runs entirely in the docker container via stdin so we
- * never copy the full 100MB+ source CSV into PG storage.
+ * Per-quarter awk program that projects the 7 calibration columns from
+ * the full sdem CSV into the file named by the awk variable `out` (`-v
+ * out=...`). Output: `trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal`
+ * (header included). Runs entirely in the docker container so we never copy
+ * the full 100MB+ source CSV into PG storage.
  *
- * awk arithmetic indexes match the column-order assertion above. Header
- * line emitted by the BEGIN block; data lines start at NR>1.
+ * CSV-aware (audit #156): a bare FS="," split a quoted free-text field such
+ * as "SE DIO DE BAJA, PARA CORREGIR EDAD" into several fields and shifted
+ * every later column (fac_tri, clase1/2, ingocup, emp_ppal). csvsplit
+ * re-joins comma-split pieces until each field holds an even number of
+ * quotes. Plain POSIX awk: the DB container ships mawk, not gawk (no FPAT).
+ * Any row whose field count still differs from the header's is dropped and
+ * counted; the count is the program's only stdout.
+ *
+ * Indexes match the column-order assertion above.
  */
-function projectionAwkScript(trimestre: number): string {
+export function projectionAwkScript(trimestre: number): string {
   const idx = ENOE_SDEM_COL_INDEX;
-  return `BEGIN { FS=","; OFS=","; print "trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal" }
-NR>1 { print ${trimestre}, $${idx.ent}, $${idx.fac_tri}, $${idx.clase1}, $${idx.clase2}, $${idx.eda}, $${idx.ingocup}, $${idx.emp_ppal} }`;
+  return `function csvsplit(line, f,    raw, m, n, i, v) {
+  m = split(line, raw, ",")
+  n = 0
+  for (i = 1; i <= m; i++) {
+    v = raw[i]
+    while (gsub(/"/, "&", v) % 2 == 1 && i < m) v = v "," raw[++i]
+    f[++n] = v
+  }
+  return n
+}
+BEGIN { OFS=","; dropped=0; print "trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal" > out }
+NR==1 { hdr_nf = csvsplit($0, h); next }
+{
+  if (csvsplit($0, c) != hdr_nf) { dropped++; next }
+  print ${trimestre}, c[${idx.ent}], c[${idx.fac_tri}], c[${idx.clase1}], c[${idx.clase2}], c[${idx.eda}], c[${idx.ingocup}], c[${idx.emp_ppal}] > out
+}
+END { print dropped }`;
 }
 
 export async function loadEnoe(
@@ -263,25 +315,10 @@ export async function loadEnoe(
 
   const started = Date.now();
 
-  // 1. Create raw table
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      ENOE_RAW_DDL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
+  // 1. Create the staging table (live enoe_sdem_raw untouched)
+  runPsqlScript(config.dbContainer, ENOE_RAW_DDL, 60_000);
 
-  // 2. For each quarter: awk-project + COPY
+  // 2. For each quarter: awk-project + COPY into staging
   const trimestresCargados: number[] = [];
   for (const q of config.quarters) {
     const containerSrc = `/tmp/enoe_sdem_${q.trimestre}_src_${Date.now()}.csv`;
@@ -296,17 +333,24 @@ export async function loadEnoe(
 
     try {
       // Project to 7-column form via awk
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "sh",
-          "-c",
-          `awk '${projectionAwkScript(q.trimestre)}' ${containerSrc} > ${containerProj}`,
-        ],
-        { encoding: "utf-8", timeout: 5 * 60_000 },
+      const dropped = Number(
+        execFileSync(
+          "docker",
+          [
+            "exec",
+            config.dbContainer,
+            "sh",
+            "-c",
+            `awk -v out=${containerProj} '${projectionAwkScript(q.trimestre)}' ${containerSrc}`,
+          ],
+          { encoding: "utf-8", timeout: 5 * 60_000 },
+        ).trim(),
       );
+      if (dropped > 0) {
+        console.warn(
+          `[load-enoe] Q${q.trimestre}: dropped ${dropped} rows whose field count differs from the header`,
+        );
+      }
 
       // \copy projected CSV
       execFileSync(
@@ -320,7 +364,7 @@ export async function loadEnoe(
           "-d",
           "postgres",
           "-c",
-          `\\copy enoe_sdem_raw (trimestre, ent, fac_tri, clase1, clase2, eda, ingocup, emp_ppal) FROM '${containerProj}' WITH (FORMAT csv, HEADER true)`,
+          `\\copy enoe_sdem_raw_staging (trimestre, ent, fac_tri, clase1, clase2, eda, ingocup, emp_ppal) FROM '${containerProj}' WITH (FORMAT csv, HEADER true)`,
         ],
         { encoding: "utf-8", timeout: 10 * 60_000 },
       );
@@ -339,23 +383,9 @@ export async function loadEnoe(
     }
   }
 
-  // 3. Build calibrators table (year inlined; pre-validated by ANIO_RE)
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      calibratorsDdl(config.year),
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
+  // 3. One transaction: swap → indexes → calibrators (year inlined;
+  //    pre-validated by ANIO_RE) → grants.
+  runPsqlScript(config.dbContainer, buildEnoeSwapSql(config.year), 10 * 60_000);
 
   // 4. Counts
   const cnt = (sql: string): number => {
@@ -386,6 +416,10 @@ export async function loadEnoe(
   const calibrators_rows = cnt(
     `SELECT COUNT(*) FROM calibrators_enoe_state WHERE ano_levantamiento = ${config.year};`,
   );
+  assertRelationsExist(config.dbContainer, [
+    "enoe_sdem_raw",
+    "calibrators_enoe_state",
+  ]);
   return {
     raw_rows,
     trimestres_cargados: trimestresCargados,

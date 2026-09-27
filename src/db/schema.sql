@@ -80,9 +80,12 @@ CREATE TABLE IF NOT EXISTS establecimientos (
 -- Índices
 -- -----------------------------------------------------------------------------
 
--- Búsqueda por entidad/estado
-CREATE INDEX IF NOT EXISTS idx_estab_entidad
-  ON establecimientos(entidad);
+-- Búsqueda por entidad/estado. Audit #121/#135: covering index, so the
+-- per-entidad aggregates (municipios, locust-muni, top-sectors) are
+-- index-only scans; it replaces idx_estab_entidad (migrations/020-indexes.sql).
+CREATE INDEX IF NOT EXISTS idx_estab_ent_mun_cov
+  ON establecimientos(entidad, area_geo)
+  INCLUDE (clase_actividad_id, sector_actividad_id);
 
 -- Búsqueda por municipio dentro de entidad
 CREATE INDEX IF NOT EXISTS idx_estab_area_geo
@@ -111,12 +114,10 @@ CREATE INDEX IF NOT EXISTS idx_estab_subrama
 CREATE INDEX IF NOT EXISTS idx_estab_geom
   ON establecimientos USING GIST(geom);
 
--- Índice para texto libre (nombre)
-CREATE INDEX IF NOT EXISTS idx_estab_nombre
-  ON establecimientos USING gin(to_tsvector('spanish', coalesce(nombre, '')));
-
 -- -----------------------------------------------------------------------------
 -- Trigger: actualizar updated_at automáticamente
+-- Only when the DENUE source record changes: maintenance backfills (geom,
+-- area_geo, ageb, SCIAN) must not look like fresh data (audit #127).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
@@ -129,7 +130,9 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_estab_updated_at ON establecimientos;
 CREATE TRIGGER trg_estab_updated_at
   BEFORE UPDATE ON establecimientos
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  FOR EACH ROW
+  WHEN (OLD.raw_json IS DISTINCT FROM NEW.raw_json)
+  EXECUTE FUNCTION update_updated_at();
 
 -- -----------------------------------------------------------------------------
 -- Vista útil: establecimientos con coordenadas como GeoJSON

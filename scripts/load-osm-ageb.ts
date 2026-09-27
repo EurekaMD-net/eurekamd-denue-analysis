@@ -11,8 +11,8 @@
  *
  * Pipeline:
  *   1. osmium tags-filter — keep only w/highway ways from the PBF
- *      (~750 MB → ~80 MB), drop nodes/relations/non-road ways.
- *   2. osmium export — convert filtered PBF → GeoJSONSeq (~150 MB).
+ *      (~750 MB → ~365 MB), drop nodes/relations/non-road ways.
+ *   2. osmium export — convert filtered PBF → GeoJSONSeq (~1.8 GB).
  *      One LineString feature per road segment with highway= tag.
  *   3. Copy the GeoJSONSeq into the Supabase container, ingest into a
  *      TEMPORARY table (geom + highway), build a GIST index. The temp
@@ -21,11 +21,16 @@
  *      each AGEB (cast to geography for true meters), divide by AGEB
  *      area for density, MIN distance to major roads (motorway/trunk/
  *      primary), per-class counts as JSONB. Write to osm_ageb_aggregates.
- *   5. The TEMPORARY table is gone after the psql session ends. Steady-
- *      state disk: ~10 MB for the 80k-row aggregate table.
+ *   5. The TEMPORARY table is gone after the psql session ends. After a
+ *      successful load the filtered PBF and GeoJSONSeq (~2.2 GB together)
+ *      are deleted from workDir (audit #151); after a failure they stay for
+ *      debugging and the next run overwrites them. Steady-state disk: ~10 MB
+ *      for the 80k-row aggregate table.
  *
- * Idempotent: rerun freely. osm_ageb_aggregates is DROP+CREATE on every
- * run; the GeoJSONSeq is rebuilt from the PBF every time.
+ * Idempotent: rerun freely. osm_ageb_aggregates is rebuilt on every run —
+ * into osm_ageb_aggregates_staging, swapped in inside the aggregate's own
+ * transaction (audit #145), so a failed run leaves the live table intact.
+ * The GeoJSONSeq is rebuilt from the PBF every time.
  *
  * Stays inside the project's existing TS + psql + osmium toolchain — no
  * Python, no GDAL beyond what PostGIS already provides, no QGIS.
@@ -34,7 +39,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
+import { postLoadGrants } from "./_psql-tx.js";
 
 // Matches load-clues.ts:32 — strict allowlist for docker container names
 // to neutralize any flag-injection via env override.
@@ -71,9 +77,10 @@ function assertSafePath(label: string, p: string): void {
  * derivatives and a downstream divide-by-zero on density should error not
  * silently produce ±Infinity.
  */
-export const CREATE_AGGREGATE_TABLE_SQL = `
-DROP TABLE IF EXISTS osm_ageb_aggregates;
-CREATE TABLE osm_ageb_aggregates (
+function aggregateTableDdl(table: string): string {
+  return `
+DROP TABLE IF EXISTS ${table};
+CREATE TABLE ${table} (
   -- cvegeo is the warehouse-wide AGEB key; no FK declared because
   -- ageb_polygons has its PK on ogc_fid (ogr2ogr-assigned), no UNIQUE
   -- on cvegeo. Consistent with how every other *_ageb consumer joins.
@@ -85,9 +92,9 @@ CREATE TABLE osm_ageb_aggregates (
   road_class_counts            JSONB,
   loaded_at                    TIMESTAMPTZ DEFAULT now()
 );
-COMMENT ON TABLE  osm_ageb_aggregates IS 'Per-AGEB OSM road network rollup. Loaded by scripts/load-osm-ageb.ts from Geofabrik MX PBF. cvegeo joins to ageb_polygons / censo_ageb / coneval_grs_ageb_raw.';
-COMMENT ON COLUMN osm_ageb_aggregates.dist_to_major_road_m IS 'Geodetic distance (m) from AGEB centroid to nearest motorway/trunk/primary. NULL if no major road exists in the country slice (should be vanishingly rare for MX).';
-COMMENT ON COLUMN osm_ageb_aggregates.road_class_counts IS 'JSONB: {"residential":42, "secondary":3, ...}. Includes ALL highway classes counted within the AGEB, not just major.';
+COMMENT ON TABLE  ${table} IS 'Per-AGEB OSM road network rollup. Loaded by scripts/load-osm-ageb.ts from Geofabrik MX PBF. cvegeo joins to ageb_polygons / censo_ageb / coneval_grs_ageb_raw.';
+COMMENT ON COLUMN ${table}.dist_to_major_road_m IS 'Geodetic distance (m) from AGEB centroid to nearest motorway/trunk/primary. NULL if no major road exists in the country slice (should be vanishingly rare for MX).';
+COMMENT ON COLUMN ${table}.road_class_counts IS 'JSONB: {"residential":42, "secondary":3, ...}. Includes ALL highway classes counted within the AGEB, not just major.';
 
 -- Consumer grants. Loader runs as 'postgres' which is OUTSIDE the
 -- default-ACL path that auto-grants supabase_admin-created tables to
@@ -98,24 +105,31 @@ COMMENT ON COLUMN osm_ageb_aggregates.road_class_counts IS 'JSONB: {"residential
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp_readonly') THEN
-    EXECUTE 'GRANT SELECT ON osm_ageb_aggregates TO mcp_readonly';
+    EXECUTE 'GRANT SELECT ON ${table} TO mcp_readonly';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage') THEN
-    EXECUTE 'GRANT SELECT ON osm_ageb_aggregates TO denue_sage';
+    EXECUTE 'GRANT SELECT ON ${table} TO denue_sage';
   END IF;
 END $$;
 `;
+}
+
+export const CREATE_AGGREGATE_TABLE_SQL = aggregateTableDdl("osm_ageb_aggregates");
 
 /**
  * Build the aggregate SQL block. Runs inside a single psql session against a
  * TEMPORARY staging table (so the raw road geometry never lands persistently).
  *
- * Steps inside one psql session:
+ * Steps inside one psql session and ONE transaction (audit #145):
+ *   - CREATE osm_ageb_aggregates_staging (same DDL + grants as the live table)
  *   - CREATE TEMP table osm_roads_staging (highway TEXT, geom geometry)
  *   - \copy GeoJSONSeq → JSONB temp loader → parse into staging
  *   - GIST index on staging.geom (only this session sees it)
- *   - INSERT INTO osm_ageb_aggregates SELECT ... FROM ageb_polygons
+ *   - INSERT INTO osm_ageb_aggregates_staging SELECT ... FROM ageb_polygons
  *       LEFT JOIN staging ON ST_Intersects(...)
+ *   - DROP the live table, RENAME staging (and its PK index) into place,
+ *     re-apply the P02 grant hygiene — all before COMMIT, so readers see
+ *     the old table or the new one, never none or an empty one
  *   - psql exits → TEMP table + index gone, only osm_ageb_aggregates persists
  *
  * The `containerGeojsonPath` is the GeoJSONSeq path INSIDE the docker
@@ -142,6 +156,7 @@ export function buildAggregateSql(containerGeojsonPath: string): string {
 \\set ON_ERROR_STOP on
 SET statement_timeout = '25min';
 BEGIN;
+${aggregateTableDdl("osm_ageb_aggregates_staging")}
 
 CREATE TEMPORARY TABLE osm_roads_loader (
   feat JSONB
@@ -180,7 +195,7 @@ CREATE INDEX ON osm_roads_staging USING GIST (geom)
 ANALYZE osm_roads_staging;
 ANALYZE osm_roads_centroids;
 
-INSERT INTO osm_ageb_aggregates (
+INSERT INTO osm_ageb_aggregates_staging (
   cvegeo,
   road_length_m,
   road_density_km_per_km2,
@@ -241,6 +256,11 @@ SELECT
   COALESCE(ar.class_counts, '{}'::jsonb)                                    AS road_class_counts
 FROM ageb_rollup ar
 LEFT JOIN nearest_major nm USING (cvegeo);
+
+DROP TABLE IF EXISTS osm_ageb_aggregates;
+ALTER TABLE osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;
+ALTER INDEX osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;
+${postLoadGrants(["osm_ageb_aggregates"])}
 
 COMMIT;
 `;
@@ -326,28 +346,11 @@ export async function loadOsmAgeb(
     timeout: 5 * 60_000,
   });
 
-  // 3. Create aggregate table (DROP+CREATE — idempotent).
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      CREATE_AGGREGATE_TABLE_SQL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 4+5. Copy GeoJSONSeq into the container, then run the aggregate inside
-  //      a single psql session — TEMP table + GIST + INSERT + COMMIT. The
+  // 3-5. Copy GeoJSONSeq into the container, then run the aggregate inside
+  //      a single psql session — staging table + TEMP table + GIST + INSERT
+  //      + swap + COMMIT (audit #145: no separate DROP+CREATE step). The
   //      try/finally wraps BOTH the cp and the aggregate so a mid-pipeline
-  //      failure still tries to remove the (possibly partial) ~150MB file
+  //      failure still tries to remove the (possibly partial) ~1.8 GB file
   //      from the container (audit W5).
   try {
     execFileSync(
@@ -426,7 +429,7 @@ export async function loadOsmAgeb(
   };
   const ageb_rows_loaded = cnt("SELECT COUNT(*) FROM osm_ageb_aggregates;");
 
-  return {
+  const result = {
     pbf_bytes: statSync(config.pbfPath).size,
     filtered_pbf_bytes: existsSync(filteredPbf)
       ? statSync(filteredPbf).size
@@ -435,6 +438,11 @@ export async function loadOsmAgeb(
     ageb_rows_loaded,
     duration_ms: Date.now() - started,
   };
+  // 7. Drop the host-side intermediates (~2.2 GB) now the load landed
+  //    (audit #151). Both are rebuilt from the PBF on every run.
+  rmSync(filteredPbf, { force: true });
+  rmSync(geojsonPath, { force: true });
+  return result;
 }
 
 // ---------------------------------------------------------------------------

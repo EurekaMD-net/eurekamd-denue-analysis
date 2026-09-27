@@ -7,6 +7,10 @@
  */
 
 import { readFileSync } from "fs";
+import { execFileSync } from "child_process";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+import { assertSafeContainer } from "../api/handlers/_safe-container.js";
 import type { DenueRawRecord } from "../extractor/types.js";
 
 export type { DenueRawRecord };
@@ -139,23 +143,50 @@ function deriveAreaGeo(clee: string | undefined | null): string | null {
   return slice;
 }
 
+const CLASE_CATALOG_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "scian_clase_catalog.json",
+);
+let claseCatalog: Record<string, string> | null = null;
+
+/**
+ * SCIAN clase code for a Clase_actividad label, from the catalog built by
+ * scripts/gen-scian-clase-catalog.ts. The label is current; CLEE chars 6-11
+ * keep the class from registration and miss every later reclassification
+ * (audit #131: ~12% of CDMX rows, e.g. an abarrotes store stored as 464111
+ * pharmacy). null when the label is absent or not in the catalog.
+ */
+function claseFromLabel(label: string | null): string | null {
+  if (!label) return null;
+  claseCatalog ??= (
+    JSON.parse(readFileSync(CLASE_CATALOG_PATH, "utf-8")) as {
+      clases: Record<string, string>;
+    }
+  ).clases;
+  return Object.hasOwn(claseCatalog, label) ? claseCatalog[label]! : null;
+}
+
 /** Transforma un registro crudo DENUE en una fila normalizada */
 export function transform(raw: DenueRawRecord): EstablecimientoRow {
+  // One source for the whole SCIAN hierarchy: the API code if an endpoint
+  // returns it, else the label's catalog code, else CLEE. The sector /
+  // subsector / rama / subrama ids are that code's prefixes, so they can
+  // never disagree with clase_actividad_id.
+  const clase =
+    clean(raw.CLASE_ACTIVIDAD_ID) ??
+    claseFromLabel(clean(raw.Clase_actividad)) ??
+    deriveScian(raw.CLEE, 6);
   return {
     clee: raw.CLEE,
     denue_id: clean(raw.Id),
     nombre: clean(raw.Nombre),
     razon_social: clean(raw.Razon_social),
-    clase_actividad_id:
-      clean(raw.CLASE_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 6),
+    clase_actividad_id: clase,
     clase_actividad: clean(raw.Clase_actividad),
-    sector_actividad_id:
-      clean(raw.SECTOR_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 2),
-    subsector_actividad_id:
-      clean(raw.SUBSECTOR_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 3),
-    rama_actividad_id: clean(raw.RAMA_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 4),
-    subrama_actividad_id:
-      clean(raw.SUBRAMA_ACTIVIDAD_ID) ?? deriveScian(raw.CLEE, 5),
+    sector_actividad_id: clase?.slice(0, 2) ?? null,
+    subsector_actividad_id: clase?.slice(0, 3) ?? null,
+    rama_actividad_id: clase?.slice(0, 4) ?? null,
+    subrama_actividad_id: clase?.slice(0, 5) ?? null,
     estrato: clean(raw.Estrato),
     tipo_unidad: clean(raw.Tipo),
     tipo_vialidad: clean(raw.Tipo_vialidad),
@@ -193,12 +224,20 @@ export function transform(raw: DenueRawRecord): EstablecimientoRow {
 
 /**
  * Extrae el nombre del municipio del campo Ubicacion.
- * Formato típico: "MUNICIPIO, ESTADO" o "MUNICIPIO"
+ * Formato DENUE: "LOCALIDAD, Municipio, ESTADO" (audit #40: the first segment
+ * is the locality, not the municipio). Locality and state are upper case and
+ * the municipio is mixed case — true for every 3-segment row in a 305k-row
+ * sample — and locality and municipio names can themselves contain commas
+ * ("EL SAUZ (SAUZ ALTO, SAUZ BAJO), Pedro Escobedo, QUERÉTARO"), so the
+ * municipio is the mixed-case segments before the state. The SQL backfill
+ * scripts/migrations/014-estab-scian-municipio-backfill.sql mirrors this.
  */
 function extractMunicipio(ubicacion: string | null): string | null {
   if (!ubicacion) return null;
-  const parts = ubicacion.split(",");
-  return parts[0].trim() || null;
+  const parts = ubicacion.split(",").map((p) => p.trim());
+  if (parts.length < 3) return parts[0] || null;
+  const mixed = parts.slice(0, -1).filter((p) => p !== p.toUpperCase());
+  return (mixed.length > 0 ? mixed.join(", ") : parts[1]) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +289,12 @@ export async function loadRecords(
 
     // Construir payload para upsert.
     // - geom NO está en EstablecimientoRow — Postgres lo calcula con updateGeometry()
+    // - ageb se omite: PostgREST's merge-duplicates becomes ON CONFLICT DO
+    //   UPDATE SET <every payload column>, so sending ageb:null would wipe the
+    //   13-char CVEGEO written by scripts/backfill-ageb.ts (audit #142).
+    //   Columns absent from the payload are left untouched on conflict.
     // - raw_json se pasa como objeto (no string) para que PostgREST lo trate como JSONB
-    const payload = chunk;
+    const payload = chunk.map(({ ageb: _ageb, ...row }) => row);
 
     // ?on_conflict=clee is required for PostgREST upsert on a non-PK unique column.
     // The table uses id (bigserial) as PK and clee as UNIQUE. Without this param,
@@ -264,7 +307,9 @@ export async function loadRecords(
         apikey: serviceRoleKey,
         Authorization: `Bearer ${serviceRoleKey}`,
         "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates,return=representation",
+        // return=minimal: only the count is used, and echoing every row back
+        // (raw_json included) doubled the transfer (audit #51).
+        Prefer: "resolution=merge-duplicates,return=minimal",
       },
       body: JSON.stringify(payload),
     });
@@ -278,8 +323,7 @@ export async function loadRecords(
       continue;
     }
 
-    const returned = (await response.json()) as unknown[];
-    result.inserted += returned.length;
+    result.inserted += chunk.length;
   }
 
   result.durationMs = Date.now() - startMs;
@@ -288,49 +332,56 @@ export async function loadRecords(
 
 /**
  * Actualiza la columna geom a partir de latitud/longitud ya almacenadas.
- * Se ejecuta una sola vez después de la carga inicial.
+ * Se ejecuta después de cada carga.
  *
- * Requiere que exista la función RPC `exec_sql` en Supabase, o usa
- * docker exec como fallback si la env var SUPABASE_DB_CONTAINER está definida.
+ * Rewrites geom wherever it is missing OR no longer matches latitud/longitud:
+ * the upsert never sends geom, so a re-loaded establishment that moved kept
+ * its old point (audit #42). Runs psql via docker exec with argv (no shell)
+ * after validating the container name (audit #43/#161), under a timeout, and
+ * throws on failure so the caller's run fails instead of reporting success
+ * with rows that tiles / radius search / clusters cannot see.
  */
 export async function updateGeometry(
   config: LoaderConfig,
 ): Promise<{ updated: number }> {
-  const { supabaseUrl, serviceRoleKey } = config;
-
+  void config;
   const sql = `
     UPDATE establecimientos
     SET geom = ST_SetSRID(ST_MakePoint(longitud::float8, latitud::float8), 4326)
     WHERE latitud IS NOT NULL
       AND longitud IS NOT NULL
-      AND geom IS NULL
+      AND (geom IS NULL
+           OR NOT ST_Equals(geom, ST_SetSRID(ST_MakePoint(longitud::float8, latitud::float8), 4326)))
   `;
 
-  // Intentar via docker exec (disponible en el VPS)
   const container = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
-  const { execSync } = await import("child_process");
-  try {
-    const psqlCmd = `docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`;
-    const output = execSync(psqlCmd, { encoding: "utf-8" });
-    // Output típico: "UPDATE 29"
-    const match = output.match(/UPDATE (\d+)/);
-    const updated = match ? parseInt(match[1]!, 10) : 0;
-    console.log(`✅ Geometrías actualizadas: ${updated} registros`);
-    return { updated };
-  } catch (err) {
-    // Fallback: instrucción manual
-    console.warn(
-      "⚠️  No se pudo ejecutar geometry update via docker exec:",
-      (err as Error).message,
-    );
-    console.log("Ejecuta manualmente:");
-    console.log(
-      `  docker exec ${container} psql -U postgres -d postgres -c "${sql.replace(/\n\s+/g, " ").trim()}"`,
-    );
-    void supabaseUrl;
-    void serviceRoleKey;
-    return { updated: 0 };
+  assertSafeContainer(container);
+  const output = execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-X",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-c",
+      sql,
+    ],
+    { encoding: "utf-8", timeout: 60 * 60 * 1000 }, // 1h cap — full-table on 6.1M
+  );
+  // Output típico: "UPDATE 29"
+  const match = output.match(/UPDATE (\d+)/);
+  if (!match) {
+    throw new Error(`updateGeometry: unexpected psql output "${output.trim()}"`);
   }
+  const updated = parseInt(match[1]!, 10);
+  console.log(`✅ Geometrías actualizadas: ${updated} registros`);
+  return { updated };
 }
 
 // ---------------------------------------------------------------------------

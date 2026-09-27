@@ -2,6 +2,8 @@
 --
 -- Apply once after Censo ITER is loaded:
 --   docker exec -i supabase-db psql -U postgres -d postgres < scripts/migrate-censo-views.sql
+-- scripts/load-censo.ts re-runs this file inside its reload transaction
+-- (audit #144), so keep it free of BEGIN/COMMIT and psql meta-commands.
 --
 -- Idempotent: CREATE OR REPLACE for both views. No data movement.
 -- censo_iter raw has 287 cols; v0.2.x exposed 14 in censo_municipios. This

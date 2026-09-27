@@ -13,7 +13,7 @@
  */
 
 import { writeFileSync } from "fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { sectorSummary } from "../src/analysis/sector-summary.js";
 import { topMunicipios } from "../src/analysis/top-municipios.js";
 import { exportGeoJson } from "../src/analysis/geojson-export.js";
@@ -26,6 +26,10 @@ import {
   formatCoverageReport,
 } from "../src/analysis/coverage-report.js";
 import type { AnalysisConfig } from "../src/analysis/types.js";
+
+// Same rule as scripts/backfill-ageb.ts: no leading `-` (docker would parse it
+// as a flag) and no shell metacharacters.
+const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
 const MATERIALIZED_VIEWS = [
   "mv_sector_summary",
@@ -165,13 +169,21 @@ if (command === "sector-summary") {
   const report = await coverageReport(config);
   console.log(formatCoverageReport(report));
 } else if (command === "refresh-views") {
+  const container = config.dbContainer ?? "";
+  if (!CONTAINER_RE.test(container)) {
+    console.error(
+      `❌  SUPABASE_DB_CONTAINER inválido "${container}". Solo alfanuméricos + _.-`,
+    );
+    process.exit(1);
+  }
   console.log("🔄  Refrescando materialized views...");
   for (const view of MATERIALIZED_VIEWS) {
     process.stdout.write(`  ${view}... `);
     try {
       // CONCURRENTLY allows reads during refresh; requires a UNIQUE INDEX (we have one)
-      execSync(
-        `docker exec ${config.dbContainer} psql -U postgres -d postgres -c "REFRESH MATERIALIZED VIEW CONCURRENTLY ${view};"`,
+      execFileSync(
+        "docker",
+        ["exec", container, "psql", "-U", "postgres", "-d", "postgres", "-c", `REFRESH MATERIALIZED VIEW CONCURRENTLY ${view};`],
         { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
       );
       console.log("✅");
@@ -181,8 +193,9 @@ if (command === "sector-summary") {
       // CONCURRENTLY can fail on first refresh after WITH NO DATA — fall back to non-concurrent
       if (/cannot refresh materialized view.*concurrently/i.test(msg)) {
         process.stdout.write("(first refresh, no concurrency)... ");
-        execSync(
-          `docker exec ${config.dbContainer} psql -U postgres -d postgres -c "REFRESH MATERIALIZED VIEW ${view};"`,
+        execFileSync(
+          "docker",
+          ["exec", container, "psql", "-U", "postgres", "-d", "postgres", "-c", `REFRESH MATERIALIZED VIEW ${view};`],
           { encoding: "utf-8" },
         );
         console.log("✅");

@@ -82,5 +82,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS mv_estrato_por_entidad_pk
 -- Grant read access. The two summary MVs follow scripts/migrations/021:
 -- service_role (the API's PostgREST key) and denue_sage only.
 GRANT SELECT ON mv_sector_summary TO service_role, denue_sage;
-GRANT SELECT ON mv_coverage TO anon, authenticated;
 GRANT SELECT ON mv_estrato_por_entidad TO service_role, denue_sage;

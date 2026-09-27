@@ -10,13 +10,17 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads perf-matviews.sql / sage-role.sql.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
 }));
 
 import {
+  buildEdrAppendSql,
+  buildEdrReloadSql,
   EDR_COLUMNS,
   EDR_DDL_FOR_TEST,
   expectEdrHeader,
@@ -114,6 +118,37 @@ describe("EDR_DDL_FOR_TEST", () => {
   it("uses DROP TABLE IF EXISTS for idempotent rerun", () => {
     expect(EDR_DDL_FOR_TEST).toMatch(/DROP TABLE IF EXISTS/);
   });
+
+  it("never CASCADEs (audit #144 — it silently dropped mv_mortalidad_municipal_yearly)", () => {
+    expect(EDR_DDL_FOR_TEST).not.toMatch(/CASCADE/);
+  });
+});
+
+describe("buildEdrReloadSql (audit #144)", () => {
+  const sql = buildEdrReloadSql("/tmp/edr_raw_1.csv");
+
+  it("\\copies into staging before dropping anything live", () => {
+    expect(sql.indexOf("\\copy inegi_edr_defunciones_raw_staging FROM '/tmp/edr_raw_1.csv'")).toBeLessThan(
+      sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_mortalidad_municipal_yearly;"),
+    );
+  });
+
+  it("drops the MV explicitly, swaps, indexes the swapped table, then rebuilds the MV", () => {
+    const dropMv = sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_mortalidad_municipal_yearly;");
+    const dropTable = sql.indexOf("DROP TABLE IF EXISTS inegi_edr_defunciones_raw;");
+    const swap = sql.indexOf(
+      "ALTER TABLE inegi_edr_defunciones_raw_staging RENAME TO inegi_edr_defunciones_raw;",
+    );
+    const index = sql.indexOf("CREATE INDEX idx_edr_ent_resid ON inegi_edr_defunciones_raw ");
+    const rebuild = sql.indexOf("CREATE MATERIALIZED VIEW mv_mortalidad_municipal_yearly AS");
+    expect(dropMv).toBeGreaterThan(-1);
+    expect(dropMv).toBeLessThan(dropTable);
+    expect(dropTable).toBeLessThan(swap);
+    expect(swap).toBeLessThan(index);
+    expect(index).toBeLessThan(rebuild);
+    expect(sql).not.toMatch(/DROP (TABLE|VIEW)[^;]*CASCADE/);
+    expect(sql).toContain("GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_sage;");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -150,15 +185,16 @@ describe("loadEdr", () => {
 
   it("orchestrates DDL → docker cp → \\copy → cleanup → counts", async () => {
     stubHeader(REAL_HEADER);
-    // Sequence: DDL, cp, \copy, cleanup-rm, count(raw), count(residence), count(distinct)
+    // Sequence: cp, reload transaction, cleanup-rm, count(raw),
+    // count(residence), count(distinct), to_regclass assertion
     mockExec
-      .mockReturnValueOnce("") // DDL
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // reload transaction
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("819672") // raw_rows
       .mockReturnValueOnce("809063") // rows_with_residence
-      .mockReturnValueOnce("2472"); // rows_unique_municipios
+      .mockReturnValueOnce("2472") // rows_unique_municipios
+      .mockReturnValueOnce(""); // nothing missing
 
     const result = await loadEdr({
       csvPath: "/tmp/edr.csv",
@@ -170,8 +206,8 @@ describe("loadEdr", () => {
     expect(result.rows_unique_municipios).toBe(2472);
     expect(typeof result.duration_ms).toBe("number");
 
-    // Verify docker cp was the second call with `--` separator (path-injection defense)
-    const cpCall = mockExec.mock.calls[1];
+    // Verify docker cp was the first call with `--` separator (path-injection defense)
+    const cpCall = mockExec.mock.calls[0];
     expect(cpCall?.[0]).toBe("docker");
     expect(cpCall?.[1]).toEqual([
       "cp",
@@ -179,6 +215,27 @@ describe("loadEdr", () => {
       "/tmp/edr.csv",
       expect.stringMatching(/^supabase-db:\/tmp\/edr_raw_/),
     ]);
+    // The whole replace runs as ONE single-transaction psql session.
+    const tx = mockExec.mock.calls[1];
+    expect(tx?.[1]).toContain("--single-transaction");
+    expect((tx?.[2] as { input: string }).input).toMatch(
+      /\\copy inegi_edr_defunciones_raw_staging FROM '\/tmp\/edr_raw_\d+\.csv'/,
+    );
+  });
+
+  it("fails loud when an analytics MV is missing after the load", async () => {
+    stubHeader(REAL_HEADER);
+    mockExec
+      .mockReturnValueOnce("") // docker cp
+      .mockReturnValueOnce("") // reload transaction
+      .mockReturnValueOnce("") // rm cleanup
+      .mockReturnValueOnce("1")
+      .mockReturnValueOnce("1")
+      .mockReturnValueOnce("1")
+      .mockReturnValueOnce("mv_mortalidad_municipal_yearly\n");
+    await expect(
+      loadEdr({ csvPath: "/tmp/edr.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/missing after load: mv_mortalidad_municipal_yearly/);
   });
 
   it("skips DDL when --append is passed and purges prior anio_regis (audit M1)", async () => {
@@ -204,13 +261,13 @@ describe("loadEdr", () => {
     mockClose.mockReturnValue(undefined);
 
     mockExec
-      .mockReturnValueOnce("") // DELETE FROM ... WHERE anio_regis = '2023'
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // DELETE year + \copy (one tx, audit #147)
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("1639344") // raw_rows (2x)
       .mockReturnValueOnce("1618000") // rows_with_residence
-      .mockReturnValueOnce("2472"); // rows_unique_municipios
+      .mockReturnValueOnce("2472") // rows_unique_municipios
+      .mockReturnValueOnce(""); // nothing missing
 
     await loadEdr({
       csvPath: "/tmp/edr2023.csv",
@@ -218,14 +275,39 @@ describe("loadEdr", () => {
       append: true,
     });
 
-    // First call: DELETE keyed by the year extracted from line 2.
-    const purgeCall = mockExec.mock.calls[0];
-    expect(purgeCall?.[1]?.[0]).toBe("exec");
-    const purgeSql = purgeCall?.[1]?.[purgeCall[1].length - 1] ?? "";
-    expect(purgeSql).toMatch(/DELETE FROM inegi_edr_defunciones_raw/);
-    expect(purgeSql).toMatch(/anio_regis = '2023'/);
-    // Second call: cp (no DDL).
-    expect(mockExec.mock.calls[1]?.[1]?.[0]).toBe("cp");
+    // First call: cp (no DDL, no purge outside the transaction).
+    expect(mockExec.mock.calls[0]?.[1]?.[0]).toBe("cp");
+    // Second call: DELETE keyed by the year extracted from line 2, then
+    // \copy — ONE single-transaction psql session (audit #147), so a failed
+    // \copy rolls the purge back instead of leaving 2023 deleted.
+    const txCall = mockExec.mock.calls[1];
+    expect(txCall?.[1]).toContain("--single-transaction");
+    const txSql = String((txCall?.[2] as { input: string }).input);
+    const containerPath = String(
+      (mockExec.mock.calls[0]?.[1] as string[])[3],
+    ).replace("supabase-db:", "");
+    expect(txSql).toBe(buildEdrAppendSql(containerPath, "2023"));
+    expect(txSql).toMatch(/DELETE FROM inegi_edr_defunciones_raw/);
+    expect(txSql).toMatch(/anio_regis = '2023'/);
+    expect(txSql.indexOf("DELETE")).toBeLessThan(txSql.indexOf("\\copy"));
+    // No psql session runs the DELETE on its own.
+    const loneDeletes = mockExec.mock.calls.filter((c) =>
+      ((c[1] as string[]) ?? []).some((a) => a.includes("DELETE FROM")),
+    );
+    expect(loneDeletes).toHaveLength(0);
+  });
+
+  it("buildEdrAppendSql: DELETE + \\copy, or \\copy alone when the year is unknown", () => {
+    expect(buildEdrAppendSql("/tmp/e.csv", "2023")).toBe(
+      "DELETE FROM inegi_edr_defunciones_raw WHERE anio_regis = '2023';\n" +
+        "\\copy inegi_edr_defunciones_raw FROM '/tmp/e.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    expect(buildEdrAppendSql("/tmp/e.csv", null)).toBe(
+      "\\copy inegi_edr_defunciones_raw FROM '/tmp/e.csv' WITH (FORMAT csv, HEADER true)",
+    );
+    expect(() => buildEdrAppendSql("/tmp/e.csv", "2023'; DROP")).toThrow(
+      /anio_regis inválido/,
+    );
   });
 
   it("--append with unparseable anio_regis skips purge (loader proceeds)", async () => {
@@ -250,11 +332,12 @@ describe("loadEdr", () => {
 
     mockExec
       .mockReturnValueOnce("") // docker cp (no purge, no DDL)
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // \copy (one tx, no DELETE)
       .mockReturnValueOnce("") // rm cleanup
       .mockReturnValueOnce("0")
       .mockReturnValueOnce("0")
-      .mockReturnValueOnce("0");
+      .mockReturnValueOnce("0")
+      .mockReturnValueOnce(""); // nothing missing
 
     await loadEdr({
       csvPath: "/tmp/edr-bad.csv",
@@ -264,12 +347,14 @@ describe("loadEdr", () => {
 
     // First call should jump straight to cp — purge is skipped on unparseable year.
     expect(mockExec.mock.calls[0]?.[1]?.[0]).toBe("cp");
+    expect(
+      String((mockExec.mock.calls[1]?.[2] as { input: string }).input),
+    ).not.toMatch(/DELETE/);
   });
 
   it("cleans up the container temp file even if \\copy throws", async () => {
     stubHeader(REAL_HEADER);
     mockExec
-      .mockReturnValueOnce("") // DDL
       .mockReturnValueOnce("") // docker cp
       .mockImplementationOnce(() => {
         throw new Error("\\copy failed: ERROR: malformed CSV");
@@ -279,8 +364,8 @@ describe("loadEdr", () => {
       loadEdr({ csvPath: "/tmp/edr.csv", dbContainer: "supabase-db" }),
     ).rejects.toThrow(/\\copy failed/);
 
-    // Cleanup `rm -f` should have been attempted (4th call)
-    const cleanupCall = mockExec.mock.calls[3];
+    // Cleanup `rm -f` should have been attempted (3rd call)
+    const cleanupCall = mockExec.mock.calls[2];
     expect(cleanupCall?.[1]).toEqual([
       "exec",
       "supabase-db",
@@ -293,9 +378,8 @@ describe("loadEdr", () => {
   it("rejects unparseable count output as a server-bug guard", async () => {
     stubHeader(REAL_HEADER);
     mockExec
-      .mockReturnValueOnce("") // DDL
       .mockReturnValueOnce("") // cp
-      .mockReturnValueOnce("") // \copy
+      .mockReturnValueOnce("") // reload transaction
       .mockReturnValueOnce("") // rm
       .mockReturnValueOnce("not a number"); // bad count
 

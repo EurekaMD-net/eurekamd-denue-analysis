@@ -55,7 +55,6 @@ GRANT SELECT ON mv_sector_grade_matrix TO denue_sage;
 -- 137 rows / 137 unique (scian, irs_grado) pairs / 0 NULL keys.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sgm_scian_irs
   ON mv_sector_grade_matrix(scian, irs_grado);
-CREATE INDEX idx_mv_sgm_scian ON mv_sector_grade_matrix(scian);
 CREATE INDEX idx_mv_sgm_irs ON mv_sector_grade_matrix(irs_grado);
 
 -- =============================================================================
@@ -161,10 +160,10 @@ GROUP BY cve_mun, ano;
 -- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
 GRANT SELECT ON mv_delitos_municipal_yearly TO denue_sage;
 
-CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_dmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_dmy_unique ON mv_delitos_municipal_yearly(cve_mun, ano);
 
 
@@ -225,10 +224,10 @@ GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
 -- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
 GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_sage;
 
-CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_mmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_yearly(cve_mun, ano);
 
 -- =============================================================================

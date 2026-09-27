@@ -42,8 +42,6 @@ export function validateExtractorFile(
   filePath: string,
   sampleSize = 5
 ): ValidationResult {
-  const errors: string[] = [];
-
   // 1. Parsear el JSON
   let records: DenueRawRecord[];
   try {
@@ -61,6 +59,22 @@ export function validateExtractorFile(
       errors: [`Error al parsear JSON: ${(err as Error).message}`],
     };
   }
+
+  return validateRecords(records, sampleSize);
+}
+
+/**
+ * Valida registros ya parseados. El orchestrator parsea el archivo una sola
+ * vez y pasa el mismo array aquí y a loadRecords (audit #48/#148).
+ *
+ * @param records    - Registros del extractor
+ * @param sampleSize - Número de registros a samplear (default: 5)
+ */
+export function validateRecords(
+  records: DenueRawRecord[],
+  sampleSize = 5
+): ValidationResult {
+  const errors: string[] = [];
 
   if (records.length === 0) {
     return { valid: false, totalRecords: 0, sampleSize: 0, errors: ["El archivo contiene 0 registros"] };

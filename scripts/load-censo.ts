@@ -10,19 +10,29 @@
  *   # Extract conjunto_de_datos_iter_00CSV20.csv somewhere, then:
  *   npx tsx --env-file=.env scripts/load-censo.ts --csv=/opt/data/iter/.../conjunto_de_datos_iter_00CSV20.csv
  *
- * Behavior:
- *  1. Reads CSV header → CREATE TABLE censo_iter (col1 TEXT, col2 TEXT, ...)
+ * Behavior (ONE psql transaction — a failure leaves the DB untouched):
+ *  1. Reads CSV header → CREATE TABLE censo_iter_staging (col1 TEXT, ...)
  *     with 286 TEXT columns. Verbatim — no row filtering, no value casting.
  *  2. \copy ... NULL '*' so INEGI's null marker becomes SQL NULL.
- *  3. Adds generated column cve_mun (entidad||mun) for joins.
- *  4. Creates a partial btree index on cve_mun (loc='0000') for hot path.
- *  5. Creates censo_municipios view with cast columns for common analytics.
+ *  3. Drops censo_localidades / censo_entidades / censo_municipios
+ *     explicitly (no CASCADE, audit #144) and swaps staging in as censo_iter.
+ *  4. Adds generated column cve_mun (entidad||mun) for joins.
+ *  5. Creates a partial btree index on cve_mun (loc='0000') for hot path.
+ *  6. Recreates all three censo views from scripts/migrate-censo-views.sql
+ *     + re-applies grants.
  *
- * Idempotent: drops + recreates censo_iter on each run.
+ * Idempotent: replaces censo_iter on each run.
  */
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  CENSO_VIEWS,
+  censoViewsSql,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -61,7 +71,10 @@ export interface LoadCensoResult {
  * Read CSV header line and produce the column-list portion of the
  * CREATE TABLE statement. Strips BOM, lowercases names, all TEXT.
  */
-export function buildCensoCreateTable(csvHeaderLine: string): string {
+export function buildCensoCreateTable(
+  csvHeaderLine: string,
+  table = "censo_iter",
+): string {
   const stripped = csvHeaderLine.replace(/^﻿/, "").trim();
   const cols = stripped.split(",").map((c) => c.trim().toLowerCase());
   if (cols.length < 5) {
@@ -90,14 +103,11 @@ export function buildCensoCreateTable(csvHeaderLine: string): string {
   // etc.). Real INEGI columns don't trigger this today, but the cost of
   // quoting is zero and the surprise on a future release would be ugly.
   const colDefs = cols.map((c) => `  "${c}" TEXT`).join(",\n");
-  // CASCADE drops the censo_municipios view that depends on this table —
-  // intentional, the view is recreated by POST_LOAD_SQL below. If a future
-  // migration adds another dependent (e.g. censo_municipios_with_denue),
-  // it would be silently dropped here. Replace CASCADE with explicit
-  // `DROP VIEW … ; DROP TABLE …` if that becomes a real risk.
+  // No CASCADE (audit #144): the loader builds `censo_iter_staging` and
+  // swaps it in after dropping the known censo views explicitly.
   return [
-    "DROP TABLE IF EXISTS censo_iter CASCADE;",
-    `CREATE TABLE censo_iter (\n${colDefs}\n);`,
+    `DROP TABLE IF EXISTS ${table};`,
+    `CREATE TABLE ${table} (\n${colDefs}\n);`,
   ].join("\n");
 }
 
@@ -106,39 +116,38 @@ export function buildCensoCreateTable(csvHeaderLine: string): string {
 // `loc`: '0000' = municipal aggregate, anything else = locality. Don't
 // touch one without the other.
 //
-// S2: the 14 columns exposed by censo_municipios are the v0.2.1-roadmap
-// hot path (population × age × employment × education × housing). All 286
-// raw columns remain accessible via `censo_iter` for ad-hoc queries.
-// Add to this list when a new analytical use case justifies the cast.
+// S2: the censo views (censo_municipios, censo_localidades,
+// censo_entidades) are defined ONLY in scripts/migrate-censo-views.sql —
+// the loader recreates them from that file so a reload can't drop the
+// locality/state views for good (audit #144). All 286 raw columns remain
+// accessible via `censo_iter` for ad-hoc queries.
 const POST_LOAD_SQL = `
 ALTER TABLE censo_iter ADD COLUMN cve_mun TEXT GENERATED ALWAYS AS (entidad || mun) STORED;
 CREATE INDEX idx_censo_iter_cve_mun ON censo_iter(cve_mun) WHERE loc = '0000';
 CREATE INDEX idx_censo_iter_level ON censo_iter(entidad, mun, loc);
 -- #118: serves censo_localidades lookups by cve_mun / (cve_mun, loc).
 CREATE INDEX idx_censo_iter_cve_mun_loc ON censo_iter(cve_mun, loc) WHERE loc <> '0000' AND mun <> '000';
-
-CREATE OR REPLACE VIEW censo_municipios AS
-SELECT
-  cve_mun,
-  entidad,
-  mun,
-  nom_mun,
-  pobtot::int     AS pobtot,
-  pobfem::int     AS pobfem,
-  pobmas::int     AS pobmas,
-  p_60ymas::int   AS p_60ymas,
-  p_15ymas::int   AS p_15ymas,
-  p_18ymas::int   AS p_18ymas,
-  pea::int        AS pea,
-  pocupada::int   AS pocupada,
-  graproes::numeric AS graproes,
-  tvivhab::int    AS tvivhab,
-  tvivpar::int    AS tvivpar,
-  vph_inter::int  AS vph_inter,
-  vph_autom::int  AS vph_autom
-FROM censo_iter
-WHERE loc = '0000' AND mun != '000';
 `;
+
+/**
+ * The single-transaction reload script: \copy into staging, drop the three
+ * censo views explicitly (an unknown dependent makes DROP TABLE fail →
+ * rollback), swap, index, recreate the views, re-apply grants.
+ */
+export function buildCensoReloadSql(csvHeaderLine: string): string {
+  return [
+    buildCensoCreateTable(csvHeaderLine, "censo_iter_staging"),
+    `\\copy censo_iter_staging FROM '/tmp/iter.csv' WITH (FORMAT csv, HEADER true, NULL '*')`,
+    "DROP VIEW IF EXISTS censo_localidades;",
+    "DROP VIEW IF EXISTS censo_entidades;",
+    "DROP VIEW IF EXISTS censo_municipios;",
+    "DROP TABLE IF EXISTS censo_iter;",
+    "ALTER TABLE censo_iter_staging RENAME TO censo_iter;",
+    POST_LOAD_SQL,
+    censoViewsSql(),
+    postLoadGrants(["censo_iter", ...CENSO_VIEWS]),
+  ].join("\n");
+}
 
 export async function loadCenso(
   config: LoadCensoConfig,
@@ -158,30 +167,13 @@ export async function loadCenso(
   const started = Date.now();
   const headerLine = readFirstLine(config.csvPath);
   if (!headerLine) throw new Error(`loadCenso: empty CSV at ${config.csvPath}`);
-  const createSql = buildCensoCreateTable(headerLine);
+  const reloadSql = buildCensoReloadSql(headerLine);
 
-  // 1. Create table
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      createSql,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. Copy CSV into container then \copy. Keeps containerd I/O path simple.
-  // `--` separates flags from positional args so a csvPath beginning with '-'
-  // (already rejected above, but defense-in-depth) can never reach docker as
-  // a flag.
+  // 1. Copy CSV into container, then ONE transaction: \copy into staging →
+  // swap → indexes → censo views (audit #144). Keeps containerd I/O path
+  // simple. `--` separates flags from positional args so a csvPath beginning
+  // with '-' (already rejected above, but defense-in-depth) can never reach
+  // docker as a flag.
   execFileSync(
     "docker",
     ["cp", "--", config.csvPath, `${config.dbContainer}:/tmp/iter.csv`],
@@ -189,21 +181,7 @@ export async function loadCenso(
   );
   let copyOut = "";
   try {
-    copyOut = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy censo_iter FROM '/tmp/iter.csv' WITH (FORMAT csv, HEADER true, NULL '*')`,
-      ],
-      { encoding: "utf-8", timeout: 5 * 60_000 },
-    );
+    copyOut = runPsqlScript(config.dbContainer, reloadSql, 10 * 60_000);
   } finally {
     // Always clean up the in-container temp file even on \copy failure.
     try {
@@ -217,25 +195,7 @@ export async function loadCenso(
     }
   }
 
-  // 3. Post-load: indexes + view
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL,
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
-
-  // 4. Verify counts
+  // 2. Verify counts
   const cnt = (sql: string): number => {
     const out = execFileSync(
       "docker",
@@ -262,9 +222,10 @@ export async function loadCenso(
   };
   const rows_loaded = cnt("SELECT COUNT(*) FROM censo_iter;");
   const municipios_count = cnt("SELECT COUNT(*) FROM censo_municipios;");
+  assertRelationsExist(config.dbContainer);
 
   // copyOut contains "COPY <n>" — sanity log only
-  process.stderr.write(`[load-censo] ${copyOut.trim()}\n`);
+  process.stderr.write(`[load-censo] ${copyOut.match(/^COPY \d+$/m)?.[0] ?? ""}\n`);
 
   return { rows_loaded, municipios_count, duration_ms: Date.now() - started };
 }

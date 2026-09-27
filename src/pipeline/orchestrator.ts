@@ -13,7 +13,7 @@ import type { EstadoClave, ExtractorConfig } from "../extractor/types.js";
 import { Paginator } from "../extractor/paginator.js";
 import { loadRecords, readExtractorOutput, updateGeometry } from "../db/loader.js";
 import type { LoaderConfig } from "../db/loader.js";
-import { validateExtractorFile } from "./validator.js";
+import { validateRecords } from "./validator.js";
 import { StateManager } from "./state-manager.js";
 
 export interface OrchestratorConfig {
@@ -55,6 +55,11 @@ export class Orchestrator {
   private readonly stateManager: StateManager;
 
   constructor(private readonly config: OrchestratorConfig) {
+    // concurrency <= 0 made the chunk loop in run() never advance (audit #49).
+    const concurrency = config.concurrency ?? 1;
+    if (!Number.isInteger(concurrency) || concurrency < 1) {
+      throw new Error(`concurrency debe ser un entero >= 1 (recibido: ${concurrency})`);
+    }
     // Use stateDir if provided, otherwise default to ./data/state/ relative to outputDir's parent.
     // This keeps pipeline-state.json separate from the extracted JSON data files.
     const stateDir = config.stateDir ?? resolve(config.extractorConfig.outputDir, "../state");
@@ -153,13 +158,19 @@ export class Orchestrator {
       const extractResult = await paginator.extractEstado(clave);
       process.stderr.write(`\n[${clave}] Extracción completa: ${extractResult.totalExtraido.toLocaleString()} registros → ${extractResult.outputFile}\n`);
 
+      // No estado has zero establishments: an empty first page is a transient
+      // API failure, not data. Mark failed so --retry-failed re-extracts it
+      // instead of skipping it forever as 'done' (audit #155).
       if (extractResult.totalExtraido === 0) {
-        this.stateManager.markDone(clave, 0, 0);
-        return { clave, success: true, recordsExtracted: 0, recordsLoaded: 0 };
+        const errMsg = "empty extraction";
+        process.stderr.write(`[${clave}] ❌ ${errMsg}\n`);
+        this.stateManager.markFailed(clave, errMsg);
+        return { clave, success: false, recordsExtracted: 0, recordsLoaded: 0, error: errMsg };
       }
 
-      // 2. Validar
-      const validation = validateExtractorFile(extractResult.outputFile);
+      // 2. Validar — parse the file once and share the array with the loader (audit #48/#148)
+      const records = readExtractorOutput(extractResult.outputFile);
+      const validation = validateRecords(records);
       if (!validation.valid) {
         const errMsg = `Validación fallida: ${validation.errors.join("; ")}`;
         process.stderr.write(`[${clave}] ❌ ${errMsg}\n`);
@@ -170,11 +181,25 @@ export class Orchestrator {
       process.stderr.write(`[${clave}] ✅ Validación OK (sample ${validation.sampleSize}/${validation.totalRecords})\n`);
 
       // 3. Cargar a Supabase
-      const records = readExtractorOutput(extractResult.outputFile);
       const loadResult = await loadRecords(records, this.config.loaderConfig);
 
+      // loadRecords never throws on a failed batch: it records every row of the
+      // batch in errors[] and continues. Marking 'done' here hid the lost rows
+      // from resume and --retry-failed (audit #38/#143). The upsert is
+      // idempotent, so a retry of the whole estado is safe.
       if (loadResult.errors.length > 0) {
-        process.stderr.write(`[${clave}] ⚠️  ${loadResult.errors.length} errores de carga\n`);
+        const errMsg =
+          `Carga incompleta: ${loadResult.errors.length} registros fallaron ` +
+          `(${loadResult.inserted} cargados): ${loadResult.errors[0]!.error.slice(0, 200)}`;
+        process.stderr.write(`[${clave}] ❌ ${errMsg}\n`);
+        this.stateManager.markFailed(clave, errMsg);
+        return {
+          clave,
+          success: false,
+          recordsExtracted: extractResult.totalExtraido,
+          recordsLoaded: loadResult.inserted,
+          error: errMsg,
+        };
       }
 
       process.stderr.write(`[${clave}] ✅ Cargados: ${loadResult.inserted.toLocaleString()} registros en ${loadResult.durationMs}ms\n`);

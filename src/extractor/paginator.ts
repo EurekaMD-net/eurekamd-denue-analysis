@@ -70,6 +70,19 @@ export class Paginator {
     const filename = `${clave}_${nombre.replace(/\s+/g, "_").toLowerCase()}.json`;
     const outputFile = path.join(this.config.outputDir, filename);
     const stream = fs.createWriteStream(outputFile, { encoding: "utf-8" });
+    // Listen from the start: an 'error' (ENOSPC, EIO) with no listener is an
+    // uncaught exception that kills the process before markFailed runs (audit #50).
+    let streamErr: Error | null = null;
+    stream.on("error", (e) => {
+      streamErr = e;
+    });
+    const throwIfStreamFailed = (): void => {
+      if (streamErr) {
+        throw new DenueApiError(
+          `Error de escritura en ${outputFile}: ${streamErr.message}`,
+        );
+      }
+    };
     stream.write("[\n");
     let firstRecord = true;
 
@@ -108,6 +121,7 @@ export class Paginator {
           firstRecord = false;
         }
         totalExtraido += records.length;
+        throwIfStreamFailed();
 
         // If the page came back shorter than pageSize, this is the last page
         if (records.length < this.config.pageSize) {
@@ -141,11 +155,13 @@ export class Paginator {
       await sleep(this.config.delayMs);
     }
 
-    // Close the JSON array and stream safely
-    await new Promise<void>((resolve, reject) => {
-      stream.once("error", reject);
-      stream.end("\n]", resolve);
+    // Close the JSON array and stream safely. Settle on either outcome, then
+    // surface any write error captured by the listener above.
+    await new Promise<void>((resolve) => {
+      stream.once("error", () => resolve());
+      stream.end("\n]", () => resolve());
     });
+    throwIfStreamFailed();
 
     return {
       estado: nombre,

@@ -10,7 +10,9 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads perf-matviews.sql / sage-role.sql.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
@@ -54,6 +56,28 @@ const VALID_POBREZA_HEADER =
   "clave_entidad,entidad_federativa,clave_municipio,municipio,poblacion,pobreza,pobreza_pob,pobreza_e";
 const VALID_IRS_HEADER =
   "cve_ent,entidad,cve_mun_local,municipio,pob_total,analfabeta_15ymas,irs_indice,irs_grado,irs_lugar_nacional";
+
+type ExecOpts = { input?: string } | undefined;
+
+/**
+ * Dispatch docker calls by shape: cp / rm → "", the single-transaction
+ * reload → "COPY", the to_regclass assertion → `missing`, counts → "2469".
+ */
+function stubDocker(missing = ""): void {
+  mockExec.mockImplementation((_bin: string, args: string[]) => {
+    if (args[0] === "cp" || args.includes("rm")) return "";
+    if (args.includes("--single-transaction")) return "COPY 2469\n";
+    if ((args.at(-1) ?? "").includes("to_regclass")) return missing;
+    return "2469\n";
+  });
+}
+
+function reloadScript(): string {
+  const call = mockExec.mock.calls.find((c) =>
+    (c[1] as string[]).includes("--single-transaction"),
+  );
+  return (call?.[2] as ExecOpts)?.input ?? "";
+}
 
 describe("loadConeval (orchestration)", () => {
   it("rejects malformed dbContainer (anti docker-flag injection)", async () => {
@@ -127,18 +151,7 @@ describe("loadConeval (orchestration)", () => {
 
   it("passes csvPath positionally with `--` separator to docker cp", async () => {
     stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
-    mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // pobreza DDL
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // irs DDL
-      .mockReturnValueOnce("") // docker cp pobreza
-      .mockReturnValueOnce("COPY 2469\n") // \copy pobreza
-      .mockReturnValueOnce("") // rm pobreza
-      .mockReturnValueOnce("") // docker cp irs
-      .mockReturnValueOnce("COPY 2469\n") // \copy irs
-      .mockReturnValueOnce("") // rm irs
-      .mockReturnValueOnce("CREATE VIEW\n") // post-load
-      .mockReturnValueOnce("2469\n") // count pobreza
-      .mockReturnValueOnce("2469\n"); // count irs
+    stubDocker();
 
     const result = await loadConeval({
       pobrezaCsvPath: "/data/p.csv",
@@ -203,13 +216,15 @@ describe("loadConeval (orchestration)", () => {
 
   it("cleans up in-container temp file even when \\copy fails", async () => {
     stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
-    mockExec.mockImplementation((_bin: string, args: string[]) => {
-      // Throw on \copy, succeed on everything else
-      if (args.some((a) => a.includes("\\copy"))) {
-        throw new Error("psql copy failed");
-      }
-      return "";
-    });
+    mockExec.mockImplementation(
+      (_bin: string, _args: string[], opts: ExecOpts) => {
+        // Throw on the \copy transaction, succeed on everything else
+        if (opts?.input?.includes("\\copy")) {
+          throw new Error("psql copy failed");
+        }
+        return "";
+      },
+    );
     await expect(
       loadConeval({
         pobrezaCsvPath: "/p.csv",
@@ -218,11 +233,76 @@ describe("loadConeval (orchestration)", () => {
       }),
     ).rejects.toThrow(/psql copy failed/);
 
-    // First failure happens on pobreza \copy — verify pobreza rm STILL ran
+    // The transaction failed — both staged CSVs are still removed.
     const rmCalls = mockExec.mock.calls.filter((c) => {
       const args = c[1] as string[];
       return Array.isArray(args) && args.includes("rm");
     });
-    expect(rmCalls.length).toBeGreaterThanOrEqual(1);
+    expect(rmCalls.length).toBe(2);
+  });
+});
+
+describe("loadConeval reload keeps dependents alive (audit #144)", () => {
+  const cfg = {
+    pobrezaCsvPath: "/data/p.csv",
+    irsCsvPath: "/data/irs.csv",
+    dbContainer: "supabase-db",
+  };
+
+  it("never DROPs with CASCADE (old code: DROP TABLE ... _raw CASCADE)", async () => {
+    stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
+    stubDocker();
+    await loadConeval(cfg);
+    for (const c of mockExec.mock.calls) {
+      const sql = `${(c[1] as string[]).join(" ")} ${(c[2] as ExecOpts)?.input ?? ""}`;
+      expect(sql).not.toMatch(/DROP (TABLE|VIEW)[^;]*CASCADE/);
+    }
+  });
+
+  it("loads, swaps and rebuilds in ONE transaction, \\copy before any live DROP", async () => {
+    stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
+    stubDocker();
+    await loadConeval(cfg);
+    const psqlCalls = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("psql"),
+    );
+    // 1 reload transaction + 2 counts + 1 to_regclass assertion.
+    expect(psqlCalls.length).toBe(4);
+    const sql = reloadScript();
+    const firstLiveDrop = sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_sector_grade_matrix;");
+    expect(sql.lastIndexOf("\\copy coneval_irs_municipal_raw_staging")).toBeLessThan(firstLiveDrop);
+    expect(sql.indexOf("DROP VIEW IF EXISTS coneval_irs_municipal;")).toBeLessThan(
+      sql.indexOf("DROP TABLE IF EXISTS coneval_irs_municipal_raw;"),
+    );
+    expect(sql).toContain(
+      "ALTER TABLE coneval_irs_municipal_raw_staging RENAME TO coneval_irs_municipal_raw;",
+    );
+  });
+
+  it("rebuilds mv_sector_grade_matrix + mv_national_treemap and re-grants them", async () => {
+    stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
+    stubDocker();
+    await loadConeval(cfg);
+    const sql = reloadScript();
+    // Old code never recreated these MVs after its CASCADE dropped them.
+    expect(sql).toMatch(/CREATE MATERIALIZED VIEW mv_sector_grade_matrix AS/);
+    expect(sql).toMatch(/CREATE MATERIALIZED VIEW mv_national_treemap AS/);
+    expect(sql).toContain("GRANT SELECT ON mv_sector_grade_matrix TO denue_sage;");
+    expect(sql).toContain("GRANT SELECT ON coneval_irs_municipal TO denue_sage;");
+    expect(sql).toContain(
+      "REVOKE ALL ON coneval_pobreza_municipal_raw FROM anon, authenticated, trustr_app;",
+    );
+    // Views must exist before the MVs that read them.
+    expect(sql.indexOf("CREATE VIEW coneval_irs_municipal AS")).toBeLessThan(
+      sql.indexOf("CREATE MATERIALIZED VIEW mv_sector_grade_matrix AS"),
+    );
+  });
+
+  it("fails loud when an analytics MV/view is missing after the load", async () => {
+    stubHeaders(VALID_POBREZA_HEADER, VALID_IRS_HEADER);
+    stubDocker("censo_localidades\n");
+    await expect(loadConeval(cfg)).rejects.toThrow(
+      /missing after load: censo_localidades/,
+    );
   });
 });

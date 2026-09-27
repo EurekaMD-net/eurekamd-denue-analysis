@@ -10,13 +10,19 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads migrate-censo-views.sql.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
 }));
 
-import { buildCensoCreateTable, loadCenso } from "./load-censo.js";
+import {
+  buildCensoCreateTable,
+  buildCensoReloadSql,
+  loadCenso,
+} from "./load-censo.js";
 
 beforeEach(() => {
   mockExec.mockReset();
@@ -30,7 +36,10 @@ describe("buildCensoCreateTable", () => {
   it("emits CREATE TABLE with all columns as TEXT, lowercased + quoted", () => {
     const header = "ENTIDAD,NOM_ENT,MUN,NOM_MUN,LOC,NOM_LOC,POBTOT";
     const sql = buildCensoCreateTable(header);
-    expect(sql).toMatch(/DROP TABLE IF EXISTS censo_iter CASCADE/);
+    // No CASCADE (audit #144) — it silently dropped censo_entidades +
+    // censo_localidades, which nothing recreated.
+    expect(sql).toMatch(/DROP TABLE IF EXISTS censo_iter;/);
+    expect(sql).not.toMatch(/CASCADE/);
     expect(sql).toMatch(/CREATE TABLE censo_iter/);
     // Quoted identifiers — defends against future ITER releases with
     // reserved-word column names.
@@ -128,13 +137,12 @@ describe("loadCenso (orchestration)", () => {
     stubHeader("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
     // Subsequent execFileSync calls return canned values
     mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // create
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 195662\n") // \copy
+      .mockReturnValueOnce("COPY 195662\n") // reload transaction
       .mockReturnValueOnce("") // rm /tmp/iter.csv
-      .mockReturnValueOnce("ALTER TABLE\nCREATE INDEX\n") // post-load
       .mockReturnValueOnce("195662\n") // count censo_iter
-      .mockReturnValueOnce("2469\n"); // count censo_municipios
+      .mockReturnValueOnce("2469\n") // count censo_municipios
+      .mockReturnValueOnce(""); // to_regclass: nothing missing
 
     const result = await loadCenso({
       csvPath: "/tmp/iter.csv",
@@ -157,37 +165,27 @@ describe("loadCenso (orchestration)", () => {
     expect(cpArgs[3]).toBe("supabase-db:/tmp/iter.csv");
   });
 
-  it("post-load creates the (cve_mun, loc) locality index censo_localidades needs (#118)", async () => {
-    stubHeader("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
-    mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // create
-      .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 195662\n") // \copy
-      .mockReturnValueOnce("") // rm /tmp/iter.csv
-      .mockReturnValueOnce("ALTER TABLE\nCREATE INDEX\n") // post-load
-      .mockReturnValueOnce("195662\n") // count censo_iter
-      .mockReturnValueOnce("2469\n"); // count censo_municipios
-    await loadCenso({ csvPath: "/tmp/iter.csv", dbContainer: "supabase-db" });
-    const postLoad = mockExec.mock.calls
-      .map((c) => (c[1] as string[]).at(-1) ?? "")
-      .find((sql) => sql.includes("CREATE OR REPLACE VIEW censo_municipios"));
-    expect(postLoad).toContain(
+  it("post-load creates the (cve_mun, loc) locality index censo_localidades needs (#118)", () => {
+    const sql = buildCensoReloadSql("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
+    const idx = sql.indexOf(
       "CREATE INDEX idx_censo_iter_cve_mun_loc ON censo_iter(cve_mun, loc) WHERE loc <> '0000' AND mun <> '000';",
     );
+    // Built on the swapped-in table, after the generated cve_mun it indexes.
+    expect(idx).toBeGreaterThan(sql.indexOf("RENAME TO censo_iter;"));
+    expect(idx).toBeGreaterThan(sql.indexOf("ADD COLUMN cve_mun"));
   });
 
   it("cleans up the in-container temp file even when \\copy fails", async () => {
     stubHeader("ENTIDAD,NOM_ENT,MUN,LOC,POBTOT");
-    mockExec.mockImplementation((_bin: string, args: string[]) => {
-      // create succeeds, cp succeeds, \copy throws, rm should still run
-      if (
-        args.includes("FROM '/tmp/iter.csv'") ||
-        args.some((a) => a.includes("\\copy"))
-      ) {
-        throw new Error("psql copy failed");
-      }
-      return "";
-    });
+    mockExec.mockImplementation(
+      (_bin: string, _args: string[], opts?: { input?: string }) => {
+        // cp succeeds, the \copy transaction throws, rm should still run
+        if (opts?.input?.includes("\\copy")) {
+          throw new Error("psql copy failed");
+        }
+        return "";
+      },
+    );
     await expect(
       loadCenso({ csvPath: "/tmp/iter.csv", dbContainer: "supabase-db" }),
     ).rejects.toThrow(/psql copy failed/);
@@ -202,5 +200,65 @@ describe("loadCenso (orchestration)", () => {
       );
     });
     expect(rmCall).toBeDefined();
+  });
+});
+
+describe("buildCensoReloadSql (audit #144)", () => {
+  const HEADER = "ENTIDAD,NOM_ENT,MUN,NOM_MUN,LOC,NOM_LOC,POBTOT";
+
+  it("\\copies into staging before touching any live relation", () => {
+    const sql = buildCensoReloadSql(HEADER);
+    expect(sql).toMatch(/CREATE TABLE censo_iter_staging/);
+    expect(sql.indexOf("\\copy censo_iter_staging FROM '/tmp/iter.csv'")).toBeLessThan(
+      sql.indexOf("DROP VIEW IF EXISTS censo_localidades;"),
+    );
+  });
+
+  it("drops the three censo views explicitly before the table, then swaps", () => {
+    const sql = buildCensoReloadSql(HEADER);
+    const dropTable = sql.indexOf("DROP TABLE IF EXISTS censo_iter;");
+    for (const v of ["censo_localidades", "censo_entidades", "censo_municipios"]) {
+      const i = sql.indexOf(`DROP VIEW IF EXISTS ${v};`);
+      expect(i).toBeGreaterThan(-1);
+      expect(i).toBeLessThan(dropTable);
+    }
+    expect(sql).toContain("ALTER TABLE censo_iter_staging RENAME TO censo_iter;");
+    expect(sql).not.toMatch(/DROP (TABLE|VIEW)[^;]*CASCADE/);
+  });
+
+  it("recreates censo_localidades + censo_entidades (old POST_LOAD rebuilt only censo_municipios)", () => {
+    const sql = buildCensoReloadSql(HEADER);
+    const swap = sql.indexOf("RENAME TO censo_iter;");
+    expect(sql.indexOf("CREATE OR REPLACE VIEW censo_localidades AS")).toBeGreaterThan(swap);
+    expect(sql.indexOf("CREATE OR REPLACE VIEW censo_entidades AS")).toBeGreaterThan(swap);
+    expect(sql.indexOf("CREATE OR REPLACE VIEW censo_municipios AS")).toBeGreaterThan(swap);
+    // The generated join key exists before the views that select it.
+    expect(sql.indexOf("ADD COLUMN cve_mun")).toBeLessThan(
+      sql.indexOf("CREATE OR REPLACE VIEW censo_municipios AS"),
+    );
+    expect(sql).toContain("GRANT SELECT ON censo_localidades TO denue_sage;");
+    expect(sql).toContain("REVOKE ALL ON censo_iter FROM anon, authenticated, trustr_app;");
+  });
+
+  it("loadCenso runs the reload as ONE single-transaction psql session and asserts relations", async () => {
+    mockOpen.mockReturnValue(7);
+    mockRead.mockImplementation((_fd: number, buf: Buffer) => {
+      const text = `${HEADER}\n`;
+      buf.write(text, 0, "utf-8");
+      return Buffer.byteLength(text, "utf-8");
+    });
+    mockExec.mockImplementation((_bin: string, args: string[]) => {
+      if ((args.at(-1) ?? "").includes("to_regclass")) return "censo_localidades\n";
+      if (args.includes("-t")) return "10\n";
+      return "";
+    });
+    await expect(
+      loadCenso({ csvPath: "/tmp/iter.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/missing after load: censo_localidades/);
+    const tx = mockExec.mock.calls.filter((c) =>
+      (c[1] as string[]).includes("--single-transaction"),
+    );
+    expect(tx.length).toBe(1);
+    expect((tx[0]?.[2] as { input: string }).input).toBe(buildCensoReloadSql(HEADER));
   });
 });

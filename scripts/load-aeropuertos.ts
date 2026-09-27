@@ -29,13 +29,23 @@
  * The CSV is produced by the companion Python script `aeropuertos-xlsx-to-csv.py`
  * — the XLSX has merged cells and formula references that JS xlsx libraries
  * choke on; openpyxl with data_only=True is the proven path.
+ *
+ * Reload (first run and --force alike) is ONE psql --single-transaction
+ * session (audits #146, #150): drop the two views, TRUNCATE + re-INSERT the
+ * lookup (never DROP it — the views depend on it), TRUNCATE + \copy the raw
+ * table, recreate the views, re-apply grants. Any failure rolls it all back.
  */
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { argv, exit } from "node:process";
+import {
+  copyFromStdinScript,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
 
-interface Args {
+export interface Args {
   csv: string;
   lookup: string;
   force: boolean;
@@ -62,7 +72,7 @@ function parseArgs(): Args {
 
 const SAFE_CONTAINER_RE = /^[a-zA-Z0-9_.-]+$/;
 
-const CREATE_SCHEMA_SQL = `
+export const CREATE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS aeropuertos_movements_raw (
   airport_name TEXT NOT NULL,
   operator     TEXT,
@@ -78,9 +88,9 @@ CREATE INDEX IF NOT EXISTS idx_aero_raw_ano ON aeropuertos_movements_raw(ano);
 // View that dedupes across operators (sum per airport_name, ano) AND joins
 // the cve_mun lookup. Airports without a cve_mun map are excluded from
 // the view (but kept in the raw table for forensic analysis).
-const POST_LOAD_SQL = `
-BEGIN;
-
+// No BEGIN/COMMIT of its own: it runs inside the reload's single
+// transaction, where an inner COMMIT would end it early (audit #150).
+export const POST_LOAD_SQL = `
 CREATE OR REPLACE VIEW aeropuertos_movements_yearly AS
 SELECT
   m.airport_name,
@@ -124,14 +134,69 @@ SELECT
   END AS pct_change_vs_2019
 FROM per_muni_year p
 GROUP BY p.cve_mun, p.cve_ent;
-
-COMMIT;
 `.trim();
 
-interface LookupEntry {
+export interface LookupEntry {
   airport_name: string;
   cve_mun: string;
   cve_ent: string;
+}
+
+// Kept (never dropped) across reloads: both views depend on it (audit #150).
+export const LOOKUP_DDL = `
+CREATE TABLE IF NOT EXISTS aeropuertos_cvemun_lookup (
+  airport_name TEXT PRIMARY KEY,
+  cve_mun      TEXT NOT NULL,
+  cve_ent      TEXT NOT NULL
+);
+`.trim();
+
+export const RAW_COPY_CMD = `\\copy aeropuertos_movements_raw (airport_name, operator, ano, mar_flights) FROM STDIN WITH (FORMAT csv, HEADER true)`;
+
+const RELATIONS = [
+  "aeropuertos_movements_raw",
+  "aeropuertos_cvemun_lookup",
+  "aeropuertos_movements_yearly",
+  "aeropuertos_by_municipio",
+];
+
+function lookupInsertSql(entries: readonly LookupEntry[]): string {
+  return entries
+    .map(
+      (e) =>
+        `INSERT INTO aeropuertos_cvemun_lookup (airport_name, cve_mun, cve_ent) VALUES (${[
+          e.airport_name,
+          e.cve_mun,
+          e.cve_ent,
+        ]
+          .map((v) => `'${String(v).replace(/'/g, "''")}'`)
+          .join(", ")});`,
+    )
+    .join("\n");
+}
+
+/**
+ * The whole reload as ONE psql script (audits #146, #150), identical for the
+ * first run and --force: views dropped (by_municipio reads yearly, so it goes
+ * first), lookup TRUNCATE + INSERT, raw TRUNCATE + \copy with the CSV inline,
+ * views recreated, grants re-applied.
+ */
+export function buildAeropuertosReloadScript(
+  entries: readonly LookupEntry[],
+  csv: Buffer,
+): Buffer {
+  const prelude = [
+    "DROP VIEW IF EXISTS aeropuertos_by_municipio;",
+    "DROP VIEW IF EXISTS aeropuertos_movements_yearly;",
+    LOOKUP_DDL,
+    "TRUNCATE TABLE aeropuertos_cvemun_lookup;",
+    lookupInsertSql(entries),
+    "TRUNCATE TABLE aeropuertos_movements_raw;",
+  ].join("\n");
+  return Buffer.concat([
+    copyFromStdinScript(prelude, RAW_COPY_CMD, csv),
+    Buffer.from(`${POST_LOAD_SQL}\n${postLoadGrants(RELATIONS)}\n`, "utf-8"),
+  ]);
 }
 
 function dockerExec(container: string, args: string[]): string {
@@ -159,18 +224,23 @@ function dockerExecStdin(
   });
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs();
+/** Error carrying the CLI exit code (2 = populated table without --force). */
+function loaderError(message: string, exitCode: number): Error {
+  return Object.assign(new Error(message), { exitCode });
+}
 
+export async function loadAeropuertos(args: Args): Promise<string> {
   if (!existsSync(args.csv)) {
-    console.error(
+    throw loaderError(
       `[load-aeropuertos] CSV not found: ${args.csv}. Run scripts/aeropuertos-xlsx-to-csv.py first.`,
+      1,
     );
-    exit(1);
   }
   if (!existsSync(args.lookup)) {
-    console.error(`[load-aeropuertos] lookup JSON not found: ${args.lookup}`);
-    exit(1);
+    throw loaderError(
+      `[load-aeropuertos] lookup JSON not found: ${args.lookup}`,
+      1,
+    );
   }
 
   const lookupRaw = JSON.parse(readFileSync(args.lookup, "utf-8")) as {
@@ -204,75 +274,20 @@ async function main(): Promise<void> {
   ]).trim();
   const existing = Number.parseInt(countOut || "0", 10);
   if (existing > 0 && !args.force) {
-    console.error(
+    throw loaderError(
       `[load-aeropuertos] aeropuertos_movements_raw has ${existing} rows. Use --force to truncate + reload.`,
+      2,
     );
-    exit(2);
   }
 
-  // Materialize lookup table (idempotent — recreated each load)
-  console.log("[load-aeropuertos] writing lookup table...");
-  const lookupSql = `
-DROP TABLE IF EXISTS aeropuertos_cvemun_lookup;
-CREATE TABLE aeropuertos_cvemun_lookup (
-  airport_name TEXT PRIMARY KEY,
-  cve_mun      TEXT NOT NULL,
-  cve_ent      TEXT NOT NULL
-);
-${lookupRaw.entries
-  .map(
-    (e) =>
-      `INSERT INTO aeropuertos_cvemun_lookup (airport_name, cve_mun, cve_ent) VALUES (${[
-        e.airport_name,
-        e.cve_mun,
-        e.cve_ent,
-      ]
-        .map((v) => `'${String(v).replace(/'/g, "''")}'`)
-        .join(", ")});`,
-  )
-  .join("\n")}
-`;
-  dockerExecStdin(
-    args.container,
-    ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-    lookupSql,
+  // Lookup + raw + views in ONE transaction (audits #146, #150).
+  console.log(
+    "[load-aeropuertos] reloading lookup + raw CSV + views (one transaction)...",
   );
-
-  // Truncate + load CSV (idempotent under --force)
-  console.log("[load-aeropuertos] truncating + loading raw CSV...");
-  dockerExecStdin(
+  runPsqlScript(
     args.container,
-    ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-    `TRUNCATE TABLE aeropuertos_movements_raw;`,
-  );
-
-  const csvBuf = readFileSync(args.csv);
-  const copyCmd = `\\copy aeropuertos_movements_raw (airport_name, operator, ano, mar_flights) FROM STDIN WITH (FORMAT csv, HEADER true)`;
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      args.container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-c",
-      copyCmd,
-    ],
-    { input: csvBuf, maxBuffer: 64 * 1024 * 1024 },
-  );
-
-  // POST_LOAD: views
-  console.log("[load-aeropuertos] applying POST_LOAD_SQL (views)...");
-  dockerExecStdin(
-    args.container,
-    ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-    POST_LOAD_SQL,
+    buildAeropuertosReloadScript(lookupRaw.entries, readFileSync(args.csv)),
+    10 * 60_000,
   );
 
   // Report
@@ -290,6 +305,16 @@ ${lookupRaw.entries
        (SELECT COUNT(*) FROM aeropuertos_by_municipio) AS munis_with_airport;`,
   ]).trim();
   console.log(`[load-aeropuertos] done. ${stats}`);
+  return stats;
 }
 
-await main();
+// Auto-invoke when run directly (not when imported by tests).
+const isMain =
+  import.meta.url === `file://${process.argv[1] ?? ""}`.replace(/\\/g, "/");
+
+if (isMain) {
+  loadAeropuertos(parseArgs()).catch((err: unknown) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    exit((err as { exitCode?: number }).exitCode ?? 1);
+  });
+}
