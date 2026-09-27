@@ -28,3 +28,10 @@
 - **Avoid:** a runbook that assumes SSH stays up for a multi-minute window. Better: the runbook's first line is `tmux new` / `nohup ... > log`, and `tmux ls` before starting anything new.
 - **Better:** `docker exec supabase-db df -h /dev/shm` is a pre-flight for any manual VACUUM / parallel CREATE INDEX on this instance; `PARALLEL 0` sidesteps it without touching the compose file.
 - **Better:** report a 404 from a smoke line as "id absent or route fault?" and prove which with `SELECT count(*)` before touching code — it was the id.
+
+## 2026-09-27 — DENUE 05/2026 refresh runner (ops/denue-refresh.sh)
+
+- **Mistake:** the build brief carried four unverified "facts" (stale rows via `updated_at`; `updateGeometry` per state; 300 ms / batch 100; MemoryMax=2G) — the trigger is conditional on `raw_json` changing, geometry only runs with `--update-geom`, and the real load path peaks at 1.5 GB → the check: read the trigger definition (`pg_get_triggerdef`) and the CLI flag parser before stating behaviour in a brief.
+- **Mistake (caught by qa-auditor):** Node 22 derives the V8 heap limit from the cgroup `memory.max/high`, not the host (1328 MB under a 3G cap) → a MemoryMax that "fits RSS" still OOMs the heap; pin `NODE_OPTIONS=--max-old-space-size` and prove it in a throwaway `systemd-run --wait --pipe` unit.
+- **Avoid:** a `pg_stat_activity` busy guard on `query ~ ...` alone — it matches autovacuum on any table and idle sessions' last statement; filter `backend_type='client backend' AND state<>'idle'`.
+- **Better:** long unattended DB jobs on this box = systemd transient unit (`--collect`, `OOMPolicy=continue`, log `append:`), state file for resume, escalating retry sleeps, per-estado truncation guard vs the previous run's counts, and a report-only stale step; the operator answers the launch prompt (piping `y` is denied as Blind Apply).
