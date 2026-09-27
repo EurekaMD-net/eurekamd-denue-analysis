@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useUiStore } from "../store";
 import { ApiError } from "../api/client";
 import {
@@ -56,6 +56,11 @@ export function SageMode() {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Leaving the Sage page mid-answer must stop the SSE stream, or the
+  // backend keeps paying for LLM tokens nobody reads (audit #177). The
+  // resulting AbortError is a silent exit in sendQuery's catch.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   // Re-hydrate the sidebar when the signed-in user changes (sign-out /
   // sign-in cycle in the same tab). Without this, User B would briefly
   // see User A's thread index until they refreshed.
@@ -85,12 +90,14 @@ export function SageMode() {
     staleTime: 60_000,
   });
 
+  // While streaming, jump instead of starting a new smooth scroll per
+  // token (audit #186).
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
+      behavior: streaming ? "auto" : "smooth",
     });
-  }, [turns]);
+  }, [turns, streaming]);
 
   const sendQuery = useCallback(
     async (question: string) => {
@@ -117,6 +124,27 @@ export function SageMode() {
       // bytes using the (still valid until exp) JWT after sign-out
       // (audit C C2).
       const unregister = useUiStore.getState().registerAbort(ctrl);
+      // Narrative deltas are batched into one state update per animation
+      // frame instead of one per token (audit #186).
+      let pendingDelta = "";
+      let frame: number | null = null;
+      const applyDelta = () => {
+        frame = null;
+        const text = pendingDelta;
+        pendingDelta = "";
+        if (!text) return;
+        setTurns((current) => {
+          const next = [...current];
+          const t = next[idx] ?? placeholder;
+          next[idx] = { ...t, narrative: t.narrative + text };
+          return next;
+        });
+      };
+      const flushDelta = () => {
+        if (frame === null) return;
+        cancelAnimationFrame(frame);
+        applyDelta();
+      };
       try {
         for await (const ev of sageQueryStream(
           question,
@@ -124,13 +152,22 @@ export function SageMode() {
           accessToken,
           ctrl.signal,
         )) {
+          // Side effect kept out of the setTurns updater (audit #186).
+          if (ev.type === "thread") {
+            setThreadId(ev.thread_id);
+            continue;
+          }
+          if (ev.type === "delta") {
+            pendingDelta += ev.text;
+            if (frame === null) frame = requestAnimationFrame(applyDelta);
+            continue;
+          }
+          // Any other event lands after the deltas that preceded it.
+          flushDelta();
           setTurns((current) => {
             const next = [...current];
             const t = next[idx] ?? placeholder;
             switch (ev.type) {
-              case "thread":
-                setThreadId(ev.thread_id);
-                break;
               case "route":
                 next[idx] = { ...t, route: ev.payload };
                 break;
@@ -152,9 +189,6 @@ export function SageMode() {
                   },
                 };
                 break;
-              case "delta":
-                next[idx] = { ...t, narrative: t.narrative + ev.text };
-                break;
               case "narrative":
                 next[idx] = { ...t, narrative: ev.text };
                 break;
@@ -174,6 +208,7 @@ export function SageMode() {
             return next;
           });
         }
+        flushDelta();
       } catch (err) {
         // Operator-initiated abort (Nuevo hilo) zeroes the turns array
         // and ctrl.abort()s the stream. Don't emit a phantom error card
@@ -184,14 +219,18 @@ export function SageMode() {
           "name" in err &&
           (err as { name?: string }).name === "AbortError";
         if (!isAbort) {
+          flushDelta();
           const message = err instanceof Error ? err.message : String(err);
           // Surface HTTP-status errors with a real code (R2 audit W4).
-          // apiFetch throws Error("<status> ...") for 4xx/5xx; pull a
-          // recognizable code out so the user sees RATE_LIMITED for 429.
+          // apiFetch throws ApiError(body.error, status, body.code) for
+          // 4xx/5xx; the message is the backend's text and carries no
+          // status, so classify on err.status and prefer the backend's
+          // own code (audit #185).
           let code = "NETWORK";
-          const statusMatch = /\b(\d{3})\b/.exec(message);
-          if (statusMatch) {
-            const s = Number(statusMatch[1]);
+          const s = err instanceof ApiError ? err.status : null;
+          if (err instanceof ApiError && err.code) {
+            code = err.code;
+          } else if (s !== null) {
             if (s === 429) code = "RATE_LIMITED";
             else if (s === 401) code = "UNAUTHENTICATED";
             else if (s === 503) code = "PROVIDER_UNAVAILABLE";
@@ -209,6 +248,8 @@ export function SageMode() {
           });
         }
       } finally {
+        // On abort the thread may already be cleared: drop pending text.
+        if (frame !== null) cancelAnimationFrame(frame);
         setStreaming(false);
         abortRef.current = null;
         unregister();
@@ -371,6 +412,18 @@ export function SageMode() {
           <span className="font-mono text-xs uppercase tracking-[0.2em] text-cyan-500">
             Sage
           </span>
+          {health.isError && (
+            <span className="font-mono text-[10px] text-amber-400">
+              no se pudo verificar el provider{" "}
+              <button
+                type="button"
+                onClick={() => void health.refetch()}
+                className="underline hover:text-amber-200"
+              >
+                reintentar
+              </button>
+            </span>
+          )}
           {health.data && (
             <span className="font-mono text-[10px] text-slate-500">
               {health.data.configured ? (
@@ -399,7 +452,12 @@ export function SageMode() {
           ref={scrollRef}
           className="flex-1 overflow-y-auto px-4 py-3 [scrollbar-color:#334155_transparent]"
         >
-          {turns.length === 0 && <EmptyState onPick={(q) => sendQuery(q)} />}
+          {turns.length === 0 && (
+            <EmptyState
+              onPick={(q) => sendQuery(q)}
+              disabled={!health.data?.configured}
+            />
+          )}
           {turns.map((t, i) => (
             <TurnCard key={i} turn={t} />
           ))}
@@ -492,7 +550,13 @@ function ThreadRow({
   );
 }
 
-function EmptyState({ onPick }: { onPick: (q: string) => void }) {
+function EmptyState({
+  onPick,
+  disabled,
+}: {
+  onPick: (q: string) => void;
+  disabled: boolean;
+}) {
   const examples = [
     "¿Qué municipios de Veracruz tienen más farmacias con controlados?",
     "Top 10 entidades por ingreso medio según ENIGH",
@@ -511,7 +575,8 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
             key={q}
             type="button"
             onClick={() => onPick(q)}
-            className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-left font-mono text-xs text-slate-300 hover:border-cyan-700 hover:bg-slate-800"
+            disabled={disabled}
+            className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-left font-mono text-xs text-slate-300 hover:border-cyan-700 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {q}
           </button>
@@ -521,7 +586,9 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
   );
 }
 
-function TurnCard({ turn }: { turn: ChatTurn }) {
+// Memoized: while a turn streams, earlier turns keep their object
+// identity and skip re-rendering (audit #186).
+const TurnCard = memo(function TurnCard({ turn }: { turn: ChatTurn }) {
   const [tab, setTab] = useState<"table" | "narrative" | "route">("narrative");
   return (
     <div className="mb-4 rounded border border-slate-800 bg-slate-900">
@@ -567,7 +634,7 @@ function TurnCard({ turn }: { turn: ChatTurn }) {
       </div>
     </div>
   );
-}
+});
 
 function TabButton({
   active,
