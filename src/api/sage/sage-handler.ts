@@ -63,6 +63,10 @@ const MAX_ROW_CAP = 5000;
 // narrative digest still sees only its own 20 rows.
 const TABLE_ROW_CAP = DEFAULT_ROW_CAP;
 const TIMEOUT_MESSAGE = "La consulta tardó demasiado; intenta de nuevo.";
+// Public messages persisted with a turn that died on an exception; the
+// raw error text stays in the audit row.
+const INTERNAL_MESSAGE = "Sage no pudo responder; intenta de nuevo.";
+const ABORTED_MESSAGE = "La consulta se canceló.";
 // Strict UUID (audit #92): sage_threads.thread_id is a uuid column, so a
 // looser pattern let a cast error surface as a 500.
 const UUID_RE =
@@ -275,6 +279,9 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           model,
         });
         const emptyDigest = { columns: [], row_count: 0, first_5_rows: [] };
+        // The route a failed turn is persisted with: "router" until the
+        // router pass has returned one.
+        let failedRoute: PriorTurnDigest["route"] = { kind: "router" };
         // A failed route is persisted as a turn with its public error, so
         // the next router pass sees it and the turn cap counts it (audit
         // #89). A failed write is logged; the client still gets the error.
@@ -329,12 +336,13 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           send("usage", routerResult.usage);
 
           const route: RouteOutput = routerResult.output;
-          const routeRec: PriorTurnDigest["route"] = {
+          const routeRec: NarrativeInput["route"] = {
             kind: route.kind,
             endpoint_name:
               route.kind === "endpoint" ? route.endpoint_name : undefined,
             sql: route.kind === "sql" ? route.sql : undefined,
           };
+          failedRoute = routeRec;
 
           // ----- 2. Execute the route --------------------------------
           let columns: string[] = [];
@@ -572,6 +580,17 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               usage,
               error_code: code,
               error_message: message.slice(0, AUDIT_ERROR_MAX),
+            });
+            // Persist the failed turn too, so the thread id the `thread`
+            // event already handed out always has a row and the next
+            // question on it is not a 404 (lazy creation, audit #89).
+            await persistFailedTurn(failedRoute, {
+              code,
+              message: aborted
+                ? ABORTED_MESSAGE
+                : isTimeout
+                  ? TIMEOUT_MESSAGE
+                  : INTERNAL_MESSAGE,
             });
           }
           if (!aborted) {

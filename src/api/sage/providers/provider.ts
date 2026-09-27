@@ -63,7 +63,8 @@ export interface EndpointSpec {
 
 export interface PriorTurnDigest {
   question: string;
-  route: { kind: RouteKind; endpoint_name?: string; sql?: string };
+  /** "router": the router pass itself failed, so the turn has no route. */
+  route: { kind: RouteKind | "router"; endpoint_name?: string; sql?: string };
   digest: {
     columns: string[];
     row_count: number;
@@ -74,8 +75,9 @@ export interface PriorTurnDigest {
   };
   narrative: string;
   /**
-   * Set on a turn whose route failed (dispatch or SQL gate): the public
-   * code + message, so the next router pass can self-correct (audit #89).
+   * Set on a failed turn (router, dispatch, SQL gate or narrative): the
+   * public code + message, so the next router pass can self-correct
+   * (audit #89).
    */
   error?: { code: string; message: string };
 }

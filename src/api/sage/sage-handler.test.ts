@@ -883,6 +883,78 @@ describe("/sage/query persistence and failure audit (audit #82 #83 #89 #92 #207)
     });
   });
 
+  it("a router exception on a new thread persists a failed turn under the id the thread event sent", async () => {
+    reset();
+    const res = await ask(
+      provider(async () => {
+        throw new Error("upstream 500");
+      }),
+    );
+    const threadId = eventData(res.text, "thread")!.thread_id as string;
+    expect(mockAppendTurn).toHaveBeenCalledTimes(1);
+    expect(mockAppendTurn.mock.calls[0]!.slice(1, 4)).toEqual([
+      threadId,
+      "api-key",
+      {
+        question: "cuantos negocios",
+        route: { kind: "router" },
+        digest: { columns: [], row_count: 0, first_5_rows: [] },
+        narrative: "",
+        error: {
+          code: "SAGE_INTERNAL",
+          message: "Sage no pudo responder; intenta de nuevo.",
+        },
+      },
+    ]);
+    // The raw error stays in the audit, and the audit follows the row.
+    expect(audits()[0]!.error_message).toBe("upstream 500");
+    expect(mockAppendAudit.mock.invocationCallOrder[0]!).toBeGreaterThan(
+      mockAppendTurn.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a narrative timeout persists the turn with its real route and the public timeout message", async () => {
+    reset();
+    mockSql.mockResolvedValue({
+      ok: true,
+      data: { rows: [{ n: "1" }], columns: ["n"] },
+    });
+    await ask(
+      provider(
+        routeTo({
+          kind: "sql",
+          sql: "SELECT 1 AS n",
+          reasoning: "",
+          confidence: 1,
+        }),
+        async function* () {
+          yield { text: "par", usage: null };
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        },
+      ),
+    );
+    expect(mockAppendTurn).toHaveBeenCalledTimes(1);
+    expect(mockAppendTurn.mock.calls[0]![3]).toMatchObject({
+      route: { kind: "sql", sql: "SELECT 1 AS n" },
+      error: {
+        code: "SAGE_TIMEOUT",
+        message: "La consulta tardó demasiado; intenta de nuevo.",
+      },
+    });
+  });
+
+  it("a failed persist is not persisted a second time", async () => {
+    reset();
+    mockAppendTurn.mockRejectedValue(new Error("psql down"));
+    const res = await ask(
+      provider(routeTo({ kind: "decline", reasoning: "no" })),
+    );
+    expect(eventData(res.text, "error")).toMatchObject({
+      code: "SAGE_INTERNAL",
+    });
+    expect(mockAppendTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("a persisted failed turn reaches the next router pass", async () => {
     reset();
     const failed = {
