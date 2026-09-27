@@ -21,6 +21,8 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // Audit 2026-09-26 #12/#190/#196: Caddy served the .map files (full
+    // sourcesContent) publicly. Vite empties dist/ on build, so they go.
+    sourcemap: false,
   },
 });

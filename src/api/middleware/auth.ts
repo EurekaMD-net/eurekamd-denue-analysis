@@ -49,24 +49,22 @@ export function makeAuthMiddleware(
     const authHeader = c.req.header("authorization") ?? null;
     if (authHeader && /^Bearer\s+/i.test(authHeader)) {
       if (!config.supabaseJwtSecret) {
-        return c.json(
-          {
-            error:
-              "Bearer auth attempted but server has no SUPABASE_JWT_SECRET configured.",
-            code: "auth.no_jwt_secret",
-          },
-          503,
+        // Name the missing key on stderr only; the client learns nothing
+        // about server configuration (audit finding #10).
+        process.stderr.write(
+          "[auth] bearer rejected: SUPABASE_JWT_SECRET is not configured\n",
         );
+        return c.json({ error: "Service unavailable" }, 503);
       }
       const result = verifyBearer(authHeader, {
         jwtSecret: config.supabaseJwtSecret,
       });
       if (!result.ok) {
+        // Precise reason to stderr only: echoing it would be a verification
+        // oracle (valid signature vs forged) — audit finding #10.
+        process.stderr.write(`[auth] bearer rejected: ${result.reason}\n`);
         return c.json(
-          {
-            error: `JWT rejected: ${result.reason}`,
-            code: "auth.bearer_invalid",
-          },
+          { error: "Unauthorized", code: "auth.bearer_invalid" },
           401,
         );
       }
