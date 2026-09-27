@@ -69,8 +69,9 @@ export async function fetchSageHealth(
  *   - digest holds at most 5 rows under `first_5_rows` (truncated server-
  *     side; see `sage-handler.ts:345`). NOT `first_n_rows` — that's the
  *     in-memory shape on the dispatcher path. Audit C1.
- *   - chart and error are NOT persisted today, so restored threads always
- *     render narrative + (5-row) table only.
+ *   - chart is NOT persisted, so restored threads render narrative +
+ *     (5-row) table only. Declined and failed turns are persisted too; a
+ *     failed one carries its public `error` (audit #89).
  */
 export interface SageStoredTurn {
   turn_id: string;
@@ -84,6 +85,7 @@ export interface SageStoredTurn {
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
   } | null;
   narrative: string;
+  error?: { code: string; message: string } | null;
 }
 
 export interface SageThreadFetch {
@@ -95,12 +97,15 @@ export async function fetchSageThread(
   threadId: string,
   tokenOverride: string | null,
 ): Promise<SageThreadFetch> {
-  // threadId must be a UUID — server-side regex is `^[0-9a-f-]{36}$`.
-  // We re-validate client-side to avoid burning a round-trip on a typo
-  // and to keep the validateApiPath check happy (dashes are allowed in
-  // the path-only regex via `_` substitute — actually `-` is in the
-  // path alphabet, so this passes without extra encoding).
-  if (!/^[0-9a-f-]{36}$/i.test(threadId)) {
+  // threadId must be a strict UUID, the same pattern the server checks
+  // (audit #92). Re-validated client-side to avoid burning a round-trip
+  // on a malformed id; `-` is in the validateApiPath alphabet, so the id
+  // needs no extra encoding.
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      threadId,
+    )
+  ) {
     throw new Error(`Invalid threadId: ${threadId}`);
   }
   const res = await apiFetch(`/sage/thread/${threadId}`, {}, tokenOverride);

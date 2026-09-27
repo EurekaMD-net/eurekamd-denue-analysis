@@ -16,9 +16,11 @@ vi.mock("../api/sage-client", () => ({
 import { ApiError } from "../api/client";
 import {
   fetchSageHealth,
+  fetchSageThread,
   sageQueryStream,
   type SageEvent,
 } from "../api/sage-client";
+import { listSavedThreads, upsertThread } from "../lib/sage-threads-store";
 import { useUiStore } from "../store";
 import { SageMode } from "./SageMode";
 
@@ -28,6 +30,7 @@ import { SageMode } from "./SageMode";
 
 const healthMock = fetchSageHealth as unknown as ReturnType<typeof vi.fn>;
 const streamMock = sageQueryStream as unknown as ReturnType<typeof vi.fn>;
+const threadMock = fetchSageThread as unknown as ReturnType<typeof vi.fn>;
 
 const CONFIGURED = {
   configured: true,
@@ -148,6 +151,7 @@ beforeEach(() => {
   healthMock.mockReset();
   healthMock.mockResolvedValue(CONFIGURED);
   streamMock.mockReset();
+  threadMock.mockReset();
   frames = new Map();
   let nextFrame = 1;
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
@@ -334,5 +338,109 @@ describe("SageMode provider gate (#187)", () => {
     expect(healthMock).toHaveBeenCalledTimes(2);
     expect(container.textContent).not.toContain("no se pudo verificar");
     expect(exampleButtons()[0]!.disabled).toBe(false);
+  });
+});
+
+describe("SageMode thread ownership (#11/#82/#89)", () => {
+  const T1 = "11111111-1111-4111-8111-111111111111";
+
+  function savedIds(): string[] {
+    return listSavedThreads("u1").map((e) => e.thread_id);
+  }
+
+  function saveThread(question: string) {
+    upsertThread("u1", {
+      thread_id: T1,
+      first_question: question,
+      last_question: question,
+      turn_count: 1,
+      updated_at: 1,
+    });
+  }
+
+  it("drops a thread the server 404s on a follow-up and starts a new one", async () => {
+    const s = controlledStream();
+    await renderMode();
+    click(exampleButtons()[0]);
+    await s.push(
+      { type: "thread", thread_id: T1 },
+      { type: "narrative", text: "ok" },
+      { type: "done", turn_id: "turn-1" },
+    );
+    await s.end();
+    expect(savedIds()).toEqual([T1]);
+
+    streamMock.mockImplementation(async function* () {
+      throw new ApiError("thread not found.", 404, "THREAD_NOT_FOUND");
+    });
+    typeAndSubmit("segunda pregunta");
+    await flush();
+    expect(streamMock.mock.calls[1]?.[1]).toBe(T1);
+    expect(container.textContent).toContain(
+      "THREAD_NOT_FOUND: thread not found.",
+    );
+    // Old code: the gone thread stayed in the index and stayed current.
+    expect(savedIds()).toEqual([]);
+
+    typeAndSubmit("tercera pregunta");
+    await flush();
+    // Old code: every later question re-sent T1 and 404ed again.
+    expect(streamMock.mock.calls[2]?.[1]).toBeNull();
+  });
+
+  it("keeps the thread on a non-404 follow-up failure", async () => {
+    const s = controlledStream();
+    await renderMode();
+    click(exampleButtons()[0]);
+    await s.push({ type: "thread", thread_id: T1 }, { type: "done", turn_id: "t" });
+    await s.end();
+    streamMock.mockImplementation(async function* () {
+      throw new ApiError("Service Unavailable", 503);
+    });
+    typeAndSubmit("segunda pregunta");
+    await flush();
+    typeAndSubmit("tercera pregunta");
+    await flush();
+    expect(savedIds()).toEqual([T1]);
+    expect(streamMock.mock.calls[2]?.[1]).toBe(T1);
+  });
+
+  it("restores a persisted failed turn with its error", async () => {
+    saveThread("pregunta fallida");
+    threadMock.mockResolvedValue({
+      thread_id: T1,
+      turns: [
+        {
+          turn_id: "turn-1",
+          created_at: "2026-09-27T00:00:00Z",
+          question: "pregunta fallida",
+          route: { kind: "sql" },
+          digest: { columns: [], row_count: 0, first_5_rows: [] },
+          narrative: "",
+          error: { code: "SQL_GATE_REJECTED", message: "consulta rechazada" },
+        },
+      ],
+    });
+    await renderMode();
+    click(buttonByText("pregunta fallida"));
+    await flush();
+    // Old code hydrated error: null, so the card showed an empty narrative.
+    expect(container.querySelector(".bg-red-950")?.textContent).toBe(
+      "SQL_GATE_REJECTED: consulta rechazada",
+    );
+  });
+
+  it("drops a thread from the index when loading it 404s", async () => {
+    saveThread("hilo ajeno");
+    threadMock.mockRejectedValue(
+      new ApiError("thread not found.", 404, "THREAD_NOT_FOUND"),
+    );
+    await renderMode();
+    click(buttonByText("hilo ajeno"));
+    await flush();
+    expect(savedIds()).toEqual([]);
+    expect(container.textContent).toContain(
+      "Este hilo ya no existe en el servidor.",
+    );
   });
 });

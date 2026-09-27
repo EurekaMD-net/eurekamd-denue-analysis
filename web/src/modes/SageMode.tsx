@@ -236,6 +236,13 @@ export function SageMode() {
             else if (s === 503) code = "PROVIDER_UNAVAILABLE";
             else code = `HTTP_${s}`;
           }
+          // A 404 on a follow-up means the thread is gone or not ours
+          // (audit #11/#82): drop it from the index so the next question
+          // starts a new thread instead of 404ing again.
+          if (s === 404 && threadId) {
+            setSavedThreads(removeThread(userId, threadId));
+            setThreadId(null);
+          }
           setTurns((current) => {
             const next = [...current];
             const t = next[idx] ?? placeholder;
@@ -255,7 +262,7 @@ export function SageMode() {
         unregister();
       }
     },
-    [accessToken, threadId, turns.length, streaming],
+    [accessToken, threadId, turns.length, streaming, userId],
   );
 
   // Whenever the conversation state settles (streaming finished AND we
@@ -298,9 +305,9 @@ export function SageMode() {
         // carries narrative + a slim digest (columns + first_5_rows,
         // server-truncated). We do NOT re-execute the SQL or hit the
         // endpoint — the goal is to let the user re-read prior
-        // conversation, not re-run it. `chart` and `error` are not
-        // persisted by the backend today, so they always restore as
-        // null (audit C1 / W5).
+        // conversation, not re-run it. `chart` is not persisted, so it
+        // restores as null (audit C1 / W5); a failed turn restores its
+        // persisted error (audit #89).
         const hydrated: ChatTurn[] = fetched.turns.map((t: SageStoredTurn) => ({
           question: t.question,
           route: t.route,
@@ -309,7 +316,7 @@ export function SageMode() {
           rowCount: t.digest?.row_count ?? 0,
           chart: null,
           narrative: t.narrative,
-          error: null,
+          error: t.error ?? null,
           done: true,
         }));
         setTurns(hydrated);
