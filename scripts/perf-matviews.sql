@@ -44,6 +44,8 @@ FROM establecimientos e
 LEFT JOIN coneval_irs_municipal i ON i.cve_mun = e.area_geo
 WHERE e.sector_actividad_id IS NOT NULL
 GROUP BY 1, 2;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_sector_grade_matrix TO denue_sage;
 
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE INDEX required for
 -- REFRESH MATERIALIZED VIEW CONCURRENTLY. Without it, REFRESH takes an
@@ -102,6 +104,8 @@ LEFT JOIN entidad_irs ei
   ON ei.entidad = ec.entidad AND ei.rn = 1
 LEFT JOIN entidad_pobreza ep
   ON ep.entidad = ec.entidad;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_national_treemap TO denue_sage;
 
 -- Audit W1-perf round-1 closure 2026-05-10: same posture as
 -- mv_sector_grade_matrix above — UNIQUE INDEX enables REFRESH
@@ -149,6 +153,8 @@ FROM sesnsp_delitos_municipal
 -- but defends future emissions.
 WHERE cve_mun IS NOT NULL AND LENGTH(cve_mun) = 5
 GROUP BY cve_mun, ano;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_delitos_municipal_yearly TO denue_sage;
 
 CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
@@ -211,6 +217,8 @@ WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
   AND NULLIF(anio_ocur, '') IS NOT NULL
   AND anio_ocur ~ '^[0-9]{4}$'
 GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_sage;
 
 CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);

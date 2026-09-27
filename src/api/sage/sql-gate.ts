@@ -1,14 +1,23 @@
 /**
  * SQL safety gate for the Sage SQL fallback path.
  *
- * Four layers, smallest to strongest:
- *   1. Regex pre-check       — reject obvious DDL/DML at the lexical level.
- *   2. Single-statement check — reject anything with multiple statements.
- *   3. EXPLAIN plan budget   — reject expensive plans before they run.
- *   4. Role + runtime guards — execute as denue_sage with statement_timeout.
+ * The controls that hold, strongest first:
+ *   1. Role — psql logs in AS denue_sage (a non-superuser LOGIN role with
+ *      SELECT on the allowlisted views/MVs only). The session never starts
+ *      as a superuser, so RESET ROLE / set_config('role') cannot escalate.
+ *   2. Read-only transaction — every script opens with BEGIN READ ONLY, so
+ *      writes (including pg_net's queue INSERT) fail even where PUBLIC has
+ *      been granted them. statement_timeout is set in the same transaction.
+ *   3. Single statement — a real left-to-right tokenizer (quotes, E'',
+ *      $tag$, "idents", nested comments) must see exactly one statement
+ *      starting with SELECT or WITH.
+ *   4. EXPLAIN plan budget — the most expensive plan node must fit the
+ *      budget and no forbidden relation may be Seq-Scanned.
  *
- * Even if all four fail in concert, the worst the query can do is SELECT
- * from the denue_sage allowlist (no establecimientos, no raw tables).
+ * Best effort only, not a control: the keyword, relation and function
+ * denylists run on the same token stream. They give the LLM a clear error
+ * for obvious mistakes; the role and read-only transaction are what stop
+ * a query that slips past them.
  *
  * Errors return structured codes the caller can surface to the LLM:
  *   SQL_PARSE_FAIL         — multiple statements, or starts with non-SELECT
@@ -91,7 +100,7 @@ const FORBIDDEN_KEYWORDS = [
 ];
 
 // Sensitive relations that must never appear in user-authored SQL text.
-// The preCheckSql regex rejects any query that *names* one of these.
+// The preCheckSql token scan rejects any query that *names* one of these.
 // Defense in depth on top of the denue_sage role GRANTs.
 const FORBIDDEN_RELATIONS = [
   "establecimientos",
@@ -136,51 +145,232 @@ const FORBIDDEN_SEQ_SCAN_RELATIONS = [
   "censo_iter",
 ];
 
-// Strip string literals (single-quoted) and line/block comments before
-// keyword scanning, so a query like SELECT 'INSERT' FROM ... is allowed.
-function stripLiteralsAndComments(sql: string): string {
-  return sql
-    .replace(/--[^\n]*/g, " ") // line comments
-    .replace(/\/\*[\s\S]*?\*\//g, " ") // block comments
-    .replace(/'[^']*'/g, "''") // single-quoted strings (lossy but safe)
-    .replace(/\$[A-Za-z0-9_]*\$[\s\S]*?\$[A-Za-z0-9_]*\$/g, "''"); // dollar-quoted
+// Functions / catalog relations that read or change server settings,
+// touch the filesystem, open connections, or run SQL text the gate never
+// saw. Matched against every identifier token, quoted or schema-qualified.
+const FORBIDDEN_FUNCTIONS = [
+  "current_setting",
+  "set_config",
+  "pg_settings",
+  "pg_show_all_settings",
+  "pg_db_role_setting",
+  "pg_read_file",
+  "pg_read_binary_file",
+  "pg_ls_dir",
+  "pg_cancel_backend",
+  "pg_terminate_backend",
+];
+const FORBIDDEN_FUNCTION_PREFIXES = [
+  "lo_",
+  "dblink",
+  "query_to_xml",
+  "table_to_xml",
+  "cursor_to_xml",
+  "pg_sleep",
+];
+// Any name qualified by one of these schemas is rejected (pg_net, Supabase
+// vault/auth/storage, extension helpers).
+const FORBIDDEN_SCHEMAS = ["net", "vault", "auth", "storage", "extensions"];
+
+type SqlTokenKind = "word" | "qident" | "string" | "number" | "op";
+
+interface SqlToken {
+  kind: SqlTokenKind;
+  /** word/qident: lowercased name; op: the operator text; else raw text. */
+  value: string;
+  start: number;
+  end: number;
+}
+
+const IDENT_START = /[A-Za-z_\u0080-\uffff]/;
+const IDENT_CHAR = /[A-Za-z0-9_$\u0080-\uffff]/;
+const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+
+/**
+ * One left-to-right pass over the SQL, following Postgres quoting rules:
+ * '...' with '' escapes, E'...' with backslash escapes, $tag$...$tag$
+ * closing only on the same tag, "idents" with "" escapes, -- line comments
+ * and nested block comments. Comments are dropped. Returns a string error
+ * for anything Postgres would treat as unterminated, and for a backslash
+ * outside a literal (not valid SQL; psql would read it as a meta-command).
+ */
+function tokenizeSql(sql: string): SqlToken[] | string {
+  const tokens: SqlToken[] = [];
+  const n = sql.length;
+  let i = 0;
+  while (i < n) {
+    const c = sql[i]!;
+    const next = sql[i + 1];
+    // Postgres whitespace only: any non-ASCII char (even U+00A0) is an
+    // identifier char to PG, so `\u00a0E'..'` is not an E'' string there.
+    if (/[ \t\n\r\f]/.test(c)) {
+      i++;
+      continue;
+    }
+    if (c === "-" && next === "-") {
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i++;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth++;
+          i += 2;
+        } else if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (depth > 0) return "unterminated block comment";
+      continue;
+    }
+    const start = i;
+    if (c === "'" || ((c === "E" || c === "e") && next === "'")) {
+      const backslashEscapes = c !== "'";
+      i += backslashEscapes ? 2 : 1;
+      let closed = false;
+      while (i < n) {
+        const ch = sql[i];
+        if (backslashEscapes && ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === "'") {
+          if (sql[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i++;
+          closed = true;
+          break;
+        }
+        i++;
+      }
+      if (!closed) return "unterminated string literal";
+      tokens.push({
+        kind: "string",
+        value: sql.slice(start, i),
+        start,
+        end: i,
+      });
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      let name = "";
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            name += '"';
+            i += 2;
+            continue;
+          }
+          i++;
+          closed = true;
+          break;
+        }
+        name += sql[i];
+        i++;
+      }
+      if (!closed) return "unterminated quoted identifier";
+      tokens.push({ kind: "qident", value: name.toLowerCase(), start, end: i });
+      continue;
+    }
+    if (c === "$") {
+      const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0];
+      if (tag) {
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close === -1) return "unterminated dollar-quoted string";
+        i = close + tag.length;
+        tokens.push({
+          kind: "string",
+          value: sql.slice(start, i),
+          start,
+          end: i,
+        });
+        continue;
+      }
+    }
+    if (IDENT_START.test(c)) {
+      while (i < n && IDENT_CHAR.test(sql[i]!)) i++;
+      tokens.push({
+        kind: "word",
+        value: sql.slice(start, i).toLowerCase(),
+        start,
+        end: i,
+      });
+      continue;
+    }
+    if (/[0-9]/.test(c)) {
+      // Digits, dots and a complete exponent only. PG never lets a number
+      // absorb the E of `1E'..'` (it raises trailing junk), so neither may we.
+      while (i < n && /[0-9.]/.test(sql[i]!)) i++;
+      const exp = /^[eE][+-]?[0-9]+/.exec(sql.slice(i))?.[0];
+      if (exp) i += exp.length;
+      tokens.push({
+        kind: "number",
+        value: sql.slice(start, i),
+        start,
+        end: i,
+      });
+      continue;
+    }
+    if (c === "\\") return "backslash outside a string literal";
+    i++;
+    tokens.push({ kind: "op", value: c, start, end: i });
+  }
+  return tokens;
+}
+
+function isIdent(t: SqlToken | undefined): t is SqlToken {
+  return t !== undefined && (t.kind === "word" || t.kind === "qident");
 }
 
 export function preCheckSql(sql: string): SqlGateError | null {
-  const trimmed = sql.trim();
-  if (trimmed.length === 0) {
+  const tokens = tokenizeSql(sql);
+  if (typeof tokens === "string") {
+    return { code: "SQL_PARSE_FAIL", message: tokens };
+  }
+  if (tokens.length === 0) {
     return { code: "SQL_PARSE_FAIL", message: "empty SQL" };
   }
 
-  // Single-statement rule: count meaningful semicolons. A trailing `;` is
-  // allowed; semicolons inside the body are not.
-  const stripped = stripLiteralsAndComments(trimmed);
-  const innerSemicolons = stripped.replace(/;\s*$/, "").includes(";");
-  if (innerSemicolons) {
+  // Single-statement rule: after the first `;` only more `;` may follow
+  // (comments are already dropped, so `SELECT 1; -- note` is fine).
+  const firstSemi = tokens.findIndex(
+    (t) => t.kind === "op" && t.value === ";",
+  );
+  if (
+    firstSemi !== -1 &&
+    tokens.slice(firstSemi).some((t) => !(t.kind === "op" && t.value === ";"))
+  ) {
     return {
       code: "SQL_PARSE_FAIL",
       message: "multiple statements not allowed",
     };
   }
 
-  // First non-whitespace token must be SELECT or WITH.
-  const firstToken = stripped
-    .replace(/^\s+/, "")
-    .split(/\s+/)[0]
-    ?.toUpperCase();
-  if (firstToken !== "SELECT" && firstToken !== "WITH") {
+  // First token must be the bare keyword SELECT or WITH.
+  const first = tokens[0]!;
+  const firstWord = first.kind === "word" ? first.value.toUpperCase() : "";
+  if (firstWord !== "SELECT" && firstWord !== "WITH") {
     return {
       code: "SQL_PARSE_FAIL",
-      message: `expected SELECT or WITH, got ${firstToken}`,
+      message: `expected SELECT or WITH, got ${firstWord || first.value}`,
     };
   }
 
-  // Forbidden keyword scan. Word-boundary so columns named "select_id"
-  // (not present in our schema, but defensively) wouldn't trigger.
-  const upper = stripped.toUpperCase();
-  for (const kw of FORBIDDEN_KEYWORDS) {
-    const re = new RegExp(`\\b${kw}\\b`, "i");
-    if (re.test(upper)) {
+  // Forbidden keyword scan over unquoted words. `set_config` is one word
+  // token, so it never matches SET here; the function denylist covers it.
+  for (const t of tokens) {
+    if (t.kind !== "word") continue;
+    const kw = t.value.toUpperCase();
+    if (FORBIDDEN_KEYWORDS.includes(kw)) {
       return {
         code: "SQL_FORBIDDEN_KEYWORD",
         message: `keyword "${kw}" not allowed in Sage SQL`,
@@ -188,13 +378,41 @@ export function preCheckSql(sql: string): SqlGateError | null {
     }
   }
 
-  // Forbidden-relation scan. Case-insensitive; word-boundary.
-  for (const rel of FORBIDDEN_RELATIONS) {
-    const re = new RegExp(`\\b${rel}\\b`, "i");
-    if (re.test(stripped)) {
+  for (let k = 0; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (!isIdent(t)) continue;
+    const name = t.value;
+
+    // Forbidden-relation scan, quoted or schema-qualified.
+    if (FORBIDDEN_RELATIONS.includes(name)) {
       return {
         code: "SQL_FORBIDDEN_TABLE",
-        message: `table "${rel}" not in Sage allowlist`,
+        message: `table "${name}" not in Sage allowlist`,
+      };
+    }
+
+    // Function / settings denylist.
+    if (
+      FORBIDDEN_FUNCTIONS.includes(name) ||
+      FORBIDDEN_FUNCTION_PREFIXES.some((p) => name.startsWith(p))
+    ) {
+      return {
+        code: "SQL_FORBIDDEN_KEYWORD",
+        message: `function "${name}" not allowed in Sage SQL`,
+      };
+    }
+
+    // Schema-qualified reference into a denied schema: `net.http_post`.
+    const dot = tokens[k + 1];
+    if (
+      FORBIDDEN_SCHEMAS.includes(name) &&
+      dot?.kind === "op" &&
+      dot.value === "." &&
+      isIdent(tokens[k + 2])
+    ) {
+      return {
+        code: "SQL_FORBIDDEN_TABLE",
+        message: `schema "${name}" not in Sage allowlist`,
       };
     }
   }
@@ -208,8 +426,18 @@ export function preCheckSql(sql: string): SqlGateError | null {
  * forgot. Idempotent against existing LIMIT (smaller LIMIT wins).
  */
 export function applyRowCap(sql: string, cap: number): string {
-  const trimmed = sql.trim().replace(/;\s*$/, "");
-  return `SELECT * FROM (${trimmed}) AS sage_wrapped LIMIT ${cap}`;
+  // Cut at the end of the last real token, dropping trailing `;` and
+  // comments (`... LIMIT 5; -- top 5`). The inner SQL sits on its own
+  // lines so a comment inside it cannot swallow the wrapper.
+  let inner = sql.trim();
+  const tokens = tokenizeSql(sql);
+  if (typeof tokens !== "string") {
+    const last = [...tokens]
+      .reverse()
+      .find((t) => !(t.kind === "op" && t.value === ";"));
+    if (last) inner = sql.slice(0, last.end).trim();
+  }
+  return `SELECT * FROM (\n${inner}\n) AS sage_wrapped LIMIT ${cap}`;
 }
 
 interface ExplainPlanNode {
@@ -240,7 +468,12 @@ export function checkExplainPlan(
   if (!root) {
     return { code: "SQL_PARSE_FAIL", message: "EXPLAIN returned no plan" };
   }
-  const totalCost = root["Total Cost"] ?? 0;
+  // The root is always the wrapper's Limit, whose cost is prorated by the
+  // fraction of rows fetched. Budget the most expensive node instead.
+  let totalCost = 0;
+  walkPlan(root, (n) => {
+    totalCost = Math.max(totalCost, n["Total Cost"] ?? 0);
+  });
   if (totalCost > config.maxCost) {
     return {
       code: "SQL_PLAN_TOO_EXPENSIVE",
@@ -266,20 +499,38 @@ export function checkExplainPlan(
   return err;
 }
 
+// Log in as the least-privileged role itself (pg_hba trusts the container's
+// local socket; TCP needs a password the role does not have). -X skips any
+// psqlrc; ON_ERROR_STOP makes psql exit non-zero on the first error.
+function sagePsqlArgs(): string[] {
+  return [
+    "psql",
+    "-X",
+    "-U",
+    "denue_sage",
+    "-d",
+    "postgres",
+    "-v",
+    "ON_ERROR_STOP=1",
+  ];
+}
+
 /**
  * Execute the gated SQL. Returns rows + columns on success or a
  * structured error code on failure. The caller (sage route) records
  * the outcome in sage_turns_audit.
  *
  * Postgres-side guards baked into every call:
- *   - SET ROLE denue_sage  (so privilege is enforced by the DB)
- *   - SET statement_timeout = 8000  (so runaway queries die)
+ *   - psql -U denue_sage  (logs in as the role; never a superuser session)
+ *   - BEGIN READ ONLY  (writes fail, including pg_net queue inserts)
+ *   - SET LOCAL statement_timeout  (so runaway queries die)
+ *   - ON_ERROR_STOP  (psql stops at the first failing statement)
  *   - Outer LIMIT 5000  (so result payload stays bounded)
  *
  * We shell out to `docker exec ... psql` rather than using node-postgres
- * because the rest of the API already uses this pattern and the
- * statement_timeout/role discipline is per-session — wrapping in BEGIN
- * + SET LOCAL guarantees they're scoped to the single query.
+ * because the rest of the API already uses this pattern. The script goes
+ * as one -c string, which psql sends to the server verbatim: no psql
+ * meta-commands (`\!`) or `:var` interpolation apply to the LLM's SQL.
  */
 export async function executeGatedSql(
   sql: string,
@@ -298,10 +549,9 @@ export async function executeGatedSql(
   const wrapped = applyRowCap(sql, rowCap);
 
   // EXPLAIN first (statement_timeout still applies). Wrap the whole
-  // transaction so role + timeout are scoped to this one operation.
+  // transaction so read-only + timeout are scoped to this one operation.
   const explainScript = `
-BEGIN;
-SET LOCAL ROLE denue_sage;
+BEGIN READ ONLY;
 SET LOCAL statement_timeout = ${timeoutMs};
 EXPLAIN (FORMAT JSON) ${wrapped};
 COMMIT;
@@ -324,9 +574,7 @@ COMMIT;
         "exec",
         "-i",
         dbContainer,
-        "psql",
-        "-U",
-        "postgres",
+        ...sagePsqlArgs(),
         "-tAq",
         "-c",
         explainScript,
@@ -369,8 +617,7 @@ COMMIT;
 
   // Plan passed. Execute the same wrapped SQL.
   const execScript = `
-BEGIN;
-SET LOCAL ROLE denue_sage;
+BEGIN READ ONLY;
 SET LOCAL statement_timeout = ${timeoutMs};
 COPY (${wrapped}) TO STDOUT WITH (FORMAT csv, HEADER true);
 COMMIT;
@@ -389,9 +636,7 @@ COMMIT;
         "exec",
         "-i",
         dbContainer,
-        "psql",
-        "-U",
-        "postgres",
+        ...sagePsqlArgs(),
         "-q",
         "-c",
         execScript,

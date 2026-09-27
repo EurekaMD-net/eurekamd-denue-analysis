@@ -11,20 +11,30 @@
 --     establecimientos at runtime, slow), any *_raw table.
 --   * Re-run-safe: every GRANT/REVOKE is idempotent.
 --
--- Run via: docker exec -i supabase-db psql -U postgres -d postgres < scripts/sage-role.sql
+-- Run via: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/sage-role.sql
 
 \set ON_ERROR_STOP on
 
 BEGIN;
 
--- Role: NOLOGIN; the app server SETs ROLE to it after a transaction
--- begin. Password is for emergency direct-psql access; rotated in .env.
+-- Role: LOGIN, no password. The app connects AS denue_sage (psql -U
+-- denue_sage over the container's local socket, which pg_hba trusts) so the
+-- session is never a superuser and cannot RESET ROLE / set_config('role').
+-- TCP connections require scram-sha-256, and with PASSWORD NULL there is
+-- nothing to match, so the role cannot log in from outside the container.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage') THEN
-    CREATE ROLE denue_sage NOLOGIN;
+    CREATE ROLE denue_sage LOGIN;
   END IF;
 END$$;
+ALTER ROLE denue_sage LOGIN PASSWORD NULL NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOREPLICATION NOBYPASSRLS;
+-- Session defaults for every denue_sage login. The app also opens each
+-- script with BEGIN READ ONLY + SET LOCAL statement_timeout; these hold
+-- even if a statement slips past the gate outside that transaction.
+ALTER ROLE denue_sage SET statement_timeout = '8s';
+ALTER ROLE denue_sage SET default_transaction_read_only = on;
 
 -- Strip any prior privileges (idempotent: REVOKE is no-op when absent).
 REVOKE ALL ON SCHEMA public FROM denue_sage;
@@ -49,7 +59,15 @@ GRANT SELECT ON sedatu_financing_by_estado   TO denue_sage;
 GRANT SELECT ON sedatu_financing_by_municipio TO denue_sage;
 GRANT SELECT ON sict_traffic_by_estado       TO denue_sage;
 GRANT SELECT ON sict_traffic_by_municipio    TO denue_sage;
-GRANT SELECT ON osm_ageb_aggregates          TO denue_sage;
+-- osm_ageb_aggregates is optional (built by the OSM loader, absent on a DB
+-- that never ran it). A bare GRANT on a missing relation aborts this whole
+-- ON_ERROR_STOP transaction, so grant it only when it exists.
+DO $$
+BEGIN
+  IF to_regclass('public.osm_ageb_aggregates') IS NOT NULL THEN
+    GRANT SELECT ON osm_ageb_aggregates TO denue_sage;
+  END IF;
+END$$;
 
 -- Analytical views (no expensive base joins).
 GRANT SELECT ON aeropuertos_by_municipio       TO denue_sage;
