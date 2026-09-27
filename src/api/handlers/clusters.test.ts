@@ -31,15 +31,14 @@ afterEach(() => {
 });
 
 describe("GET /clusters", () => {
-  it("returns 200 + clusters payload on happy path", async () => {
+  it("returns 200 + { entidad, scian, k, centroids } on happy path (audit #101)", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
         {
           cluster_id: 0,
-          centroid_lat: 19.4326,
-          centroid_lon: -99.1332,
-          member_count: 12,
-          member_clees: ["09001", "09002"],
+          lon: -99.1332,
+          lat: 19.4326,
+          size: 12,
         },
       ]),
     );
@@ -52,13 +51,22 @@ describe("GET /clusters", () => {
       entidad: string;
       scian: string;
       k: number;
-      clusters: Array<{ member_count: number }>;
+      centroids: unknown[];
     };
     expect(body.entidad).toBe("09");
     expect(body.scian).toBe("46");
     expect(body.k).toBe(5);
-    expect(body.clusters).toHaveLength(1);
-    expect(body.clusters[0]?.member_count).toBe(12);
+    // The SPA's zod schema requires `centroids`; the old `clusters` key
+    // made every parse throw.
+    expect(Object.keys(body).sort()).toEqual([
+      "centroids",
+      "entidad",
+      "k",
+      "scian",
+    ]);
+    expect(body.centroids).toEqual([
+      { cluster_id: 0, lon: -99.1332, lat: 19.4326, size: 12 },
+    ]);
   });
 
   it("uses default k=5 when not specified", async () => {
@@ -71,7 +79,7 @@ describe("GET /clusters", () => {
     // SQL travels on stdin; the bridge appends it as the last recorded arg.
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
-    expect(sql).toContain("ST_ClusterKMeans(geom, 5)");
+    expect(sql).toContain("ST_ClusterKMeans(ST_Transform(geom, 6372), 5)");
   });
 
   it("returns 502 postgres.error (not 500) when psql fails (audit #54)", async () => {

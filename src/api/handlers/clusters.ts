@@ -56,5 +56,6 @@ export async function clustersHandler(
     },
     { entidad, scianPrefix: scian, k },
   );
-  return c.json({ entidad, scian, k, clusters: result });
+  // Audit #101: the SPA contract is `centroids: [{cluster_id, lon, lat, size}]`.
+  return c.json({ entidad, scian, k, centroids: result });
 }

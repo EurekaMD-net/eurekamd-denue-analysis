@@ -3,7 +3,8 @@
  *
  * Uses PostGIS ST_ClusterKMeans to identify k spatial clusters of
  * establecimientos within an entidad + 2-digit SCIAN sector. Returns
- * cluster centroids + member CLEEs.
+ * cluster centroids + sizes only (audit #34/#101: no member CLEE arrays —
+ * those made entidad=15/sector=46 a 12 MB payload; now < 1 KB).
  *
  * Implementation: shells to `docker exec <container> psql` like
  * loader.ts:updateGeometry() — the same VPS-local pattern. PostgREST
@@ -25,10 +26,9 @@ const SAFE_CONTAINER_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
 export interface ClusterCentroid {
   cluster_id: number;
-  centroid_lat: number;
-  centroid_lon: number;
-  member_count: number;
-  member_clees: string[];
+  lon: number;
+  lat: number;
+  size: number;
 }
 
 export interface ClusterBySectorParams {
@@ -73,7 +73,9 @@ export async function clusterBySector(
     throw new Error(`clusterBySector: unsafe container name "${container}".`);
   }
   // ST_ClusterKMeans returns cluster_id over the window of records matching the WHERE.
-  // Outer aggregate computes centroid + member list per cluster.
+  // Audit #56: k-means runs on EPSG:6372 (Mexico ITRF2008 LCC) so distances
+  // are metric, not raw degrees; the centroid is taken back in 4326.
+  // Outer aggregate computes centroid + size per cluster (no member list).
   // Output as JSON so we don't have to parse a psql table format.
   //
   // sector_actividad_id is backfilled from CLEE chars 6-7 (the 2-digit
@@ -83,8 +85,8 @@ export async function clusterBySector(
   // by construction.
   const sql = `
     WITH clustered AS (
-      SELECT clee, latitud, longitud,
-             ST_ClusterKMeans(geom, ${params.k}) OVER () AS cluster_id
+      SELECT geom,
+             ST_ClusterKMeans(ST_Transform(geom, 6372), ${params.k}) OVER () AS cluster_id
       FROM establecimientos
       WHERE entidad = '${params.entidad}'
         AND sector_actividad_id = '${params.scianPrefix}'
@@ -93,13 +95,12 @@ export async function clusterBySector(
     SELECT json_agg(c) FROM (
       SELECT
         cluster_id,
-        ROUND(AVG(latitud)::numeric, 6) AS centroid_lat,
-        ROUND(AVG(longitud)::numeric, 6) AS centroid_lon,
-        COUNT(*)::int AS member_count,
-        ARRAY_AGG(clee ORDER BY clee) AS member_clees
+        ROUND(ST_X(ST_Centroid(ST_Collect(geom)))::numeric, 6) AS lon,
+        ROUND(ST_Y(ST_Centroid(ST_Collect(geom)))::numeric, 6) AS lat,
+        COUNT(*)::int AS size
       FROM clustered
       GROUP BY cluster_id
-      ORDER BY member_count DESC
+      ORDER BY size DESC
     ) c;
   `
     .replace(/\n\s+/g, " ")
@@ -127,7 +128,7 @@ export function formatClusters(clusters: ClusterCentroid[]): string {
   ];
   for (const c of clusters) {
     lines.push(
-      `${String(c.cluster_id).padEnd(2)}  ${String(c.member_count).padStart(7)}  ${c.centroid_lat.toFixed(6)}, ${c.centroid_lon.toFixed(6)}`,
+      `${String(c.cluster_id).padEnd(2)}  ${String(c.size).padStart(7)}  ${c.lat.toFixed(6)}, ${c.lon.toFixed(6)}`,
     );
   }
   return lines.join("\n");
