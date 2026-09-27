@@ -130,7 +130,10 @@ describe("store signOut (full flow)", () => {
         window.localStorage.getItem("sb-ref-auth-token-code-verifier"),
       ).toBeNull();
       expect(window.localStorage.getItem("unrelated-key")).toBe("keep");
-      expect(stopMock).toHaveBeenCalledOnce();
+      // Auto-refresh must keep running (round 2): stopAutoRefresh() also
+      // drops auth-js's visibility listener for the page's life, so a
+      // same-tab re-login would never refresh its token.
+      expect(stopMock).not.toHaveBeenCalled();
       expect(warn).toHaveBeenCalled();
     } finally {
       signOutMock.mockResolvedValue({ error: null });

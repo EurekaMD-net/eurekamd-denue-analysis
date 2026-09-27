@@ -116,15 +116,18 @@ export const useUiStore = create<UiState>((set, get) => ({
     // leaves the refresh token in localStorage, so the next reload or
     // TOKEN_REFRESHED would restore the session. Another auth-js call
     // does not help: scope 'local' still POSTs /logout and skips
-    // _removeSession() on the same error. So stop the refresh ticker and
-    // delete the stored session ourselves.
+    // _removeSession() on the same error. So delete the stored session
+    // ourselves. Do NOT call stopAutoRefresh() here: it also removes
+    // auth-js's visibilitychange listener and signInWithPassword never
+    // restarts it, so a same-tab re-login would never refresh its token
+    // (401s after ~1 h). With the key gone the running ticker just hits
+    // its no-session early return. Audit #192 round 2.
     const { error } = await supabase.auth.signOut();
     if (error) {
       console.warn(
         "[auth] server-side sign-out failed; cleared the local session only",
         error.message,
       );
-      await supabase.auth.stopAutoRefresh();
       removeStoredSupabaseSession();
     }
   },
