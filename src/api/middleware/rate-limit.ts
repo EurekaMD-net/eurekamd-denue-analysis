@@ -1,14 +1,15 @@
 /**
- * Per-IP token-bucket rate limit. Used for /tiles only — point lookups
- * and summaries don't need throttling, but tile fetches scale linearly
- * with the visible map area, so a single panning user can fire 100+ in
- * a few seconds.
- *
- * Plan §"P1 — API additions" mandates 5 req/sec per IP for /tiles.
- * Anything above that returns 429 with a Retry-After hint.
+ * Sliding-window rate limit, keyed per IP, per principal, or both.
+ * Registered in server.ts on:
+ *  - /sage/query: 6/min per principal (each request fires 2 LLM calls).
+ *  - /analytics/*: 120/min per principal+IP; 20/min on ageb-detail and
+ *    agebs-by-municipio (psql per request on the shared cluster).
+ *  - /tiles/*: 60/s per IP, sized for MapLibre's viewport burst (tile
+ *    fetches scale with the visible map area).
+ * Anything above a limit returns 429 with a Retry-After hint.
  *
  * Design notes:
- *  - Sliding window, in-memory Map keyed by IP.
+ *  - Sliding window, in-memory Map keyed by bucket (see keyBy).
  *  - Periodic cleanup prevents unbounded growth (entries idle >5min are GC'd).
  *  - getIp is injectable for tests. With TRUST_PROXY=1 production reads the
  *    RIGHTMOST x-forwarded-for entry (the hop Caddy appended); without it,
