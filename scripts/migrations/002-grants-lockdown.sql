@@ -81,7 +81,10 @@ BEGIN
     'sesnsp_delitos_municipal', 'sesnsp_delitos_municipal_raw',
     'sict_estaciones_viales', 'sict_estaciones_viales_raw_2024',
     'sict_traffic_by_estado', 'sict_traffic_by_municipio',
-    'sinba_ec_raw', 'sinba_morbidity_municipal'
+    'sinba_ec_raw', 'sinba_morbidity_municipal',
+    -- created by backend migration 018 (audit #140) under postgres'
+    -- default ACL, which grants trustr_app arwdDxt
+    'mv_sinba_morbidity_municipal'
   ] LOOP
     IF to_regclass(format('public.%I', r)) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON public.%I FROM anon, authenticated, trustr_app', r);
