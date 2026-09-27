@@ -264,9 +264,10 @@ describe("loadSesnsp orchestration (audit #144)", () => {
   const HEADER =
     "Año,Clave_Ent,Entidad,Cve. Municipio,Municipio,Bien jurídico afectado,Tipo de delito,Subtipo de delito,Modalidad,Enero,Febrero,Marzo,Abril,Mayo,Junio,Julio,Agosto,Septiembre,Octubre,Noviembre,Diciembre";
 
-  function stubAll(missing = ""): void {
+  function stubAll(missing = "", preparedLines = "10\n"): void {
     mockExec.mockImplementation((cmd: string, args: string[] = []) => {
       const joined = args.join(" ");
+      if (cmd === "/bin/bash" && joined.includes('wc -l < "$OUT"')) return preparedLines;
       if (cmd === "/bin/sh" && joined.includes("ls *.zip")) {
         return "RNID-Delitos_Municipal-Historical-2015-2025.csv\n";
       }
@@ -301,6 +302,27 @@ describe("loadSesnsp orchestration (audit #144)", () => {
       ((c[1] as string[]) ?? []).includes("rm"),
     );
     expect(rm).toBeDefined();
+  });
+
+  it("prepares the CSV under bash with pipefail so an unzip/iconv failure is fatal (audit #149)", async () => {
+    stubAll();
+    await loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" });
+    const body = mockExec.mock.calls.find((c) =>
+      ((c[1] as string[]) ?? []).join(" ").includes("iconv -f WINDOWS-1252 -t UTF-8 | tail -n +2"),
+    );
+    expect(body?.[0]).toBe("/bin/bash");
+    expect((body?.[1] as string[]).slice(0, 3)).toEqual(["-o", "pipefail", "-c"]);
+  });
+
+  it("refuses a prepared CSV with fewer lines than the source, before any psql session (audit #149)", async () => {
+    stubAll("", "7\n");
+    await expect(
+      loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/has 7 lines, source has 10 \(truncated prep\)/);
+    const tx = mockExec.mock.calls.filter((c) =>
+      ((c[1] as string[]) ?? []).includes("--single-transaction"),
+    );
+    expect(tx).toHaveLength(0);
   });
 
   it("fails loud when an analytics MV is missing after the load", async () => {

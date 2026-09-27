@@ -51,6 +51,23 @@ function mockHeaderFs(line: string, sizeBytes = 50_000_000): void {
   mockStat.mockReturnValue({ size: sizeBytes });
 }
 
+
+/**
+ * CSV whose 16 KB sniff window ends in the middle of a 2-byte UTF-8 char:
+ * byte 16383 is the 0xC3 lead of "á", its 0xA1 continuation is byte 16384.
+ * `latin1Byte` also plants a lone Latin-1 "á" (0xE1) mid-window.
+ */
+function mockSniffWindowFs(line: string, latin1Byte = false): void {
+  const head = Buffer.from(line + "\n", "utf-8");
+  const filler = Buffer.alloc(16 * 1024 - 1 - head.length, 0x61);
+  if (latin1Byte) filler[100] = 0xe1;
+  const content = Buffer.concat([head, filler, Buffer.from("á\n", "utf-8")]);
+  mockOpen.mockReturnValue(7);
+  mockRead.mockImplementation((_fd, buf: Buffer) => content.copy(buf));
+  mockClose.mockReturnValue(undefined);
+  mockStat.mockReturnValue({ size: 50_000_000 });
+}
+
 describe("buildSinbaCreateTable", () => {
   it("lowercases columns and quotes them as TEXT", () => {
     const sql = buildSinbaCreateTable(HEADER);
@@ -172,6 +189,34 @@ describe("loadSinba — input validation", () => {
     await expect(
       loadSinba({ csvPath: "/tmp/sinba.csv", dbContainer: "supabase-db" }),
     ).rejects.toThrow(/suspiciously small/);
+  });
+});
+
+describe("loadSinba — UTF-8 sniff (audit #160)", () => {
+  function populated(): void {
+    mockExec.mockImplementation((_cmd, args) => {
+      const sql = (args as string[]).join(" ");
+      if (sql.includes("to_regclass('sinba_ec_raw')")) return "t\n";
+      if (sql.includes("SELECT COUNT(*) FROM sinba_ec_raw")) return "141021\n";
+      return "";
+    });
+  }
+
+  it("accepts valid UTF-8 whose 16 KB window splits a multibyte char", async () => {
+    mockSniffWindowFs(HEADER);
+    populated();
+    // Reaching the populated-table guard means the sniff passed.
+    await expect(
+      loadSinba({ csvPath: "/tmp/sinba.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/already has 141021 rows/);
+  });
+
+  it("still rejects a Latin-1 byte inside the window", async () => {
+    mockSniffWindowFs(HEADER, true);
+    populated();
+    await expect(
+      loadSinba({ csvPath: "/tmp/sinba.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/not valid UTF-8/);
   });
 });
 

@@ -88,7 +88,9 @@ function assertUtf8(path: string): void {
     const slice = buf.subarray(0, bytes);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     try {
-      decoder.decode(slice);
+      // stream: a multibyte char cut by the 16 KB boundary is buffered, not
+      // reported as invalid (audit #160).
+      decoder.decode(slice, { stream: true });
     } catch (err) {
       throw new Error(
         `loadSinba: CSV at ${path} is not valid UTF-8. Did you forget the iconv step? ` +

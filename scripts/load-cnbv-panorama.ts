@@ -32,8 +32,10 @@
  *   2. DROP+CREATE both `_staging` raw tables (TEXT cols) idempotently.
  *   3. \copy both CSVs into staging, with NULL '*' so the converter's
  *      sentinel maps to actual NULL on read; drop both views; swap staging in.
- *   4. DROP+CREATE both views with NULLIF/cast, indexes, grants.
- *   5. Verify counts. Hard-fail if dup (cve_mun) or (cve_ent) groups.
+ *   4. DROP+CREATE both views with NULLIF/cast, indexes; hard-fail (RAISE,
+ *      rolling the whole reload back) if dup (cve_mun) or (cve_ent) groups
+ *      (audit #154); grants.
+ *   5. Verify counts.
  *
  * Idempotent: rerun freely. Annual refresh (Panorama 2026, ...) overwrites
  * prior load; multi-period history is out of scope.
@@ -465,6 +467,33 @@ const PANORAMA_RELATIONS = [
   "cnbv_panorama_estatal",
 ];
 
+/**
+ * Duplicate-key guard (audit #154). Runs inside the reload transaction,
+ * after the views are rebuilt and before COMMIT, so a corrupted source rolls
+ * the whole reload back instead of committing duplicate cve_mun / cve_ent
+ * rows to the live views.
+ */
+export const PANORAMA_DUP_GUARD_SQL = `
+DO $$
+DECLARE muni_dups int; estado_dups int;
+BEGIN
+  SELECT COUNT(*) INTO muni_dups FROM (
+    SELECT cve_mun FROM cnbv_panorama_municipal
+    GROUP BY cve_mun HAVING COUNT(*) > 1
+  ) d;
+  IF muni_dups > 0 THEN
+    RAISE EXCEPTION 'loadCnbvPanorama: producer invariant violated - % cve_mun groups have >1 row. Reload rolled back.', muni_dups;
+  END IF;
+  SELECT COUNT(*) INTO estado_dups FROM (
+    SELECT cve_ent FROM cnbv_panorama_estatal
+    GROUP BY cve_ent HAVING COUNT(*) > 1
+  ) d;
+  IF estado_dups > 0 THEN
+    RAISE EXCEPTION 'loadCnbvPanorama: producer invariant violated - % cve_ent groups have >1 row. Reload rolled back.', estado_dups;
+  END IF;
+END $$;
+`;
+
 /** `\copy <table>_staging (<leading cols>) FROM '<containerPath>' ...`. */
 function stagingCopySql(table: string, containerPath: string): string {
   return `\\copy ${table}_staging (${tableLeadingCols(table).join(",")}) FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`;
@@ -493,6 +522,7 @@ export function buildCnbvPanoramaReloadSql(
     buildMuniViewSql(),
     buildEstadoViewSql(),
     INDEX_DDL,
+    PANORAMA_DUP_GUARD_SQL,
     postLoadGrants(PANORAMA_RELATIONS),
   ].join("\n");
 }
@@ -569,7 +599,8 @@ export async function loadCnbvPanorama(
       }
     }
 
-    // 5. Verify counts + dup guards
+    // 5. Verify counts (the dup guards already ran inside the reload
+    //    transaction, audit #154)
     const muniRows = countRows(
       config.dbContainer,
       "SELECT COUNT(*) FROM cnbv_panorama_municipal;",
@@ -578,31 +609,6 @@ export async function loadCnbvPanorama(
       config.dbContainer,
       "SELECT COUNT(*) FROM cnbv_panorama_estatal;",
     );
-
-    const muniDups = countRows(
-      config.dbContainer,
-      `SELECT COUNT(*) FROM (
-         SELECT cve_mun FROM cnbv_panorama_municipal
-         GROUP BY cve_mun HAVING COUNT(*) > 1
-       ) d;`,
-    );
-    const estadoDups = countRows(
-      config.dbContainer,
-      `SELECT COUNT(*) FROM (
-         SELECT cve_ent FROM cnbv_panorama_estatal
-         GROUP BY cve_ent HAVING COUNT(*) > 1
-       ) d;`,
-    );
-    if (muniDups > 0) {
-      throw new Error(
-        `loadCnbvPanorama: producer invariant violated — ${muniDups} cve_mun groups have >1 row.`,
-      );
-    }
-    if (estadoDups > 0) {
-      throw new Error(
-        `loadCnbvPanorama: producer invariant violated — ${estadoDups} cve_ent groups have >1 row.`,
-      );
-    }
 
     assertRelationsExist(config.dbContainer, PANORAMA_RELATIONS);
 

@@ -307,6 +307,12 @@ describe("DDL invariants", () => {
     );
   });
 
+  it("STATIONS_VIEW_DDL picks the border copy deterministically, estado as tie-breaker (audit #164)", () => {
+    expect(STATIONS_VIEW_DDL).toMatch(
+      /AND NULLIF\(tdpa, ''\) IS NOT NULL\s+(--[^\n]*\n\s*)*ORDER BY latitud, longitud, clave, punto_generador, km, te, sc, estado\s*\)/,
+    );
+  });
+
   it("STATIONS_VIEW_DDL filters NULL lat/lon/tdpa rows", () => {
     expect(STATIONS_VIEW_DDL).toContain(
       "WHERE NULLIF(latitud, '') IS NOT NULL",

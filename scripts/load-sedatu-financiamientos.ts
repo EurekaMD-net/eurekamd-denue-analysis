@@ -622,6 +622,15 @@ function dockerExecStdin(
  * 1:1 prefix of Unicode), then re-encode as UTF-8.
  */
 export function transcodeLatin1ToUtf8(input: Buffer): Buffer {
+  // Already-UTF-8 input (e.g. the raw/*.utf8.csv copies) passes through
+  // untouched: reinterpreting it as Latin-1 double-encodes every accent
+  // ('Yucatán' -> 'YucatÃ¡n') and loads without error (audit #159).
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(input);
+    return input;
+  } catch {
+    // not valid UTF-8 → Latin-1 source, transcode below
+  }
   // Node's built-in 'latin1' encoding maps each byte to U+0000–U+00FF
   // exactly (this IS the ISO-8859-1 → Unicode codepoint mapping).
   const text = input.toString("latin1");

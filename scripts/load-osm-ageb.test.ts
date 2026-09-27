@@ -5,15 +5,17 @@ vi.mock("node:child_process", () => ({
   execFileSync: mockExec,
   execSync: vi.fn(),
 }));
-const { mockExists, mockStat } = vi.hoisted(() => ({
+const { mockExists, mockStat, mockRm } = vi.hoisted(() => ({
   mockExists: vi.fn(),
   mockStat: vi.fn(),
+  mockRm: vi.fn(),
 }));
 // Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
   existsSync: mockExists,
   statSync: mockStat,
+  rmSync: mockRm,
 }));
 
 import {
@@ -26,6 +28,7 @@ beforeEach(() => {
   mockExec.mockReset();
   mockExists.mockReset();
   mockStat.mockReset();
+  mockRm.mockReset();
   mockExists.mockReturnValue(true);
   mockStat.mockReturnValue({ size: 123 });
 });
@@ -336,6 +339,13 @@ describe("loadOsmAgeb (orchestration)", () => {
       "SELECT COUNT(*) FROM osm_ageb_aggregates",
     );
     expect(r.ageb_rows_loaded).toBe(80000);
+    // Audit #151: sizes are measured first, then the ~2.2 GB of host-side
+    // intermediates are deleted after the successful load.
+    expect(r.geojson_bytes).toBe(123);
+    expect(mockRm.mock.calls.map((c) => c[0])).toEqual([
+      "/w/mexico-roads.osm.pbf",
+      "/w/mexico-roads.geojsonseq",
+    ]);
   });
 
   it("docker cp uses `--` separator before user paths (anti flag-injection)", async () => {
@@ -374,6 +384,8 @@ describe("loadOsmAgeb (orchestration)", () => {
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/aggregate failed/);
+    // A failed load keeps the host intermediates for debugging.
+    expect(mockRm).not.toHaveBeenCalled();
     // Final call must be the cleanup rm -f.
     const last = mockExec.mock.calls[mockExec.mock.calls.length - 1]!;
     expect(last[0]).toBe("docker");

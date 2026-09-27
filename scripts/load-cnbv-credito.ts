@@ -726,6 +726,15 @@ function dockerExecStdin(
  * transcode in-loader before \copy.
  */
 export function transcodeLatin1ToUtf8(input: Buffer): Buffer {
+  // Already-UTF-8 input (e.g. the raw/*.utf8.csv copies) passes through
+  // untouched: reinterpreting it as Latin-1 double-encodes every accent
+  // ('Yucatán' -> 'YucatÃ¡n') and loads without error (audit #159).
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(input);
+    return input;
+  } catch {
+    // not valid UTF-8 → Latin-1 source, transcode below
+  }
   const text = input.toString("latin1");
   return Buffer.from(text, "utf-8");
 }

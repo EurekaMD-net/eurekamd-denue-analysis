@@ -21,6 +21,7 @@ vi.mock("node:fs", async (importOriginal) => ({
 import {
   buildCnbvPanoramaReloadSql,
   loadCnbvPanorama,
+  PANORAMA_DUP_GUARD_SQL,
   POST_LOAD_SQL_FOR_TEST,
   MUNI_RAW_DDL,
   ESTADO_RAW_DDL,
@@ -46,21 +47,18 @@ afterEach(() => vi.restoreAllMocks());
  *   5. ONE psql --single-transaction session: staging DDL, both \copy,
  *      swap, views, indexes, grants (audit #145)
  *   6-7. rm muni / estado csv inside container
- *   8-11. count(muni view) / count(estado view) / muni dup guard / estado dup guard
- *   12. assertRelationsExist (none missing)
+ *   8-9. count(muni view) / count(estado view)
+ *   10. assertRelationsExist (none missing)
+ * The dup guards run inside the reload transaction (audit #154).
  */
 function stubHappyPath(
   opts: {
     muniRows?: number;
     estadoRows?: number;
-    muniDups?: number;
-    estadoDups?: number;
   } = {},
 ): void {
   const muniRows = opts.muniRows ?? 2469;
   const estadoRows = opts.estadoRows ?? 32;
-  const muniDups = opts.muniDups ?? 0;
-  const estadoDups = opts.estadoDups ?? 0;
   mockExec
     .mockReturnValueOnce("clave_municipio_num,cve_mun,...\n1001,01001,...\n") // py muni
     .mockReturnValueOnce("cve_estado_num,nom_ent,...\n1,Aguascalientes,...\n") // py estado
@@ -71,8 +69,6 @@ function stubHappyPath(
     .mockReturnValueOnce("") // rm estado
     .mockReturnValueOnce(`${muniRows}\n`) // muni count
     .mockReturnValueOnce(`${estadoRows}\n`) // estado count
-    .mockReturnValueOnce(`${muniDups}\n`) // muni dup guard
-    .mockReturnValueOnce(`${estadoDups}\n`) // estado dup guard
     .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 }
 
@@ -200,24 +196,39 @@ describe("loadCnbvPanorama (orchestration)", () => {
     expect(typeof result.duration_ms).toBe("number");
   });
 
-  it("hard-fails when muni view has duplicate cve_mun groups", async () => {
-    stubHappyPath({ muniDups: 3 });
+  it("a duplicate-key RAISE inside the reload transaction fails the load with nothing after it (audit #154)", async () => {
+    mockExec
+      .mockReturnValueOnce("hdr\n") // py muni
+      .mockReturnValueOnce("hdr\n") // py estado
+      .mockReturnValueOnce("") // docker cp muni
+      .mockReturnValueOnce("") // docker cp estado
+      .mockImplementationOnce(() => {
+        throw new Error(
+          "ERROR:  loadCnbvPanorama: producer invariant violated - 3 cve_mun groups have >1 row. Reload rolled back.",
+        );
+      }) // reload transaction: the guard RAISEs, psql rolls back
+      .mockReturnValueOnce("") // rm muni
+      .mockReturnValueOnce(""); // rm estado
     await expect(
       loadCnbvPanorama({
         xlsxPath: "/x.xlsx",
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/3 cve_mun groups have >1 row/);
+    expect(mockExec).toHaveBeenCalledTimes(7); // no post-commit count or probe
   });
 
-  it("hard-fails when estado view has duplicate cve_ent groups", async () => {
-    stubHappyPath({ estadoDups: 1 });
-    await expect(
-      loadCnbvPanorama({
-        xlsxPath: "/x.xlsx",
-        dbContainer: "supabase-db",
-      }),
-    ).rejects.toThrow(/1 cve_ent groups have >1 row/);
+  it("the dup guards cover cve_mun and cve_ent and sit after the views, before the grants (audit #154)", () => {
+    const sql = buildCnbvPanoramaReloadSql("/tmp/m.csv", "/tmp/e.csv");
+    const guard = sql.indexOf(PANORAMA_DUP_GUARD_SQL);
+    expect(guard).toBeGreaterThan(sql.indexOf("CREATE VIEW cnbv_panorama_estatal AS"));
+    expect(guard).toBeLessThan(sql.indexOf("GRANT SELECT ON cnbv_panorama_estatal TO denue_sage;"));
+    expect(PANORAMA_DUP_GUARD_SQL).toMatch(
+      /FROM cnbv_panorama_municipal\s+GROUP BY cve_mun HAVING COUNT\(\*\) > 1[\s\S]*IF muni_dups > 0 THEN\s+RAISE EXCEPTION/,
+    );
+    expect(PANORAMA_DUP_GUARD_SQL).toMatch(
+      /FROM cnbv_panorama_estatal\s+GROUP BY cve_ent HAVING COUNT\(\*\) > 1[\s\S]*IF estado_dups > 0 THEN\s+RAISE EXCEPTION/,
+    );
   });
 
   it("hard-fails on non-numeric count output (psql producing garbage)", async () => {

@@ -165,7 +165,7 @@ describe("loadCe2024 reload (audit #145)", () => {
     expect(sql).toContain("GRANT SELECT ON ce2024_municipal TO denue_sage;");
   });
 
-  function route(failCopyFor?: string) {
+  function route(failCopyFor?: string, bcHeader = HEADER) {
     mockExec.mockImplementation(
       (bin: string, args: string[]) => {
         // beforeEach returns mockExec, which vitest then calls bare as a cleanup hook.
@@ -173,7 +173,9 @@ describe("loadCe2024 reload (audit #145)", () => {
         if (bin === "/bin/sh" && args[1]?.startsWith("cd ")) {
           return "conjunto_de_datos_ce_ags_2024_csv.zip\nconjunto_de_datos_ce_bc_2024_csv.zip\n";
         }
-        if (bin === "/bin/sh" && args[1]?.includes("head -1")) return `${HEADER}\n`;
+        if (bin === "/bin/sh" && args[1]?.includes("head -1")) {
+          return `${args.some((a) => a.includes("_bc_")) ? bcHeader : HEADER}\n`;
+        }
         if (bin === "/bin/sh") return `${HEADER}\n1,001,31,311\n`;
         const joined = args.join(" ");
         if (failCopyFor && joined.includes(`\\copy`) && joined.includes(failCopyFor)) {
@@ -204,6 +206,18 @@ describe("loadCe2024 reload (audit #145)", () => {
       if (c === txs[1]) continue;
       expect(`${c[1].join(" ")} ${c[2]?.input ?? ""}`).not.toMatch(/DROP (TABLE|MATERIALIZED VIEW) IF EXISTS ce2024_(raw|municipal)\b(?!_)/);
     }
+  });
+
+  it("rejects a state whose header has the same count but a different column order (audit #152)", async () => {
+    // Same 16 columns, A111A and A131A swapped: positional \copy would load
+    // one into the other silently.
+    route(undefined, HEADER.replace("A111A,A131A", "A131A,A111A"));
+    await expect(
+      loadCe2024({ zipDir: "raw", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/bc header differs from ags/);
+    const calls = mockExec.mock.calls as Array<[string, string[], { input?: string }]>;
+    expect(calls.filter((c) => c[1].join(" ").includes("\\copy"))).toHaveLength(1);
+    expect(calls.filter((c) => c[2]?.input?.includes("RENAME TO ce2024_raw;"))).toHaveLength(0);
   });
 
   it("a failed state copy never reaches the swap (live tables untouched)", async () => {

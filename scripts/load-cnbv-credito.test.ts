@@ -83,6 +83,13 @@ describe("transcodeLatin1ToUtf8", () => {
     expect(out.toString("utf-8")).toBe("año");
     expect([...out]).toEqual([0x61, 0xc3, 0xb1, 0x6f]);
   });
+
+  it("passes already-UTF-8 input through instead of double-encoding it (audit #159)", () => {
+    const input = Buffer.from("Yucatán,Año,México\n", "utf-8");
+    const out = transcodeLatin1ToUtf8(input);
+    expect(out.toString("utf-8")).toBe("Yucatán,Año,México\n");
+    expect(out.toString("utf-8")).not.toContain("Ã");
+  });
 });
 
 describe("loadCnbvCredito (orchestration)", () => {

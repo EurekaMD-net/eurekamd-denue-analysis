@@ -21,8 +21,8 @@
  * `ent`/`mun`/`loc`/`ageb`; Q3+Q4 use `cve_ent`/`cve_mun`/`cve_loc`/`cve_ageb`
  * + add a `cvegeo` 115th column. Calibration-relevant column INDICES are
  * identical across all 4 quarters (positions 11/25/53/55/56/97/107), so the
- * loader sidesteps the rename by extracting 7 columns by position via
- * `awk -F,` rather than relying on header names.
+ * loader sidesteps the rename by extracting 7 columns by position with a
+ * quote-aware awk split rather than relying on header names.
  *
  * Behavior:
  *   1. Drop+create enoe_sdem_raw_staging idempotently (7 typed cols +
@@ -257,18 +257,41 @@ export interface LoadEnoeResult {
 }
 
 /**
- * Per-quarter shell pipeline that projects the 7 calibration columns from
- * the full sdem CSV. Output: `trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal`
- * (header included). Runs entirely in the docker container via stdin so we
- * never copy the full 100MB+ source CSV into PG storage.
+ * Per-quarter awk program that projects the 7 calibration columns from
+ * the full sdem CSV into the file named by the awk variable `out` (`-v
+ * out=...`). Output: `trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal`
+ * (header included). Runs entirely in the docker container so we never copy
+ * the full 100MB+ source CSV into PG storage.
  *
- * awk arithmetic indexes match the column-order assertion above. Header
- * line emitted by the BEGIN block; data lines start at NR>1.
+ * CSV-aware (audit #156): a bare FS="," split a quoted free-text field such
+ * as "SE DIO DE BAJA, PARA CORREGIR EDAD" into several fields and shifted
+ * every later column (fac_tri, clase1/2, ingocup, emp_ppal). csvsplit
+ * re-joins comma-split pieces until each field holds an even number of
+ * quotes. Plain POSIX awk: the DB container ships mawk, not gawk (no FPAT).
+ * Any row whose field count still differs from the header's is dropped and
+ * counted; the count is the program's only stdout.
+ *
+ * Indexes match the column-order assertion above.
  */
-function projectionAwkScript(trimestre: number): string {
+export function projectionAwkScript(trimestre: number): string {
   const idx = ENOE_SDEM_COL_INDEX;
-  return `BEGIN { FS=","; OFS=","; print "trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal" }
-NR>1 { print ${trimestre}, $${idx.ent}, $${idx.fac_tri}, $${idx.clase1}, $${idx.clase2}, $${idx.eda}, $${idx.ingocup}, $${idx.emp_ppal} }`;
+  return `function csvsplit(line, f,    raw, m, n, i, v) {
+  m = split(line, raw, ",")
+  n = 0
+  for (i = 1; i <= m; i++) {
+    v = raw[i]
+    while (gsub(/"/, "&", v) % 2 == 1 && i < m) v = v "," raw[++i]
+    f[++n] = v
+  }
+  return n
+}
+BEGIN { OFS=","; dropped=0; print "trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal" > out }
+NR==1 { hdr_nf = csvsplit($0, h); next }
+{
+  if (csvsplit($0, c) != hdr_nf) { dropped++; next }
+  print ${trimestre}, c[${idx.ent}], c[${idx.fac_tri}], c[${idx.clase1}], c[${idx.clase2}], c[${idx.eda}], c[${idx.ingocup}], c[${idx.emp_ppal}] > out
+}
+END { print dropped }`;
 }
 
 export async function loadEnoe(
@@ -310,17 +333,24 @@ export async function loadEnoe(
 
     try {
       // Project to 7-column form via awk
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "sh",
-          "-c",
-          `awk '${projectionAwkScript(q.trimestre)}' ${containerSrc} > ${containerProj}`,
-        ],
-        { encoding: "utf-8", timeout: 5 * 60_000 },
+      const dropped = Number(
+        execFileSync(
+          "docker",
+          [
+            "exec",
+            config.dbContainer,
+            "sh",
+            "-c",
+            `awk -v out=${containerProj} '${projectionAwkScript(q.trimestre)}' ${containerSrc}`,
+          ],
+          { encoding: "utf-8", timeout: 5 * 60_000 },
+        ).trim(),
       );
+      if (dropped > 0) {
+        console.warn(
+          `[load-enoe] Q${q.trimestre}: dropped ${dropped} rows whose field count differs from the header`,
+        );
+      }
 
       // \copy projected CSV
       execFileSync(

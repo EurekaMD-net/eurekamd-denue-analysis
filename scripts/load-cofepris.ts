@@ -69,7 +69,9 @@ function assertUtf8(path: string): void {
     const buf = Buffer.alloc(16 * 1024);
     const bytes = readSync(fd, buf, 0, buf.length, 0);
     const decoder = new TextDecoder("utf-8", { fatal: true });
-    decoder.decode(buf.subarray(0, bytes));
+    // stream: a multibyte char cut by the 16 KB boundary is buffered, not
+    // reported as invalid (audit #160).
+    decoder.decode(buf.subarray(0, bytes), { stream: true });
   } catch (err) {
     throw new Error(
       `loadCofepris: CSV at ${path} is not valid UTF-8. ` +

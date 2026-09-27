@@ -199,6 +199,10 @@ WITH dedup AS (
   WHERE NULLIF(latitud, '') IS NOT NULL
     AND NULLIF(longitud, '') IS NOT NULL
     AND NULLIF(tdpa, '') IS NOT NULL
+  -- Deterministic border-copy pick (audit #164): without ORDER BY, which
+  -- estado's copy survives (and its estado_publicado / carretera / periodo)
+  -- could change between refreshes.
+  ORDER BY latitud, longitud, clave, punto_generador, km, te, sc, estado
 )
 SELECT
   d.periodo,

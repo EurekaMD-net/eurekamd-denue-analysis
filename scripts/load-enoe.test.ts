@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
 vi.mock("node:child_process", () => ({
@@ -12,6 +15,7 @@ import {
   buildEnoeSwapSql,
   calibratorsDdlForTest,
   loadEnoe,
+  projectionAwkScript,
 } from "./load-enoe.js";
 
 beforeEach(() => mockExec.mockReset());
@@ -145,6 +149,55 @@ describe("calibratorsDdlForTest", () => {
   });
 });
 
+describe("projectionAwkScript (audit #156)", () => {
+  // Runs the real program through the host awk binaries (the DB container
+  // ships mawk, so mawk is the one that matters).
+  const realChildProcess = () =>
+    vi.importActual<typeof import("node:child_process")>("node:child_process");
+  const awks = ["mawk", "gawk"].filter((a) => existsSync(`/usr/bin/${a}`));
+
+  it.each(awks.length > 0 ? awks : ["awk"])(
+    "%s: a quoted field with commas does not shift later columns; wrong-NF rows are dropped and counted",
+    async (awkBin) => {
+      const { execFileSync: realExec } = await realChildProcess();
+      const dir = mkdtempSync(join(tmpdir(), "enoe-awk-"));
+      try {
+        const cols = (n: number) => Array.from({ length: n }, (_, i) => `v${i + 1}`);
+        const quoted = cols(115);
+        quoted[29] = '"SE DIO DE BAJA, PARA CORREGIR EDAD, ""X"""';
+        const csv = [
+          cols(115).map((c) => c.replace("v", "h")).join(","),
+          cols(115).join(","),
+          quoted.join(","),
+          cols(114).join(","), // one field short: dropped
+        ].join("\n") + "\n";
+        writeFileSync(join(dir, "src.csv"), csv);
+        const out = join(dir, "proj.csv");
+        const stdout = realExec(
+          awkBin,
+          ["-v", `out=${out}`, projectionAwkScript(2), join(dir, "src.csv")],
+          { encoding: "utf-8" },
+        );
+        expect(stdout.trim()).toBe("1");
+        const want = "2,v11,v53,v55,v56,v25,v97,v107";
+        // Old FS="," split: the quoted row came out as 2,v11,v51,v53,v54,v25,v95,v105.
+        expect(readFileSync(out, "utf-8").split("\n")).toEqual([
+          "trimestre,ent,fac_tri,clase1,clase2,eda,ingocup,emp_ppal",
+          want,
+          want,
+          "",
+        ]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("has no single quote (it is embedded in sh -c '...')", () => {
+    expect(projectionAwkScript(1)).not.toContain("'");
+  });
+});
+
 describe("loadEnoe", () => {
   it("validates dbContainer regex before any docker call", async () => {
     await expect(
@@ -230,7 +283,7 @@ describe("loadEnoe", () => {
       "supabase-db",
       "sh",
       "-c",
-      expect.stringContaining(`$${ENOE_SDEM_COL_INDEX.ent}`),
+      expect.stringContaining(`c[${ENOE_SDEM_COL_INDEX.ent}]`),
     ]);
     // Awk script is at args[4] (after "exec","container","sh","-c"); it
     // should tag trimestre=1 in the output.
@@ -246,6 +299,24 @@ describe("loadEnoe", () => {
     );
     expect(txIdx).toBe(9);
     expect(mockExec.mock.calls[9]?.[1]).toContain("--single-transaction");
+  });
+
+  it("warns with the dropped-row count the projection reports (audit #156)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExec.mockImplementation((_bin: string, args: string[]) => {
+      if (!Array.isArray(args)) return "";
+      if (args.some((a) => a.startsWith("awk -v out="))) return "22\n";
+      if (args.some((a) => a.includes("COUNT(*)"))) return "10\n";
+      return "";
+    });
+    await loadEnoe({
+      quarters: [{ trimestre: 3, csvPath: "/tmp/sdem_3.csv" }],
+      dbContainer: "supabase-db",
+      year: 2025,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "[load-enoe] Q3: dropped 22 rows whose field count differs from the header",
+    );
   });
 
   it("never swaps when a later quarter's \\copy fails (live table untouched)", async () => {

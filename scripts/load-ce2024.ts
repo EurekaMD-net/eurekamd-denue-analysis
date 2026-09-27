@@ -355,10 +355,12 @@ ${cols.map((c) => `  ${c} TEXT`).join(",\n")}
       const innerCsv = `conjunto_de_datos/tr_ce_${stateCode}_2024.csv`;
       // Verify each state's header matches the canonical one (catches an
       // INEGI emission drift where a later state ships an extra column).
+      // \copy is positional, so the names AND their order must match, not
+      // just the count (audit #152).
       const stateCols = readCe2024Header(zipPath, innerCsv);
-      if (stateCols.length !== cols.length) {
+      if (stateCols.join(",") !== cols.join(",")) {
         throw new Error(
-          `loadCe2024: ${stateCode} header has ${stateCols.length} cols, expected ${cols.length}`,
+          `loadCe2024: ${stateCode} header differs from ${firstZip.stateCode} (${stateCols.length} cols, expected ${cols.length} in the same order)`,
         );
       }
 

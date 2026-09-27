@@ -186,6 +186,10 @@ WHERE grado IN ('Muy bajo', 'Bajo', 'Medio', 'Alto', 'Muy alto');
 
 const CONEVAL_AGEB_RELATIONS = ["coneval_grs_ageb_raw", "coneval_grs_ageb"];
 
+/** Post-load view stress test: every cast on every row (audit #163). */
+export const CONEVAL_AGEB_STRESS_SQL =
+  "SELECT count(*) FROM coneval_grs_ageb t WHERE t IS NOT NULL;";
+
 /**
  * The single-transaction reload script (audit #145): \copy into staging,
  * drop the view explicitly (an unknown dependent makes DROP TABLE fail →
@@ -314,8 +318,11 @@ export async function loadConevalAgeb(
   //    non-grouping cast expressions, so a row with a malformed indicator
   //    (e.g. empty string slipping past `\copy NULL '*'`) would pass the
   //    counts above and only manifest when an endpoint hits the broken row.
-  //    Force evaluation of the typed casts on a small sample before declaring
-  //    success — mirrors C1 defense at deploy time.
+  //    Force evaluation of every typed cast on every row before declaring
+  //    success — mirrors C1 defense at deploy time. The whole-row reference
+  //    `t IS NOT NULL` builds each row in full, so every column's cast runs
+  //    (a LIMIT 5 sample of 6 columns could not catch row 40,000 or
+  //    ind_sin_luz, audit #163). ~61k rows, sub-second.
   execFileSync(
     "docker",
     [
@@ -327,7 +334,7 @@ export async function loadConevalAgeb(
       "-d",
       "postgres",
       "-c",
-      "SELECT cvegeo, pobtot, vivpar_hab, ind_analfabeta, ind_sin_internet, grado FROM coneval_grs_ageb LIMIT 5;",
+      CONEVAL_AGEB_STRESS_SQL,
     ],
     { encoding: "utf-8", timeout: 60_000 },
   );

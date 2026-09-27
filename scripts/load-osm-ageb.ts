@@ -11,8 +11,8 @@
  *
  * Pipeline:
  *   1. osmium tags-filter — keep only w/highway ways from the PBF
- *      (~750 MB → ~80 MB), drop nodes/relations/non-road ways.
- *   2. osmium export — convert filtered PBF → GeoJSONSeq (~150 MB).
+ *      (~750 MB → ~365 MB), drop nodes/relations/non-road ways.
+ *   2. osmium export — convert filtered PBF → GeoJSONSeq (~1.8 GB).
  *      One LineString feature per road segment with highway= tag.
  *   3. Copy the GeoJSONSeq into the Supabase container, ingest into a
  *      TEMPORARY table (geom + highway), build a GIST index. The temp
@@ -21,8 +21,11 @@
  *      each AGEB (cast to geography for true meters), divide by AGEB
  *      area for density, MIN distance to major roads (motorway/trunk/
  *      primary), per-class counts as JSONB. Write to osm_ageb_aggregates.
- *   5. The TEMPORARY table is gone after the psql session ends. Steady-
- *      state disk: ~10 MB for the 80k-row aggregate table.
+ *   5. The TEMPORARY table is gone after the psql session ends. After a
+ *      successful load the filtered PBF and GeoJSONSeq (~2.2 GB together)
+ *      are deleted from workDir (audit #151); after a failure they stay for
+ *      debugging and the next run overwrites them. Steady-state disk: ~10 MB
+ *      for the 80k-row aggregate table.
  *
  * Idempotent: rerun freely. osm_ageb_aggregates is rebuilt on every run —
  * into osm_ageb_aggregates_staging, swapped in inside the aggregate's own
@@ -36,7 +39,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { postLoadGrants } from "./_psql-tx.js";
 
 // Matches load-clues.ts:32 — strict allowlist for docker container names
@@ -347,7 +350,7 @@ export async function loadOsmAgeb(
   //      a single psql session — staging table + TEMP table + GIST + INSERT
   //      + swap + COMMIT (audit #145: no separate DROP+CREATE step). The
   //      try/finally wraps BOTH the cp and the aggregate so a mid-pipeline
-  //      failure still tries to remove the (possibly partial) ~150MB file
+  //      failure still tries to remove the (possibly partial) ~1.8 GB file
   //      from the container (audit W5).
   try {
     execFileSync(
@@ -426,7 +429,7 @@ export async function loadOsmAgeb(
   };
   const ageb_rows_loaded = cnt("SELECT COUNT(*) FROM osm_ageb_aggregates;");
 
-  return {
+  const result = {
     pbf_bytes: statSync(config.pbfPath).size,
     filtered_pbf_bytes: existsSync(filteredPbf)
       ? statSync(filteredPbf).size
@@ -435,6 +438,11 @@ export async function loadOsmAgeb(
     ageb_rows_loaded,
     duration_ms: Date.now() - started,
   };
+  // 7. Drop the host-side intermediates (~2.2 GB) now the load landed
+  //    (audit #151). Both are rebuilt from the PBF on every run.
+  rmSync(filteredPbf, { force: true });
+  rmSync(geojsonPath, { force: true });
+  return result;
 }
 
 // ---------------------------------------------------------------------------

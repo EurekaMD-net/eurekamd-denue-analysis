@@ -19,6 +19,7 @@ vi.mock("node:fs", async (importOriginal) => ({
 }));
 
 import {
+  BIENESTAR_DUP_GUARD_SQL,
   buildBienestarReloadSql,
   loadBienestarPadron,
   POST_LOAD_SQL_FOR_TEST,
@@ -112,7 +113,6 @@ describe("loadBienestarPadron (orchestration)", () => {
       .mockReturnValueOnce("") // rm
       .mockReturnValueOnce("736\n") // count panel
       .mockReturnValueOnce("32\n") // count latest
-      .mockReturnValueOnce("0\n") // duplicate guard (zero corruption)
       .mockReturnValueOnce(""); // assertRelationsExist (none missing)
 
     const result = await loadBienestarPadron({
@@ -141,18 +141,21 @@ describe("loadBienestarPadron (orchestration)", () => {
     expect(cpArgs[1]).toBe("--"); // flag-injection defense
   });
 
-  it("hard-fails the load when (cve_ent, fecha) duplicates exist", async () => {
+  it("hard-fails the load when (cve_ent, fecha) duplicates exist, before COMMIT (audit #154)", async () => {
     // Producer invariant: one row per (entidad, quarter). The latest-quarter
     // view has no terminal tiebreaker (no field can deduplicate a corrupted
-    // source), so the post-load duplicate guard is the only line of defense.
+    // source), so the duplicate guard is the only line of defense. It now
+    // RAISEs inside the reload transaction, so psql exits non-zero and the
+    // whole reload rolls back: no post-commit count ever runs.
     stubHeader(VALID_HEADER);
     mockExec
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 750\n") // one tx: DDL + \copy + swap + views (extra rows)
-      .mockReturnValueOnce("") // rm
-      .mockReturnValueOnce("738\n") // count panel
-      .mockReturnValueOnce("32\n") // count latest
-      .mockReturnValueOnce("2\n"); // duplicate guard fires
+      .mockImplementationOnce(() => {
+        throw new Error(
+          "ERROR:  loadBienestarPadron: producer invariant violated - 2 (cve_ent, fecha) groups have >1 row.",
+        );
+      }) // one tx: the guard RAISEs, psql rolls back
+      .mockReturnValueOnce(""); // rm
 
     await expect(
       loadBienestarPadron({
@@ -162,6 +165,7 @@ describe("loadBienestarPadron (orchestration)", () => {
     ).rejects.toThrow(
       /producer invariant violated.*2 \(cve_ent, fecha\) groups/,
     );
+    expect(mockExec).toHaveBeenCalledTimes(3); // cp, tx, rm: nothing after
   });
 
   it("cleans up in-container temp file even when \\copy fails", async () => {
@@ -211,6 +215,14 @@ describe("buildBienestarReloadSql (audit #145)", () => {
     expect(dropPanel).toBeLessThan(dropRaw);
     expect(dropRaw).toBeLessThan(swap);
     expect(swap).toBeLessThan(views);
+    // Audit #154: the duplicate guard runs in the same transaction, after
+    // the views and before the grants (and so before COMMIT).
+    const guard = sql.indexOf(BIENESTAR_DUP_GUARD_SQL);
+    expect(guard).toBeGreaterThan(sql.indexOf("CREATE VIEW bienestar_estatal_latest AS"));
+    expect(guard).toBeLessThan(sql.indexOf("GRANT SELECT ON bienestar_estatal_latest TO denue_sage;"));
+    expect(BIENESTAR_DUP_GUARD_SQL).toMatch(
+      /FROM bienestar_estatal_trimestral\s+GROUP BY cve_ent, fecha\s+HAVING COUNT\(\*\) > 1[\s\S]*IF n > 0 THEN\s+RAISE EXCEPTION/,
+    );
     expect(sql).not.toMatch(/DROP TABLE[^;]*CASCADE/);
     expect(sql).not.toMatch(/\b(BEGIN|COMMIT);/);
     expect(sql).toContain("GRANT SELECT ON bienestar_estatal_latest TO denue_sage;");

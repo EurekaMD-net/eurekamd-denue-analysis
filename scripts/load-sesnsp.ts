@@ -377,9 +377,14 @@ function preparePreparedCsv(input: RnidInput, outDir: string): string {
       .replace(/\.csv$/, "")
       .slice(-160) + ".prep.csv",
   );
+  // bash with pipefail (audit #149): under /bin/sh the pipeline's status is
+  // only tr's, so an unzip/iconv failure mid-stream exited 0 and \copy loaded
+  // a silently truncated file.
   execFileSync(
-    "/bin/sh",
+    "/bin/bash",
     [
+      "-o",
+      "pipefail",
       "-c",
       `{ printf '%s\\n' "$HEADER"; ${sourceCmd} | iconv -f WINDOWS-1252 -t UTF-8 | tail -n +2 | tr -d '\\r'; } > "$OUT"`,
     ],
@@ -394,6 +399,25 @@ function preparePreparedCsv(input: RnidInput, outDir: string): string {
       timeout: 30 * 60_000,
     },
   );
+
+  // Belt and braces for #149: the prepared file must carry exactly as many
+  // lines as the source (the header is swapped 1:1, iconv and `tr -d '\r'`
+  // never add or drop a newline).
+  const countLines = (script: string, env: NodeJS.ProcessEnv): number =>
+    Number(
+      execFileSync("/bin/bash", ["-o", "pipefail", "-c", script], {
+        encoding: "utf-8",
+        env: { ...process.env, ...env },
+        timeout: 30 * 60_000,
+      }).trim(),
+    );
+  const sourceLines = countLines(`${sourceCmd} | wc -l`, sourceEnv);
+  const preparedLines = countLines(`wc -l < "$OUT"`, { OUT: outPath });
+  if (sourceLines !== preparedLines) {
+    throw new Error(
+      `loadSesnsp: prepared ${sourceLabel} has ${preparedLines} lines, source has ${sourceLines} (truncated prep)`,
+    );
+  }
   return outPath;
 }
 

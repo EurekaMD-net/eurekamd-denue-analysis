@@ -22,6 +22,7 @@ vi.mock("node:fs", async (importOriginal) => ({
 }));
 
 import {
+  CONEVAL_AGEB_STRESS_SQL,
   CREATE_TABLE_SQL,
   POST_LOAD_SQL,
   buildConevalAgebReloadSql,
@@ -213,6 +214,17 @@ describe("loadConevalAgeb — C1 force-required-on-populated guard", () => {
     expect((txs[0]?.[2] as { input: string }).input).toBe(
       buildConevalAgebReloadSql("/tmp/coneval_grs_ageb.csv"),
     );
+    // Audit #163: the view stress test forces every cast on every row.
+    expect(CONEVAL_AGEB_STRESS_SQL).toBe(
+      "SELECT count(*) FROM coneval_grs_ageb t WHERE t IS NOT NULL;",
+    );
+    const stress = mockExec.mock.calls.filter(
+      (c) => (c[1] as string[]).at(-1) === CONEVAL_AGEB_STRESS_SQL,
+    );
+    expect(stress).toHaveLength(1);
+    expect(
+      mockExec.mock.calls.some((c) => /\bLIMIT\b/.test((c[1] as string[]).join(" "))),
+    ).toBe(false);
   });
 
   it("rethrows a failed COUNT probe instead of treating it as 'absent' (audit #157)", async () => {

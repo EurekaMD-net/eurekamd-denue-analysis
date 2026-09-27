@@ -151,8 +151,9 @@ CREATE TABLE bienestar_padron_estatal_trimestral_raw_staging (
  *   - Latest-slice ROW_NUMBER has no terminal tiebreaker — periodo_cve and
  *     cveent_raw are co-derived with the partition key + fecha so neither
  *     can break a tie. Producer guarantees one-row-per-(entidad, quarter);
- *     post-load duplicate guard (step 4 of loadBienestarPadron) hard-fails
- *     the load if that invariant is violated.
+ *     the duplicate guard (BIENESTAR_DUP_GUARD_SQL, inside the reload
+ *     transaction) hard-fails and rolls back the load if that invariant is
+ *     violated.
  *   - No btree on raw table — 748 rows seq-scans optimally; an index would
  *     be slower than the scan it replaces.
  */
@@ -197,6 +198,29 @@ FROM (
 WHERE rn = 1;
 `;
 
+/**
+ * Duplicate-key guard (audit #154). Runs inside the reload transaction,
+ * after the views are rebuilt and before COMMIT, so a corrupted source
+ * (two rows for one (cve_ent, fecha)) rolls the whole reload back instead
+ * of committing a panel whose latest-quarter pick is nondeterministic. It
+ * reads the new panel view so the key is derived exactly as the API sees it.
+ */
+export const BIENESTAR_DUP_GUARD_SQL = `
+DO $$
+DECLARE n int;
+BEGIN
+  SELECT COUNT(*) INTO n FROM (
+    SELECT cve_ent, fecha
+    FROM bienestar_estatal_trimestral
+    GROUP BY cve_ent, fecha
+    HAVING COUNT(*) > 1
+  ) dup;
+  IF n > 0 THEN
+    RAISE EXCEPTION 'loadBienestarPadron: producer invariant violated - % (cve_ent, fecha) groups have >1 row. Source CSV is corrupted; reload rolled back.', n;
+  END IF;
+END $$;
+`;
+
 const BIENESTAR_RELATIONS = [
   "bienestar_padron_estatal_trimestral_raw",
   "bienestar_estatal_trimestral",
@@ -217,6 +241,7 @@ export function buildBienestarReloadSql(containerPath: string): string {
       "DROP VIEW IF EXISTS bienestar_estatal_trimestral;",
     ]),
     POST_LOAD_SQL_FOR_TEST,
+    BIENESTAR_DUP_GUARD_SQL,
     postLoadGrants(BIENESTAR_RELATIONS),
   ].join("\n");
 }
@@ -274,12 +299,8 @@ export async function loadBienestarPadron(
     }
   }
 
-  // 4. Verify counts + post-load duplicate guard.
-  //    The bienestar_estatal_latest view ROW_NUMBER tiebreaker was removed in
-  //    ronda 2 audit fix because no field can break a (cve_ent, fecha) tie.
-  //    Instead: hard-fail the load if any (cve_ent, fecha) appears twice.
-  //    Producer invariant says this is impossible; if it fires, the source
-  //    CSV is corrupted and the operator needs to investigate.
+  // 4. Verify counts. The (cve_ent, fecha) duplicate guard already ran
+  //    inside the reload transaction (BIENESTAR_DUP_GUARD_SQL, audit #154).
   const cnt = (sql: string): number => {
     const out = execFileSync(
       "docker",
@@ -306,19 +327,6 @@ export async function loadBienestarPadron(
   };
   const panel_rows = cnt("SELECT COUNT(*) FROM bienestar_estatal_trimestral;");
   const latest_rows = cnt("SELECT COUNT(*) FROM bienestar_estatal_latest;");
-  const duplicate_groups = cnt(
-    `SELECT COUNT(*) FROM (
-       SELECT cve_ent, fecha
-       FROM bienestar_estatal_trimestral
-       GROUP BY cve_ent, fecha
-       HAVING COUNT(*) > 1
-     ) dup;`,
-  );
-  if (duplicate_groups > 0) {
-    throw new Error(
-      `loadBienestarPadron: producer invariant violated — ${duplicate_groups} (cve_ent, fecha) groups have >1 row. Source CSV is corrupted; do NOT trust panel_rows=${panel_rows}.`,
-    );
-  }
   assertRelationsExist(config.dbContainer, BIENESTAR_RELATIONS);
   return {
     panel_rows,
