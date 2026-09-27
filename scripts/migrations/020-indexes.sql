@@ -123,4 +123,6 @@ DROP INDEX CONCURRENTLY IF EXISTS public.idx_censo_ageb_raw_cvegeo;
 DROP INDEX CONCURRENTLY IF EXISTS public.idx_estab_nombre;
 
 -- Set the visibility map so idx_estab_ent_mun_cov scans skip the heap.
-VACUUM (ANALYZE) public.establecimientos;
+-- PARALLEL 0: the supabase-db container has the Docker default 64 MB /dev/shm, and a parallel
+-- vacuum over this table's 12 indexes asks for ~67 MB of dynamic shared memory (deploy 2026-09-27).
+VACUUM (ANALYZE, PARALLEL 0) public.establecimientos;

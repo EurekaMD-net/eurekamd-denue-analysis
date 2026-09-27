@@ -191,7 +191,7 @@ phase_cutover_only() {
   systemctl stop denue-matview-refresh.timer
   ok "code merged, 020 indexes in place, DB idle"
   log "020 final VACUUM (ANALYZE) establecimientos (visibility map for the covering index; minutes)"
-  "${PSQL[@]}" -c "VACUUM (ANALYZE) public.establecimientos"
+  "${PSQL[@]}" -c "VACUUM (ANALYZE, PARALLEL 0) public.establecimientos"
   phase_cutover
 }
 
