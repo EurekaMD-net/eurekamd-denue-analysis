@@ -3,12 +3,14 @@ import {
   createBrowserRouter,
   Navigate,
   RouterProvider,
+  type RouteObject,
 } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LoginGate } from "./components/LoginGate";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
-import { LocustMode } from "./modes/LocustMode";
+import { RouteError } from "./components/RouteError";
+import { shouldRetryQuery } from "./api/client";
 import { useUiStore } from "./store";
 
 // MapMode pulls maplibre-gl + deck.gl (~1.5 MB JS). Lazy-loaded so the
@@ -18,10 +20,17 @@ import { useUiStore } from "./store";
 //
 // MapMode is a NAMED export, but React.lazy expects a module with a
 // `default` export — the `.then(...)` adapter rewrites the shape.
-// Chunk-load failures bubble up to the root <ErrorBoundary> rather
-// than spinning forever in the Suspense fallback.
+// Chunk-load failures (and render errors) are caught by each route's
+// <RouteError> errorElement, which reloads on a stale chunk (audit #178);
+// they never reach the app-level <ErrorBoundary>.
 const MapMode = lazy(() =>
   import("./modes/MapMode").then((m) => ({ default: m.MapMode })),
+);
+
+// LocustMode pulls echarts (~1.9 MB source). Lazy so the login screen
+// and /map, /sage don't download it (audit #179).
+const LocustMode = lazy(() =>
+  import("./modes/LocustMode").then((m) => ({ default: m.LocustMode })),
 );
 
 const SageMode = lazy(() =>
@@ -61,13 +70,27 @@ function LazyRouteFallback() {
   );
 }
 
-const router = createBrowserRouter([
+// Exported for the errorElement coverage test.
+export const routes: RouteObject[] = [
   {
     path: "/",
     element: <Layout />,
+    errorElement: <RouteError />,
     children: [
-      { index: true, element: <Navigate to="/locust" replace /> },
-      { path: "locust", element: <LocustMode /> },
+      {
+        index: true,
+        element: <Navigate to="/locust" replace />,
+        errorElement: <RouteError />,
+      },
+      {
+        path: "locust",
+        element: (
+          <Suspense fallback={<LazyRouteFallback />}>
+            <LocustMode />
+          </Suspense>
+        ),
+        errorElement: <RouteError />,
+      },
       {
         path: "map",
         element: (
@@ -75,6 +98,7 @@ const router = createBrowserRouter([
             <MapMode />
           </Suspense>
         ),
+        errorElement: <RouteError />,
       },
       {
         path: "sage",
@@ -83,6 +107,7 @@ const router = createBrowserRouter([
             <SageMode />
           </Suspense>
         ),
+        errorElement: <RouteError />,
       },
       {
         path: "legacy/dashboard",
@@ -91,10 +116,13 @@ const router = createBrowserRouter([
             <LegacyDashboard />
           </Suspense>
         ),
+        errorElement: <RouteError />,
       },
     ],
   },
-]);
+];
+
+const router = createBrowserRouter(routes);
 
 export function App() {
   // Per-instance QueryClient so vitest tests get isolated caches.
@@ -104,7 +132,7 @@ export function App() {
         defaultOptions: {
           queries: {
             staleTime: 5 * 60 * 1000,
-            retry: 1,
+            retry: shouldRetryQuery,
             refetchOnWindowFocus: false,
           },
         },

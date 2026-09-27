@@ -23,6 +23,24 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * react-query `retry` predicate: one retry, except for deterministic 4xx
+ * failures (bad params, 403, 404), which would only repeat after the
+ * backoff and delay the error (audit #188). `session_loading` is a 401
+ * that clears once LoginGate hydrates, so it keeps its retry.
+ */
+export function shouldRetryQuery(failureCount: number, err: unknown): boolean {
+  return (
+    failureCount < 1 &&
+    !(
+      err instanceof ApiError &&
+      err.status >= 400 &&
+      err.status < 500 &&
+      err.code !== "session_loading"
+    )
+  );
+}
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // RH-10: split path + query at the first `?`. The path portion may not

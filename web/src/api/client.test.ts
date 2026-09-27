@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiFetch, ApiError, validateApiPath } from "./client";
+import {
+  apiFetch,
+  ApiError,
+  shouldRetryQuery,
+  validateApiPath,
+} from "./client";
 import { useUiStore } from "../store";
 
 describe("validateApiPath (RH-10)", () => {
@@ -192,5 +197,25 @@ describe("apiFetch token-state error codes (RH-11)", () => {
     );
     expect((err as ApiError).code).toBe("bad_path");
     expect((err as ApiError).status).toBe(400);
+  });
+});
+
+describe("shouldRetryQuery (audit #188)", () => {
+  it("does not retry deterministic 4xx failures", () => {
+    expect(shouldRetryQuery(0, new ApiError("bad", 400, "bad_path"))).toBe(false);
+    expect(shouldRetryQuery(0, new ApiError("forbidden", 403))).toBe(false);
+    expect(shouldRetryQuery(0, new ApiError("not found", 404))).toBe(false);
+  });
+
+  it("retries session_loading once (it clears after hydration)", () => {
+    const err = new ApiError("hydrating", 401, "session_loading");
+    expect(shouldRetryQuery(0, err)).toBe(true);
+    expect(shouldRetryQuery(1, err)).toBe(false);
+  });
+
+  it("retries 5xx and non-API errors once, like retry: 1", () => {
+    expect(shouldRetryQuery(0, new ApiError("boom", 502))).toBe(true);
+    expect(shouldRetryQuery(0, new TypeError("Failed to fetch"))).toBe(true);
+    expect(shouldRetryQuery(1, new ApiError("boom", 502))).toBe(false);
   });
 });
