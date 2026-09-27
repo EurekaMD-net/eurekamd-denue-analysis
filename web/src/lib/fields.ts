@@ -315,7 +315,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "Censo",
     grain: "muni",
     type: "numeric_pct",
-    description: "Población económicamente activa / pob ≥15 años.",
+    description: "Población económicamente activa / pob ≥12 años.",
     endpoints: { "locust-muni": "pct_pea" },
   },
   {
@@ -338,7 +338,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     // without derechohabiencia formal).
     grain: "muni",
     type: "numeric_pct",
-    description: "psinder / pobtot (% sin afiliación a salud pública).",
+    description:
+      "psinder / pobtot (% sin afiliación a ningún servicio de salud, público ni privado).",
     endpoints: { "locust-muni": "pct_sin_cobertura_salud" },
   },
 
@@ -421,7 +422,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "numeric_count",
-    description: "Casos de homicidio doloso por municipio (año actual).",
+    description:
+      "Carpetas de investigación por homicidio doloso por municipio (último año completo).",
     endpoints: { "risk-summary": "homicidio_doloso" },
   },
   {
@@ -430,7 +432,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SESNSP",
     grain: "muni",
     type: "numeric_count",
-    description: "Total de carpetas SESNSP por municipio (año actual).",
+    description:
+      "Total de carpetas SESNSP por municipio (último año completo).",
     endpoints: { "risk-summary": "total_delitos" },
   },
   {
@@ -457,7 +460,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "EDR",
     grain: "muni",
     type: "numeric_count",
-    description: "Defunciones registradas en el municipio (EDR año actual).",
+    description:
+      "Defunciones por municipio de residencia (EDR, último año de ocurrencia cargado).",
     endpoints: { "mortality-summary": "total_defunciones" },
   },
   {
@@ -501,7 +505,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SINBA",
     grain: "muni",
     type: "numeric_count",
-    description: "Casos diabetes tipo 2 / promedio mensual activos SUS.",
+    description:
+      "Adultos con diabetes tipo 2 en manejo, promedio mensual (SINBA/SIS, unidades SSA/IMSS-Bienestar, último año publicado).",
     endpoints: { "locust-muni": "sinba_dm2_promedio" },
   },
   {
@@ -510,7 +515,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SINBA",
     grain: "muni",
     type: "numeric_count",
-    description: "Casos hipertensión / promedio mensual activos SUS.",
+    description:
+      "Adultos con hipertensión arterial en manejo, promedio mensual (SINBA/SIS, unidades SSA/IMSS-Bienestar, último año publicado).",
     endpoints: { "locust-muni": "sinba_hta_promedio" },
   },
   {
@@ -519,7 +525,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SINBA",
     grain: "muni",
     type: "numeric_count",
-    description: "Casos obesidad / promedio mensual activos SUS.",
+    description:
+      "Adultos con obesidad en manejo, promedio mensual (SINBA/SIS, unidades SSA/IMSS-Bienestar, último año publicado).",
     endpoints: { "locust-muni": "sinba_obesidad_promedio" },
   },
 
@@ -577,7 +584,7 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "CE2024",
     grain: "muni",
     type: "numeric_continuous",
-    description: "Valor agregado censal bruto (CE 2024).",
+    description: "Valor agregado censal bruto, millones de pesos (CE 2024).",
     endpoints: { "locust-muni": "ce2024_valor_agregado" },
   },
 
@@ -588,7 +595,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "ENIGH",
     grain: "estado",
     type: "numeric_continuous",
-    description: "Ingreso mediano estatal ponderado, ENIGH 2024.",
+    description:
+      "Mediana estatal ponderada del ingreso corriente trimestral por hogar (MXN), ENIGH 2024.",
     endpoints: { "locust-estado": "enigh_ingreso_p50" },
   },
   {
@@ -628,18 +636,20 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "SICT",
     grain: "muni",
     type: "numeric_count",
-    description: "Tránsito diario promedio anual (SICT).",
+    description:
+      "Suma del TDPA (vehículos/día) de las estaciones de aforo SICT ubicadas en el municipio.",
     endpoints: { "locust-muni": "sict_tdpa_total" },
   },
 
   // ----- SEDATU --------------------------------------------------------
   {
     id: "sedatu.monto_total",
-    label: "Monto subsidiado SEDATU",
+    label: "Monto financiamiento vivienda SEDATU",
     source: "SEDATU",
     grain: "muni",
     type: "numeric_continuous",
-    description: "Monto subsidiado total vivienda (último periodo).",
+    description:
+      "Monto total de financiamientos a la vivienda en MXN (SNIIV: INFONAVIT, FOVISSSTE, banca, CONAVI…; último periodo).",
     endpoints: { "locust-muni": "sedatu_monto_total" },
   },
   {
@@ -655,11 +665,12 @@ export const FIELD_CATALOG: FieldDef[] = [
   // ----- CNBV ----------------------------------------------------------
   {
     id: "cnbv.monto_total",
-    label: "Monto crédito CNBV",
+    label: "Monto crédito vivienda CNBV",
     source: "CNBV",
     grain: "muni",
     type: "numeric_continuous",
-    description: "Monto crédito comercial total (último periodo).",
+    description:
+      "Monto de crédito a la vivienda de banca múltiple en MXN (CNBV, último periodo).",
     endpoints: { "locust-muni": "cnbv_monto_total" },
   },
   {
@@ -668,7 +679,8 @@ export const FIELD_CATALOG: FieldDef[] = [
     source: "CNBV",
     grain: "muni",
     type: "numeric_pct",
-    description: "% acciones a mujeres (crédito comercial CNBV).",
+    description:
+      "% de créditos a la vivienda de banca múltiple (CNBV) otorgados a mujeres, sobre acciones con sexo conocido.",
     endpoints: { "locust-muni": "cnbv_pct_femenino" },
   },
 ];

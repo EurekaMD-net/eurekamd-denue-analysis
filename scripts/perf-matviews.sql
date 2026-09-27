@@ -44,6 +44,8 @@ FROM establecimientos e
 LEFT JOIN coneval_irs_municipal i ON i.cve_mun = e.area_geo
 WHERE e.sector_actividad_id IS NOT NULL
 GROUP BY 1, 2;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_sector_grade_matrix TO denue_sage;
 
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE INDEX required for
 -- REFRESH MATERIALIZED VIEW CONCURRENTLY. Without it, REFRESH takes an
@@ -53,7 +55,6 @@ GROUP BY 1, 2;
 -- 137 rows / 137 unique (scian, irs_grado) pairs / 0 NULL keys.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sgm_scian_irs
   ON mv_sector_grade_matrix(scian, irs_grado);
-CREATE INDEX idx_mv_sgm_scian ON mv_sector_grade_matrix(scian);
 CREATE INDEX idx_mv_sgm_irs ON mv_sector_grade_matrix(irs_grado);
 
 -- =============================================================================
@@ -66,7 +67,8 @@ CREATE MATERIALIZED VIEW mv_national_treemap AS
 WITH entidad_counts AS (
   SELECT entidad, COUNT(*)::bigint AS establecimientos
   FROM establecimientos
-  WHERE entidad IS NOT NULL
+  -- audit #124: only the 32 real entidades (a stray '50' made a 33rd tile).
+  WHERE entidad ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
   GROUP BY entidad
 ),
 entidad_irs AS (
@@ -74,11 +76,14 @@ entidad_irs AS (
     LEFT(cve_mun, 2) AS entidad,
     irs_grado,
     COUNT(*)::int AS muns_with_grade,
+    -- audit #63/#124: deterministic tiebreak (population, then name) so a
+    -- tied mode cannot flip between refreshes; NULL grade never wins.
     ROW_NUMBER() OVER (
       PARTITION BY LEFT(cve_mun, 2)
-      ORDER BY COUNT(*) DESC
+      ORDER BY COUNT(*) DESC, SUM(pob_total) DESC, irs_grado
     ) AS rn
   FROM coneval_irs_municipal
+  WHERE irs_grado IS NOT NULL
   GROUP BY 1, 2
 ),
 entidad_pobreza AS (
@@ -102,10 +107,13 @@ LEFT JOIN entidad_irs ei
   ON ei.entidad = ec.entidad AND ei.rn = 1
 LEFT JOIN entidad_pobreza ep
   ON ep.entidad = ec.entidad;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_national_treemap TO denue_sage;
 
 -- Audit W1-perf round-1 closure 2026-05-10: same posture as
 -- mv_sector_grade_matrix above — UNIQUE INDEX enables REFRESH
--- CONCURRENTLY. Verified: 33 rows / 33 unique entidades / 0 NULL.
+-- CONCURRENTLY. Verified: 33 rows / 33 unique entidades / 0 NULL
+-- (32 since the audit #124 entidad filter).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_treemap_entidad_unique
   ON mv_national_treemap(entidad);
 
@@ -149,11 +157,13 @@ FROM sesnsp_delitos_municipal
 -- but defends future emissions.
 WHERE cve_mun IS NOT NULL AND LENGTH(cve_mun) = 5
 GROUP BY cve_mun, ano;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_delitos_municipal_yearly TO denue_sage;
 
-CREATE INDEX idx_mv_dmy_cve_mun ON mv_delitos_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_dmy_ano ON mv_delitos_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_dmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_dmy_unique ON mv_delitos_municipal_yearly(cve_mun, ano);
 
 
@@ -211,9 +221,50 @@ WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
   AND NULLIF(anio_ocur, '') IS NOT NULL
   AND anio_ocur ~ '^[0-9]{4}$'
 GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
+-- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
+GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_sage;
 
-CREATE INDEX idx_mv_mmy_cve_mun ON mv_mortalidad_municipal_yearly(cve_mun);
 CREATE INDEX idx_mv_mmy_ano ON mv_mortalidad_municipal_yearly(ano);
 -- Audit W1-perf round-1 closure 2026-05-10: UNIQUE index supersedes the
 -- previous non-unique idx_mv_mmy_cve_mun_ano. Enables REFRESH CONCURRENTLY.
+-- It also serves cve_mun-only lookups (audit #125: no separate cve_mun index).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_yearly(cve_mun, ano);
+
+-- =============================================================================
+-- mv_sinba_morbidity_municipal — SINBA chronic-disease morbidity per
+-- (cve_mun, anio). Audit #140 (2026-09-26): the sinba_morbidity_municipal
+-- view re-aggregates ~141k sinba_ec_raw rows with regex filters per read
+-- (~200 ms); locust-muni and opportunity-by-ageb read this MV instead and
+-- fall back to the view when it is missing. Built FROM the view so the
+-- definition lives only in scripts/load-sinba.ts. load-sinba.ts drops
+-- this MV before its view and recreates it from this section on every
+-- SINBA reload.
+-- =============================================================================
+DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;
+CREATE MATERIALIZED VIEW mv_sinba_morbidity_municipal AS
+SELECT
+  cve_mun,
+  anio,
+  casos_dm2_promedio,
+  casos_hta_promedio,
+  casos_obesidad_promedio,
+  clues_reportando
+FROM sinba_morbidity_municipal;
+
+-- UNIQUE index enables REFRESH MATERIALIZED VIEW CONCURRENTLY.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_smm_unique
+  ON mv_sinba_morbidity_municipal(cve_mun, anio);
+
+-- The API reads these as denue_api (scripts/api-role.sql, audit #8). DROP +
+-- CREATE above loses the ACL, so re-grant; guarded so this file still runs
+-- before that role exists.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_api') THEN
+    GRANT SELECT ON mv_sector_grade_matrix TO denue_api;
+    GRANT SELECT ON mv_national_treemap TO denue_api;
+    GRANT SELECT ON mv_delitos_municipal_yearly TO denue_api;
+    GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_api;
+    GRANT SELECT ON mv_sinba_morbidity_municipal TO denue_api;
+  END IF;
+END$$;

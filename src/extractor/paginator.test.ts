@@ -158,6 +158,28 @@ describe("Paginator", () => {
     expect(fs.existsSync(result.outputFile)).toBe(true);
   });
 
+  it("un error de escritura del stream rechaza con DenueApiError en vez de tumbar el proceso (audit #50)", async () => {
+    const mod = (await import("./denue-client.js")) as unknown as {
+      __mockBuscar: ReturnType<typeof vi.fn>;
+    };
+    mod.__mockBuscar
+      .mockResolvedValueOnce([
+        { ...MOCK_ESTABLISHMENT, Id: "1" },
+        { ...MOCK_ESTABLISHMENT, Id: "2" },
+      ])
+      .mockResolvedValueOnce([]);
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "denue-test-"));
+    // A directory where the output file goes makes the write stream emit
+    // 'error' (EISDIR) — stands in for ENOSPC/EIO mid-extraction.
+    fs.mkdirSync(path.join(tmpDir, "01_aguascalientes.json"));
+    const paginator = new Paginator(makeConfig(tmpDir));
+
+    const err = await paginator.extractEstado("01").catch((e: unknown) => e);
+    expect((err as Error).name).toBe("DenueApiError");
+    expect((err as Error).message).toMatch(/Error de escritura en .*01_aguascalientes\.json: .*EISDIR/);
+  });
+
   it("M1: lanza error si una página falla mid-extracción (no silent break)", async () => {
     // Mock: page 1 succeeds with full pageSize, page 2 throws.
     // Pre-fix behavior: silently breaks, returns success with partial data.

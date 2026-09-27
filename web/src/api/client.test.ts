@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiFetch, ApiError, validateApiPath } from "./client";
+import { QueryClient } from "@tanstack/react-query";
+import {
+  apiFetch,
+  ApiError,
+  shouldRetryQuery,
+  validateApiPath,
+} from "./client";
 import { useUiStore } from "../store";
+import { fetchJson } from "./queries";
+import { sageQueryStream } from "./sage-client";
+import { SEARCH_RESULT } from "./types";
 
 describe("validateApiPath (RH-10)", () => {
   it("accepts plain paths", () => {
@@ -105,6 +114,20 @@ describe("validateApiPath (RH-10)", () => {
     expect(validateApiPath("/").ok).toBe(false); // no path char after leading slash
   });
 
+  // Audit #199: `..` in the querystring cannot traverse (SAFE_QUERY
+  // forbids `/`), so a search for "S.A.." or "Abarrotes..." must pass.
+  it("accepts `..` inside the querystring (audit #199)", () => {
+    for (const raw of ["S.A..", "Abarrotes...", "..%2e%2e"]) {
+      const path = `/search?q=${encodeURIComponent(raw)}&limit=20`;
+      expect(validateApiPath(path)).toEqual({ ok: true });
+    }
+    // The path portion is still checked.
+    expect(validateApiPath("/foo/..?q=S.A.")).toMatchObject({
+      ok: false,
+      reason: "traversal",
+    });
+  });
+
   it("accepts URL-encoded segments", () => {
     expect(validateApiPath("/establishment/foo%20bar").ok).toBe(true);
     expect(validateApiPath("/items?name=hello%20world").ok).toBe(true);
@@ -192,5 +215,110 @@ describe("apiFetch token-state error codes (RH-11)", () => {
     );
     expect((err as ApiError).code).toBe("bad_path");
     expect((err as ApiError).status).toBe(400);
+  });
+});
+
+describe("shouldRetryQuery (audit #188)", () => {
+  it("does not retry deterministic 4xx failures", () => {
+    expect(shouldRetryQuery(0, new ApiError("bad", 400, "bad_path"))).toBe(false);
+    expect(shouldRetryQuery(0, new ApiError("forbidden", 403))).toBe(false);
+    expect(shouldRetryQuery(0, new ApiError("not found", 404))).toBe(false);
+  });
+
+  it("retries session_loading once (it clears after hydration)", () => {
+    const err = new ApiError("hydrating", 401, "session_loading");
+    expect(shouldRetryQuery(0, err)).toBe(true);
+    expect(shouldRetryQuery(1, err)).toBe(false);
+  });
+
+  it("retries 5xx and non-API errors once, like retry: 1", () => {
+    expect(shouldRetryQuery(0, new ApiError("boom", 502))).toBe(true);
+    expect(shouldRetryQuery(0, new TypeError("Failed to fetch"))).toBe(true);
+    expect(shouldRetryQuery(1, new ApiError("boom", 502))).toBe(false);
+  });
+});
+
+describe("abort signal forwarding (audit #176)", () => {
+  const originalFetch = global.fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    // Resolves only when the request signal aborts, like a slow backend.
+    fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason),
+          );
+        }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    useUiStore.setState({ session: null, hydrated: true });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+    useUiStore.setState({ session: null, hydrated: false });
+  });
+
+  it("apiFetch combines a caller signal with the 30 s timeout by default", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const ctrl = new AbortController();
+    const p = apiFetch("/sage/health", { signal: ctrl.signal }, "tok");
+    // The timeout still applies when the caller supplies a signal.
+    expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+    const sent = (fetchMock.mock.calls[0]?.[1] as RequestInit).signal;
+    expect(sent).not.toBe(ctrl.signal);
+    expect(sent?.aborted).toBe(false);
+    ctrl.abort();
+    expect(sent?.aborted).toBe(true);
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("sageQueryStream gets no client timeout, only its own signal", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const ctrl = new AbortController();
+    const p = sageQueryStream("hola", null, "tok", ctrl.signal).next();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // A Sage turn can run ~83 s server-side; a 30 s cap would cut it off.
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    const sent = (fetchMock.mock.calls[0]?.[1] as RequestInit).signal;
+    expect(sent).toBe(ctrl.signal);
+    ctrl.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("fetchJson forwards the signal; a search with `..` reaches fetch", async () => {
+    const ctrl = new AbortController();
+    const p = fetchJson(
+      `/search?q=${encodeURIComponent("S.A..")}&limit=20`,
+      SEARCH_RESULT,
+      "tok",
+      ctrl.signal,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    ctrl.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("cancelQueries aborts the in-flight request and does not retry", async () => {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: shouldRetryQuery, retryDelay: 0 } },
+    });
+    const p = qc.fetchQuery({
+      queryKey: ["search", "S.A.."],
+      queryFn: ({ signal }) =>
+        fetchJson("/search?q=S.A..&limit=20", SEARCH_RESULT, "tok", signal),
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const sent = (fetchMock.mock.calls[0]?.[1] as RequestInit).signal;
+    await qc.cancelQueries();
+    await expect(p).rejects.toBeDefined();
+    expect(sent?.aborted).toBe(true);
+    // Give a would-be retry a chance to fire.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    qc.clear();
   });
 });

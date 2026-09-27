@@ -28,6 +28,7 @@ import {
   type ApiServerConfig,
 } from "../src/api/types.js";
 import { buildSageProvider } from "../src/api/sage/providers/index.js";
+import { trustProxyFromEnv } from "../src/api/middleware/rate-limit.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -79,6 +80,14 @@ const config: ApiServerConfig = {
   supabaseJwtSecret: trimAndValidateJwtSecret(),
 };
 
+// Resolved client-IP source, logged once: without TRUST_PROXY every client
+// behind Caddy is 127.0.0.1 and shares one rate-limit bucket. Audit #2.
+console.log(
+  trustProxyFromEnv()
+    ? "   client IP: rightmost X-Forwarded-For (TRUST_PROXY on)"
+    : "   client IP: socket address (TRUST_PROXY off — behind a proxy every client shares one bucket)",
+);
+
 const port = parseInt(process.env["API_PORT"] ?? "3030", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`❌  API_PORT inválido: "${process.env["API_PORT"]}"`);
@@ -129,6 +138,7 @@ if (process.env["SAGE_PROVIDER"]) {
       SAGE_API_KEY: process.env["SAGE_API_KEY"],
       SAGE_MODEL_ROUTER: process.env["SAGE_MODEL_ROUTER"],
       SAGE_MODEL_NARRATIVE: process.env["SAGE_MODEL_NARRATIVE"],
+      SAGE_PRICE_TABLE: process.env["SAGE_PRICE_TABLE"],
     });
     console.log(
       `   Sage provider: ${config.sageProvider.name} (router=${config.sageProvider.routerModel}, narrative=${config.sageProvider.narrativeModel})`,

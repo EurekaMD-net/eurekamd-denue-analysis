@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createHmac } from "node:crypto";
-import { verifyBearer, _clearJwtCache } from "./bearer-auth.js";
+import { verifyBearer, _clearJwtCache, EXPECTED_ISS } from "./bearer-auth.js";
 
 const JWT_SECRET = "test-jwt-secret-do-not-use-in-prod";
+// Membership claim every accepted token must carry (audit #1/#191).
+const MEMBER = { app_metadata: { apps: ["uncharted"] } };
 
 function b64url(input: Buffer | string): string {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
@@ -31,6 +33,7 @@ describe("verifyBearer", () => {
 
   it("accepts a valid token", () => {
     const tok = makeJwt({
+      ...MEMBER,
       sub: "user-123",
       email: "a@b.com",
       role: "authenticated",
@@ -256,6 +259,7 @@ describe("verifyBearer", () => {
   // ---- Audit A W3: header parsing -------------------------------------
   it("trims leading/trailing whitespace from the header", () => {
     const tok = makeJwt({
+      ...MEMBER,
       sub: "u",
       role: "authenticated",
       aud: "authenticated",
@@ -268,6 +272,7 @@ describe("verifyBearer", () => {
 
   it("accepts case-insensitive 'bearer' prefix (audit B W1)", () => {
     const tok = makeJwt({
+      ...MEMBER,
       sub: "u",
       role: "authenticated",
       aud: "authenticated",
@@ -280,6 +285,7 @@ describe("verifyBearer", () => {
 
   it("caches subsequent verifications", () => {
     const tok = makeJwt({
+      ...MEMBER,
       sub: "user-cache",
       role: "authenticated",
       aud: "authenticated",
@@ -293,5 +299,84 @@ describe("verifyBearer", () => {
     if (r1.ok && r2.ok) {
       expect(r2.user.user_id).toBe(r1.user.user_id);
     }
+  });
+
+  // ---- Audit #1/#191: app membership claim -----------------------------
+  function claims(extra: Record<string, unknown>): Record<string, unknown> {
+    return {
+      sub: "u",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      ...extra,
+    };
+  }
+
+  it("rejects a signature-valid token with no app_metadata", () => {
+    const r = verifyBearer(`Bearer ${makeJwt(claims({}))}`, {
+      jwtSecret: JWT_SECRET,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("NOT_MEMBER");
+  });
+
+  it("rejects a token whose apps list is another app only", () => {
+    const tok = makeJwt(claims({ app_metadata: { apps: ["other"] } }));
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("NOT_MEMBER");
+  });
+
+  it("rejects apps given as a string instead of an array", () => {
+    const tok = makeJwt(claims({ app_metadata: { apps: "uncharted" } }));
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("NOT_MEMBER");
+  });
+
+  it("ignores apps placed in user_metadata (user-writable)", () => {
+    const tok = makeJwt(claims({ user_metadata: { apps: ["uncharted"] } }));
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("NOT_MEMBER");
+  });
+
+  it("accepts a member alongside other apps", () => {
+    const tok = makeJwt(claims({ app_metadata: { apps: ["other", "uncharted"] } }));
+    expect(verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET }).ok).toBe(
+      true,
+    );
+  });
+
+  // ---- Audit #1: pinned issuer -----------------------------------------
+  it("rejects a member token from a different issuer", () => {
+    const tok = makeJwt(
+      claims({ ...MEMBER, iss: "https://evil.example.com/auth/v1" }),
+    );
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_ISS");
+  });
+
+  it("rejects a non-string iss", () => {
+    const tok = makeJwt(claims({ ...MEMBER, iss: 123 }));
+    const r = verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("WRONG_ISS");
+  });
+
+  it("accepts a member token carrying the pinned issuer", () => {
+    const tok = makeJwt(claims({ ...MEMBER, iss: EXPECTED_ISS }));
+    expect(verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET }).ok).toBe(
+      true,
+    );
+  });
+
+  it("accepts a member token without iss (GoTrue omits it when GOTRUE_JWT_ISSUER is unset)", () => {
+    const tok = makeJwt(claims({ ...MEMBER }));
+    expect(verifyBearer(`Bearer ${tok}`, { jwtSecret: JWT_SECRET }).ok).toBe(
+      true,
+    );
   });
 });

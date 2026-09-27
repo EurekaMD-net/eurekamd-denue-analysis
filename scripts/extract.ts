@@ -23,7 +23,7 @@ import type { EstadoClave, ExtractorConfig } from "../src/extractor/types.js";
 const TOKEN = process.env.DENUE_TOKEN ?? "";
 if (!TOKEN) {
   console.error("ERROR: Variable de entorno DENUE_TOKEN no está definida.");
-  console.error("  Ejemplo: DENUE_TOKEN=ac91ef8a-da15-433a-a42d-6802ffab6a9c npx tsx scripts/extract.ts --estado=09");
+  console.error("  Ejemplo: DENUE_TOKEN=<tu-token> npx tsx scripts/extract.ts --estado=09");
   process.exit(1);
 }
 
@@ -67,7 +67,7 @@ async function main() {
   for (const clave of estados) {
     if (!ESTADOS[clave]) {
       console.error(`\nClave de estado inválida: ${clave}. Válidas: 01-32`);
-      continue;
+      process.exit(1);
     }
 
     console.log(`\n\n→ Extrayendo: ${ESTADOS[clave]} (${clave})...`);

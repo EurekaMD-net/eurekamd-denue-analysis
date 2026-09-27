@@ -110,17 +110,27 @@ export class DenueClient {
       return [];
     }
 
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(text);
-      if (!Array.isArray(parsed)) return [];
-      return parsed as DenueRawRecord[];
+      parsed = JSON.parse(text);
     } catch {
       throw new DenueApiError(
-        `Respuesta inesperada de la API: ${text.slice(0, 200)}`,
+        `Respuesta inesperada de la API: ${this.redact(text.slice(0, 200))}`,
         undefined,
-        url
+        this.redact(url)
       );
     }
+    // Any other shape (e.g. an error object sent with HTTP 200) must not read
+    // as "end of data": the paginator would stop and the estado would be
+    // loaded truncated (audit #41).
+    if (!Array.isArray(parsed)) {
+      throw new DenueApiError(
+        `respuesta no-array: ${this.redact(text.slice(0, 200))}`,
+        undefined,
+        this.redact(url)
+      );
+    }
+    return parsed as DenueRawRecord[];
   }
 
   /**
@@ -150,15 +160,33 @@ export class DenueClient {
 
     if (text.trim() === "null" || text.trim() === "") return null;
 
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed[0] as DenueRawRecord;
-      }
-      return null;
+      parsed = JSON.parse(text);
     } catch {
-      return null;
+      throw new DenueApiError(
+        `Respuesta inesperada de la API: ${this.redact(text.slice(0, 200))}`,
+        undefined,
+        this.redact(url)
+      );
     }
+    if (!Array.isArray(parsed)) {
+      throw new DenueApiError(
+        `respuesta no-array: ${this.redact(text.slice(0, 200))}`,
+        undefined,
+        this.redact(url)
+      );
+    }
+    return parsed.length > 0 ? (parsed[0] as DenueRawRecord) : null;
+  }
+
+  /**
+   * The token is a path segment of every URL. Error messages are printed to
+   * stderr and persisted by the orchestrator into pipeline-state.json, so
+   * every string that reaches a DenueApiError goes through here (audit #46).
+   */
+  private redact(s: string): string {
+    return s.split(this.token).join("<token>");
   }
 
   /**
@@ -182,9 +210,9 @@ export class DenueClient {
 
       if (!response.ok) {
         throw new DenueApiError(
-          `HTTP ${response.status} en ${url}`,
+          `HTTP ${response.status} en ${this.redact(url)}`,
           response.status,
-          url
+          this.redact(url)
         );
       }
 
@@ -193,9 +221,9 @@ export class DenueClient {
       if (attempt >= maxRetries) {
         if (err instanceof DenueApiError) throw err;
         throw new DenueApiError(
-          `Error de red tras ${maxRetries} intentos: ${String(err)}`,
+          `Error de red tras ${maxRetries} intentos: ${this.redact(String(err))}`,
           undefined,
-          url
+          this.redact(url)
         );
       }
 

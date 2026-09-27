@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { createHmac } from "node:crypto";
 import { makeAuthMiddleware } from "./auth.js";
 import { _clearJwtCache } from "./bearer-auth.js";
+import { requestContext } from "../request-context.js";
 
 const TEST_KEY = "test-api-key-12345";
 const JWT_SECRET = "test-jwt-secret";
+const MEMBER = { app_metadata: { apps: ["uncharted"] } };
 
 function makeApp(opts?: { withJwt?: boolean }) {
   const app = new Hono();
@@ -84,6 +86,7 @@ describe("makeAuthMiddleware — Bearer JWT path", () => {
   it("accepts a valid Supabase JWT", async () => {
     const app = makeApp({ withJwt: true });
     const tok = makeJwt({
+      ...MEMBER,
       sub: "user-1",
       email: "a@b.com",
       role: "authenticated",
@@ -148,11 +151,137 @@ describe("makeAuthMiddleware — Bearer JWT path", () => {
       headers: { Authorization: `Bearer ${tok}` },
     });
     expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: "Service unavailable" });
+    expect(text).not.toMatch(/SUPABASE|JWT_SECRET|jwt_secret/i);
   });
 
   it("X-Api-Key path still works alongside JWT-enabled middleware", async () => {
     const app = makeApp({ withJwt: true });
     const res = await app.request("/", { headers: { "X-Api-Key": TEST_KEY } });
     expect(res.status).toBe(200);
+  });
+});
+
+// Audit #1/#191 (membership + issuer) and #10 (no verification oracle).
+describe("makeAuthMiddleware — Bearer rejections are generic", () => {
+  let stderr: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    _clearJwtCache();
+    stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+  afterEach(() => stderr.mockRestore());
+
+  const base = () => ({
+    sub: "user-1",
+    role: "authenticated",
+    aud: "authenticated",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+
+  const cases: Array<[string, string, string]> = [
+    ["no app_metadata", makeJwt(base()), "NOT_MEMBER"],
+    [
+      "apps ['other']",
+      makeJwt({ ...base(), app_metadata: { apps: ["other"] } }),
+      "NOT_MEMBER",
+    ],
+    [
+      "wrong iss",
+      makeJwt({ ...base(), ...MEMBER, iss: "https://other.example/auth/v1" }),
+      "WRONG_ISS",
+    ],
+    ["bad signature", makeJwt({ ...base(), ...MEMBER }, "wrong-secret"), "BAD_SIGNATURE"],
+    [
+      "expired",
+      makeJwt({ ...base(), ...MEMBER, exp: Math.floor(Date.now() / 1000) - 60 }),
+      "EXPIRED",
+    ],
+    ["wrong aud", makeJwt({ ...base(), ...MEMBER, aud: "x" }), "WRONG_AUD"],
+    ["wrong role", makeJwt({ ...base(), ...MEMBER, role: "anon" }), "WRONG_ROLE"],
+  ];
+
+  for (const [name, tok, reason] of cases) {
+    it(`${name}: 401 with a generic body; reason only on stderr`, async () => {
+      const app = makeApp({ withJwt: true });
+      const res = await app.request("/", {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      expect(res.status).toBe(401);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        error: "Unauthorized",
+        code: "auth.bearer_invalid",
+      });
+      expect(text).not.toMatch(
+        /BAD_SIGNATURE|EXPIRED|WRONG_|NOT_MEMBER|MALFORMED|SUPABASE_JWT_SECRET/,
+      );
+      const logged = stderr.mock.calls.map((a: unknown[]) => String(a[0])).join("");
+      expect(logged).toContain(reason);
+    });
+  }
+
+  it("a member token passes", async () => {
+    const app = makeApp({ withJwt: true });
+    const tok = makeJwt({ ...base(), ...MEMBER });
+    const res = await app.request("/", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("makeAuthMiddleware — request context (priority tier)", () => {
+  // Pre-change: auth.ts called a bare `return next()` on both paths, so
+  // requestContext.getStore() is undefined in the handler and every
+  // assertion on the store below fails.
+  beforeEach(() => _clearJwtCache());
+
+  function ctxApp() {
+    const app = new Hono();
+    app.use(
+      "*",
+      makeAuthMiddleware({ apiKey: TEST_KEY, supabaseJwtSecret: JWT_SECRET }),
+    );
+    app.get("/", async (c) => {
+      await Promise.resolve(); // context must survive an await
+      return c.json(requestContext.getStore() ?? null);
+    });
+    return app;
+  }
+  const memberJwt = () =>
+    makeJwt({
+      ...MEMBER,
+      sub: "user-1",
+      role: "authenticated",
+      aud: "authenticated",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+
+  it("X-Api-Key runs the chain as the priority principal", async () => {
+    const res = await ctxApp().request("/", {
+      headers: { "X-Api-Key": TEST_KEY },
+    });
+    expect(await res.json()).toEqual({ principal: "apikey", priority: true });
+  });
+
+  it("a valid bearer runs the chain without priority", async () => {
+    const res = await ctxApp().request("/", {
+      headers: { Authorization: `Bearer ${memberJwt()}` },
+    });
+    expect(await res.json()).toEqual({ principal: "user-1", priority: false });
+  });
+
+  it("a nested api-key request inherits the outer principal and priority", async () => {
+    // Sage's dispatcher re-enters the app with the shared key on behalf of
+    // a browser user; that must not escalate the user's queries.
+    const app = ctxApp();
+    const res = await requestContext.run(
+      { principal: "user-1", priority: false },
+      () => app.request("/", { headers: { "X-Api-Key": TEST_KEY } }),
+    );
+    expect(await res.json()).toEqual({ principal: "user-1", priority: false });
   });
 });

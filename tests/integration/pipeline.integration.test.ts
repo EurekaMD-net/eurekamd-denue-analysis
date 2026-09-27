@@ -103,13 +103,14 @@ describe("Pipeline integration — fixture real", () => {
     }
   });
 
-  it("municipio se extrae del primer segmento de Ubicacion", async () => {
+  it("municipio es el segmento de Ubicacion antes del estado (audit #40)", async () => {
     const records = readExtractorOutput(REAL_FIXTURE);
     const { transform } = await importTransform();
     for (const r of records) {
       if (!r.Ubicacion) continue;
       const row = transform(r);
-      const expectedMunicipio = r.Ubicacion.split(",")[0]!.trim();
+      // "LOCALIDAD, Municipio, ESTADO": the first segment is the locality.
+      const expectedMunicipio = r.Ubicacion.split(",")[1]!.trim();
       expect(row.municipio).toBe(expectedMunicipio);
     }
   });

@@ -1,18 +1,18 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execFileSync: mockExec,
-  execSync: vi.fn(),
-  // tiles.ts (transitively imported via server.ts) uses promisify(execFile);
-  // never called from this file but the mock must export it so module load
-  // succeeds.
-  execFile: vi.fn(),
-}));
+// Audit P08: the handler runs on the shared psql runner (async spawn, SQL
+// on stdin). The bridge routes it into mockExec and appends the SQL as the
+// last recorded arg.
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig, SectorsResult } from "../types.js";
-import { _resetScianCache } from "./sectors.js";
+import { _resetScianCache, _resetSectorCountsCache } from "./sectors.js";
 
 const CONFIG: ApiServerConfig = {
   supabaseUrl: "http://localhost:8100",
@@ -25,6 +25,7 @@ const AUTH = { "X-Api-Key": "key" };
 beforeEach(() => {
   mockExec.mockReset();
   _resetScianCache();
+  _resetSectorCountsCache();
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -66,7 +67,7 @@ describe("GET /sectors", () => {
     expect(anomaly?.national_count).toBe(1);
   });
 
-  it("uses execFileSync (no shell injection surface)", async () => {
+  it("uses an args array with the SQL on stdin (no shell injection surface)", async () => {
     mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 100 }]));
     const app = createServer(CONFIG);
     await app.request("/sectors", { headers: AUTH });
@@ -82,6 +83,53 @@ describe("GET /sectors", () => {
     const sql = argList[argList.length - 1];
     expect(sql).toMatch(/sector_actividad_id/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
+  });
+
+  it("sums mv_sector_summary instead of scanning establecimientos (audit #99)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/sectors", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/FROM mv_sector_summary/);
+    expect(sql).toMatch(/SUM\(total\)/);
+    expect(sql).not.toMatch(/FROM establecimientos/);
+  });
+
+  it("memoizes the counts and sends a 1 h private Cache-Control (audit #99)", async () => {
+    mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 100 }]));
+    const app = createServer(CONFIG);
+    const first = await app.request("/sectors", { headers: AUTH });
+    const second = await app.request("/sectors", { headers: AUTH });
+    expect(mockExec).toHaveBeenCalledOnce();
+    expect(first.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(first.headers.get("vary")).toMatch(/X-Api-Key/);
+    const body = (await second.json()) as SectorsResult;
+    expect(body.sectors[0]?.national_count).toBe(100);
+  });
+
+  it("does not memoize a failed query", async () => {
+    mockExec.mockImplementationOnce(() => {
+      throw new Error("relation does not exist");
+    });
+    mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 7 }]));
+    const app = createServer(CONFIG);
+    const failed = await app.request("/sectors", { headers: AUTH });
+    expect(failed.status).toBe(502);
+    const ok = await app.request("/sectors", { headers: AUTH });
+    expect(ok.status).toBe(200);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("statement_timeout reaches the container via docker exec -e (audit #94/#130)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/sectors", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const i = argList.indexOf("-e");
+    expect(i).toBeGreaterThan(0);
+    // X-Api-Key is the priority tier: 2x the 25 s default (psql-runner.ts).
+    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=50000/);
   });
 
   it("returns empty array when DB returns null", async () => {

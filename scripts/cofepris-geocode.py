@@ -18,12 +18,15 @@ Probe over CDMX (n=200, 2026-05-05): 77.0% precise + 15.0% modal = 92.0%.
 Full corpus (n=2,381): 74.7% precise + 17.6% modal = 92.3%.
 
 Usage:
-  python3 scripts/cofepris-geocode.py
-  # reads  /tmp/cofepris/farmacias.csv
-  # writes /tmp/cofepris/farmacias_geocoded.csv
+  python3 scripts/cofepris-geocode.py [input.csv] [output.csv]
+  # reads  /tmp/cofepris/farmacias.csv            (default input)
+  # writes /tmp/cofepris/farmacias_geocoded.csv   (default output)
+  # The output only appears once the integrity check passes; until then
+  # it is written to <output>.tmp, which is removed on any failure.
 """
 
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -146,7 +149,7 @@ def main() -> None:
     n_unmatched = 0
 
     fieldnames = list(cof_rows[0].keys()) + ["cve_mun", "cvegeo_ageb", "geocode_method"]
-    with open(OUTPUT, "w", newline="", encoding="utf-8") as fout:
+    with open(TMP_OUTPUT, "w", newline="", encoding="utf-8") as fout:
         writer = csv.DictWriter(fout, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -209,6 +212,7 @@ def main() -> None:
     # test by joining BACK to ageb_polygons. Aborts non-zero if integrity
     # fails, so the next loader step doesn't pick up bad data.
     integrity_check_geocoded()
+    os.replace(TMP_OUTPUT, OUTPUT)
 
 
 def integrity_check_geocoded() -> None:
@@ -222,7 +226,7 @@ def integrity_check_geocoded() -> None:
     """
     print("\n[integrity] joining geocoded.cvegeo_ageb back to ageb_polygons...")
     cvegeos = []
-    with open(OUTPUT) as f:
+    with open(TMP_OUTPUT) as f:
         reader = csv.DictReader(f)
         for r in reader:
             v = (r.get("cvegeo_ageb") or "").strip()
@@ -240,7 +244,9 @@ def integrity_check_geocoded() -> None:
         )
         print(f"  sample: {bad_shape[:5]}", file=sys.stderr)
         sys.exit(2)
-    # Stream cvegeos via stdin to avoid argv length limits / shell quoting.
+    # The list goes in as a psql variable and the SQL on stdin: psql never
+    # interpolates :'list' inside a -c string (it sent the literal to the
+    # server, so this check always failed).
     cvegeo_list = "\n".join(cvegeos)
     join_sql = """
 COPY (
@@ -266,10 +272,11 @@ COPY (
             "-d",
             "postgres",
             "-v",
+            "ON_ERROR_STOP=1",
+            "-v",
             f"list={cvegeo_list}",
-            "-c",
-            join_sql,
         ],
+        input=join_sql,
         capture_output=True,
         text=True,
     )
@@ -307,4 +314,16 @@ COPY (
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        INPUT = sys.argv[1]
+    if len(sys.argv) > 2:
+        OUTPUT = sys.argv[2]
+    TMP_OUTPUT = OUTPUT + ".tmp"
+    try:
+        main()
+    except BaseException:
+        # Includes the sys.exit() of the integrity check: never leave a
+        # refused or half-written dataset behind for the loader to pick up.
+        if os.path.exists(TMP_OUTPUT):
+            os.remove(TMP_OUTPUT)
+        raise

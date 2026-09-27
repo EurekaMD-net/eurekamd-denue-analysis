@@ -141,3 +141,138 @@ describe("GET /summary/entidad/:clave", () => {
     expect(body.loaded).toBe(12345);
   });
 });
+
+describe("GET /summary/entidad/:clave — honest failures (audit #39 #55 #107 #132)", () => {
+  function notFound() {
+    return Promise.resolve({
+      ok: false,
+      status: 404,
+      headers: new Headers(),
+      text: async () => '{"code":"42P01"}',
+      json: async () => ({}),
+    });
+  }
+
+  it("returns 502 mv.missing when mv_sector_summary is not deployed", async () => {
+    const base = makePostgrestMock(1000, 3, 2);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        url.includes("/mv_sector_summary") ? notFound() : base(url),
+      ),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/09", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("mv.missing");
+  });
+
+  it("returns 502 mv.missing when mv_estrato_por_entidad is not deployed", async () => {
+    const base = makePostgrestMock(1000, 3, 2);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        url.includes("/mv_estrato_por_entidad") ? notFound() : base(url),
+      ),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/09", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("mv.missing");
+  });
+
+  it("returns 502 on a non-404 mv_coverage error instead of falling back", async () => {
+    const base = makePostgrestMock(1000, 3, 2);
+    const mockFetch = vi.fn().mockImplementation((url: string) =>
+      url.includes("/mv_coverage")
+        ? Promise.resolve({
+            ok: false,
+            status: 500,
+            headers: new Headers(),
+            text: async () => "boom",
+            json: async () => ({}),
+          })
+        : base(url),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/09", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgrest.error");
+    const urls = mockFetch.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/establecimientos"))).toBe(false);
+  });
+
+  it("still falls back to a direct count when mv_coverage is 404", async () => {
+    const base = makePostgrestMock(0, 3, 2);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/mv_coverage")) return notFound();
+        if (url.includes("/establecimientos"))
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ "content-range": "0-0/777" }),
+            json: async () => [],
+          });
+        return base(url);
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/06", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { loaded: number };
+    expect(body.loaded).toBe(777);
+  });
+
+  it("returns 502 when the fallback count has no Content-Range total", async () => {
+    const base = makePostgrestMock(0, 3, 2);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/mv_coverage")) return notFound();
+        if (url.includes("/establecimientos"))
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers(),
+            json: async () => [],
+          });
+        return base(url);
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/06", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgrest.error");
+  });
+
+  it("issues all three MV fetches before reading any response", async () => {
+    let coverageRead = false;
+    const startedAfterCoverageRead: string[] = [];
+    const base = makePostgrestMock(1000, 3, 2);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (coverageRead) startedAfterCoverageRead.push(url);
+        if (url.includes("/mv_coverage"))
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers(),
+            json: async () => {
+              coverageRead = true;
+              return [{ loaded: 1000 }];
+            },
+          });
+        return base(url);
+      }),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/entidad/09", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(startedAfterCoverageRead).toEqual([]);
+  });
+});

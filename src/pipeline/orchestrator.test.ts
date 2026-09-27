@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { Orchestrator } from "./orchestrator.js";
 import { StateManager } from "./state-manager.js";
+import { Paginator } from "../extractor/paginator.js";
 
 let tmpDir: string;
 
@@ -213,5 +214,82 @@ describe("Orchestrator — pipeline integration (smoke)", () => {
     expect(result.totalFailed).toBe(1);
     expect(result.totalSkipped).toBe(0);
     expect(result.totalRecordsLoaded).toBe(10);
+  });
+});
+
+describe("Orchestrator — concurrency inválida (audit #49)", () => {
+  it.each([0, -1, 1.5, Number.NaN])("concurrency=%s lanza en el constructor", (concurrency) => {
+    expect(() => new Orchestrator({ ...makeConfig(), concurrency })).toThrow(/concurrency/);
+  });
+
+  it("concurrency=1 y el default se aceptan", () => {
+    expect(() => new Orchestrator({ ...makeConfig(), concurrency: 1 })).not.toThrow();
+    expect(() => new Orchestrator(makeConfig())).not.toThrow();
+  });
+});
+
+describe("Orchestrator — processEstado marca failed lo que no se cargó completo", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubExtraction(outputFile: string, totalExtraido: number) {
+    vi.spyOn(Paginator.prototype, "extractEstado").mockResolvedValue({
+      estado: "Test",
+      clave: "01",
+      totalEsperado: 0,
+      totalExtraido,
+      paginas: 1,
+      errores: 0,
+      duracionMs: 0,
+      outputFile,
+    });
+  }
+
+  it("un batch del loader que falla marca el estado 'failed', no 'done' (audit #38/#143)", async () => {
+    stubExtraction(writeValidFixture("01"), 1);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("boom") }),
+    );
+
+    const orch = new Orchestrator(makeConfig());
+    const result = await orch.processEstado("01");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Carga incompleta: 1 registros fallaron \(0 cargados\): boom/);
+    const estado = new StateManager(tmpDir).getEstado("01");
+    expect(estado.status).toBe("failed");
+    expect(estado.error).toMatch(/Carga incompleta/);
+  });
+
+  it("una carga completa marca el estado 'done'", async () => {
+    stubExtraction(writeValidFixture("01"), 1);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 201, text: () => Promise.resolve("") }),
+    );
+
+    const orch = new Orchestrator(makeConfig());
+    const result = await orch.processEstado("01");
+
+    expect(result.success).toBe(true);
+    expect(result.recordsLoaded).toBe(1);
+    expect(new StateManager(tmpDir).getEstado("01").status).toBe("done");
+  });
+
+  it("0 registros extraídos marca 'failed' (empty extraction), no 'done' con 0 (audit #155)", async () => {
+    const file = resolve(tmpDir, "01_empty.json");
+    writeFileSync(file, "[\n\n]", "utf-8");
+    stubExtraction(file, 0);
+
+    const orch = new Orchestrator(makeConfig());
+    const result = await orch.processEstado("01");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("empty extraction");
+    const estado = new StateManager(tmpDir).getEstado("01");
+    expect(estado.status).toBe("failed");
+    expect(estado.error).toBe("empty extraction");
   });
 });

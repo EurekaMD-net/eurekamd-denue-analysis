@@ -46,6 +46,14 @@
 
 import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import {
+  assertRelationsExist,
+  existingRowCount,
+  perfMatviewSql,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -81,7 +89,9 @@ function assertUtf8(path: string): void {
     const slice = buf.subarray(0, bytes);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     try {
-      decoder.decode(slice);
+      // stream: a multibyte char cut by the 16 KB boundary is buffered, not
+      // reported as invalid (audit #160).
+      decoder.decode(slice, { stream: true });
     } catch (err) {
       throw new Error(
         `loadSinba: CSV at ${path} is not valid UTF-8. Did you forget the iconv step? ` +
@@ -123,7 +133,10 @@ export interface LoadSinbaResult {
  * dataset year (DGIS occasionally renames bands). Generating the DDL from
  * the live header avoids drift if 2024+ ships with different age groupings.
  */
-export function buildSinbaCreateTable(csvHeaderLine: string): string {
+export function buildSinbaCreateTable(
+  csvHeaderLine: string,
+  table = "sinba_ec_raw",
+): string {
   const stripped = csvHeaderLine.replace(/^﻿/, "").trim();
   const cols = stripped.split(",").map((c) => c.trim().toLowerCase());
   if (cols.length < 20) {
@@ -146,9 +159,11 @@ export function buildSinbaCreateTable(csvHeaderLine: string): string {
     }
   }
   const colDefs = cols.map((c) => `  "${c}" TEXT`).join(",\n");
+  // No CASCADE (audit #145): the loader builds `sinba_ec_raw_staging` and
+  // swaps it in after dropping sinba_morbidity_municipal explicitly.
   return [
-    "DROP TABLE IF EXISTS sinba_ec_raw CASCADE;",
-    `CREATE TABLE sinba_ec_raw (\n${colDefs}\n);`,
+    `DROP TABLE IF EXISTS ${table};`,
+    `CREATE TABLE ${table} (\n${colDefs}\n);`,
   ].join("\n");
 }
 
@@ -157,8 +172,10 @@ export function buildSinbaCreateTable(csvHeaderLine: string): string {
  * gives the average monthly steady-state caseload — the right interpretation
  * for "how many patients does this muni's SUS network treat for X."
  *
- * Wrapped in BEGIN/COMMIT (qa-audit C3 from v0.2.4-B): atomic DROP/CREATE
- * so concurrent endpoint reads don't 502 with relation-missing.
+ * Runs inside the reload's single transaction (qa-audit C3 from v0.2.4-B,
+ * audit #145): atomic DROP/CREATE so concurrent endpoint reads don't 502
+ * with relation-missing. No BEGIN/COMMIT of its own — an inner COMMIT
+ * would end runPsqlScript's --single-transaction early.
  *
  * Casts every TEXT case-count to int with `NULLIF(_, 'NULL')::int` —
  * SINBA's literal-NULL sentinel. SUM ignores NULLs by default so missing
@@ -191,8 +208,6 @@ export function buildPostLoadSql(headerLine: string): string {
     group.map((c) => `COALESCE(NULLIF(${c}, 'NULL')::int, 0)`).join(" + ");
 
   return `
-BEGIN;
-
 CREATE INDEX IF NOT EXISTS idx_sinba_ec_raw_cve
   ON sinba_ec_raw(clave_entidad, clave_municipio);
 
@@ -209,9 +224,32 @@ WHERE clave_entidad ~ '^[0-9]{2}$'
   AND clave_municipio ~ '^[0-9]{3}$'
   AND anio ~ '^[0-9]{4}$'
 GROUP BY clave_entidad || clave_municipio, NULLIF(anio, 'NULL')::int;
-
-COMMIT;
 `;
+}
+
+const SINBA_RELATIONS = ["sinba_ec_raw", "sinba_morbidity_municipal"];
+
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * drop the MV and view explicitly (an unknown dependent makes DROP TABLE
+ * fail → rollback), swap, index + view, recreate mv_sinba_morbidity_municipal
+ * (audit #140; it reads the view, so the view cannot drop under it), grants.
+ */
+export function buildSinbaReloadSql(
+  headerLine: string,
+  containerPath: string,
+): string {
+  return [
+    buildSinbaCreateTable(headerLine, "sinba_ec_raw_staging"),
+    `\\copy sinba_ec_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL 'NULL')`,
+    swapInStagingSql("sinba_ec_raw", [
+      "DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;",
+      "DROP VIEW IF EXISTS sinba_morbidity_municipal;",
+    ]),
+    buildPostLoadSql(headerLine),
+    perfMatviewSql("mv_sinba_morbidity_municipal"),
+    postLoadGrants([...SINBA_RELATIONS, "mv_sinba_morbidity_municipal"]),
+  ].join("\n");
 }
 
 export async function loadSinba(
@@ -239,32 +277,10 @@ export async function loadSinba(
 
   const started = Date.now();
 
-  // C1 guard: refuse to drop a populated table without --force.
+  // C1 guard: refuse to replace a populated table without --force. Only an
+  // absent relation counts as empty (audit #157).
   if (!config.force) {
-    let existingRows = 0;
-    try {
-      const out = execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-t",
-          "-A",
-          "-c",
-          "SELECT COUNT(*) FROM sinba_ec_raw;",
-        ],
-        { encoding: "utf-8", timeout: 60_000 },
-      ).trim();
-      const n = parseInt(out, 10);
-      if (Number.isFinite(n)) existingRows = n;
-    } catch {
-      // table absent — proceed
-    }
+    const existingRows = existingRowCount(config.dbContainer, "sinba_ec_raw");
     if (existingRows > 0) {
       throw new Error(
         `loadSinba: sinba_ec_raw already has ${existingRows} rows. Use --force to drop and re-load.`,
@@ -272,26 +288,8 @@ export async function loadSinba(
     }
   }
 
-  // 1. Create table from CSV header.
-  const createSql = buildSinbaCreateTable(headerLine);
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      createSql,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. Copy + \copy into raw table.
+  // 1. Copy CSV in, then ONE transaction: \copy into staging → swap →
+  //    index + aggregate view → grants (audit #145).
   const tmpName = "/tmp/sinba_ec.csv";
   execFileSync(
     "docker",
@@ -300,20 +298,10 @@ export async function loadSinba(
   );
   let copyOut = "";
   try {
-    copyOut = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy sinba_ec_raw FROM '${tmpName}' WITH (FORMAT csv, HEADER true, NULL 'NULL')`,
-      ],
-      { encoding: "utf-8", timeout: 10 * 60_000 },
+    copyOut = runPsqlScript(
+      config.dbContainer,
+      buildSinbaReloadSql(headerLine, tmpName),
+      11 * 60_000,
     );
   } finally {
     try {
@@ -326,25 +314,6 @@ export async function loadSinba(
       // best-effort
     }
   }
-
-  // 3. POST_LOAD: aggregate view + index (idempotent, atomic).
-  const postLoadSql = buildPostLoadSql(headerLine);
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      postLoadSql,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
 
   // 4. Verify counts.
   const cnt = (sql: string): number => {
@@ -373,6 +342,7 @@ export async function loadSinba(
   };
   const rows_loaded = cnt(`SELECT COUNT(*) FROM sinba_ec_raw;`);
   const munis_covered = cnt(`SELECT COUNT(*) FROM sinba_morbidity_municipal;`);
+  assertRelationsExist(config.dbContainer, SINBA_RELATIONS);
 
   // 5. Stress-test view (qa-audit W1 from v0.2.6 — COUNT doesn't evaluate casts).
   execFileSync(

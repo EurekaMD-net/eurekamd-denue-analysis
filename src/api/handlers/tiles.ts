@@ -14,9 +14,20 @@
  *    Multi-code requests are combined as OR across the matched columns.
  *    Hard cap: MAX_SCIAN_CODES per request.
  *
- * Hard cap: TILE_FEATURE_CAP features per tile. Above that we sample
- * deterministically by ORDER BY clee LIMIT cap (clee has unique index,
- * so the cost is dominated by the bbox filter, not the sort).
+ * Hard cap: TILE_FEATURE_CAP features per tile (HEATMAP_TILE_FEATURE_CAP
+ * on heatmap-only tiles below z9). Above that the tile is a LIMIT without
+ * ORDER BY: whatever the scan meets first, so the sample is NOT
+ * deterministic and adjacent tiles may come from different samples.
+ * Exception: unfiltered tiles below z9 read a fixed-rate block sample
+ * (TABLESAMPLE SYSTEM ... REPEATABLE), which is spread over the tile and
+ * the same for every request (see buildTile).
+ *
+ * Payload (audit #100): the only attribute the SPA reads is `clee`, on a
+ * circle click. It is emitted only from the circle layer's minzoom up
+ * (MapShell applyFilterZoomRanges: 5 filtered, 11 unfiltered); below that
+ * the client draws only the heatmap, so tiles carry geometry alone.
+ * Tiles do not depend on the principal (auth runs before the handler),
+ * so they are cached in-process (byte-capped LRU, 1 h TTL).
  *
  * Auth: X-Api-Key (mounted in server.ts). Rate limit: 60 req/sec/IP
  * (mounted in server.ts via makeRateLimitMiddleware) — sized so a
@@ -30,12 +41,9 @@
  * unparsed.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { Context } from "hono";
-
-const execFileAsync = promisify(execFile);
 import { HttpError } from "../middleware/error.js";
+import { runSql } from "../db/psql-runner.js";
 import {
   ENTIDAD_RE,
   MAX_TILE_ZOOM,
@@ -45,6 +53,77 @@ import {
 import { assertSafeContainer } from "./_safe-container.js";
 
 const TILE_CACHE_SECONDS = 3600;
+
+/** MVT extent and buffer passed to ST_AsMVTGeom; the prefilter uses the same buffer. */
+const MVT_EXTENT = 4096;
+const MVT_BUFFER = 64;
+/** Circle-layer minzoom in web/src/map/MapShell.tsx (applyFilterZoomRanges). */
+const CIRCLE_MIN_ZOOM_FILTERED = 5;
+const CIRCLE_MIN_ZOOM_UNFILTERED = 11;
+/** Heatmap-only tiles below this zoom are capped at HEATMAP_TILE_FEATURE_CAP. */
+const HEATMAP_CAP_BELOW_ZOOM = 9;
+const HEATMAP_TILE_FEATURE_CAP = 10_000;
+/** Unfiltered tiles below this zoom force a GiST index scan (audit #136). */
+const INDEX_SCAN_BELOW_ZOOM = 12;
+/**
+ * Unfiltered tiles below HEATMAP_CAP_BELOW_ZOOM read this percent of the
+ * table's blocks (index = z), sized so the densest tile at each zoom (the
+ * one holding CDMX) samples about 9-9.5k rows, under the 10k cap. Measured
+ * 2026-09-27 on 6.1M rows: z3 9,160 · z4 9,275 · z5 8,979 · z6 8,880 ·
+ * z7 9,324 · z8 9,438.
+ */
+const HEATMAP_SAMPLE_PERCENT = [
+  0.15, 0.15, 0.15, 0.15, 0.2, 0.25, 0.3, 0.55, 0.8,
+];
+
+// Audit #100: in-process LRU of finished tiles, keyed by z/x/y + filters.
+// Byte-capped; each entry is also charged a fixed overhead so a sweep of
+// empty tiles cannot grow the Map without bound.
+const TILE_LRU_MAX_BYTES = 100 * 1024 * 1024;
+const TILE_LRU_ENTRY_OVERHEAD = 256;
+const TILE_LRU_TTL_MS = TILE_CACHE_SECONDS * 1000;
+const tileLru = new Map<string, { at: number; mvt: ArrayBuffer }>();
+let tileLruBytes = 0;
+
+/** Reset the tile LRU. For tests only. */
+export function _resetTileCache(): void {
+  tileLru.clear();
+  tileLruBytes = 0;
+}
+
+function tileLruCost(mvt: ArrayBuffer): number {
+  return mvt.byteLength + TILE_LRU_ENTRY_OVERHEAD;
+}
+
+function tileLruGet(key: string): ArrayBuffer | undefined {
+  const hit = tileLru.get(key);
+  if (!hit) return undefined;
+  tileLru.delete(key);
+  if (Date.now() - hit.at >= TILE_LRU_TTL_MS) {
+    tileLruBytes -= tileLruCost(hit.mvt);
+    return undefined;
+  }
+  tileLru.set(key, hit); // re-insert = most recently used
+  return hit.mvt;
+}
+
+function tileLruSet(key: string, mvt: ArrayBuffer): void {
+  const cost = tileLruCost(mvt);
+  if (cost > TILE_LRU_MAX_BYTES) return;
+  const prev = tileLru.get(key);
+  if (prev) {
+    tileLru.delete(key);
+    tileLruBytes -= tileLruCost(prev.mvt);
+  }
+  tileLru.set(key, { at: Date.now(), mvt });
+  tileLruBytes += cost;
+  // Map iterates in insertion order: the head is least recently used.
+  for (const [k, v] of tileLru) {
+    if (tileLruBytes <= TILE_LRU_MAX_BYTES) break;
+    tileLru.delete(k);
+    tileLruBytes -= tileLruCost(v.mvt);
+  }
+}
 
 /** Single SCIAN code at any of the 5 indexed depths. */
 const SCIAN_MULTI_CODE_RE = /^[0-9]{2,6}$/;
@@ -142,13 +221,18 @@ export async function tilesHandler(
     }
   }
 
-  const mvt = await buildTile(config, {
-    z,
-    x,
-    y,
-    ...(entidad !== undefined ? { entidad } : {}),
-    ...(sectorCodes !== null ? { sectorCodes } : {}),
-  });
+  const cacheKey = `${z}/${x}/${y}?e=${entidad ?? ""}&s=${sectorCodes?.join(",") ?? ""}`;
+  let mvt = tileLruGet(cacheKey);
+  if (mvt === undefined) {
+    mvt = await buildTile(config, {
+      z,
+      x,
+      y,
+      ...(entidad !== undefined ? { entidad } : {}),
+      ...(sectorCodes !== null ? { sectorCodes } : {}),
+    });
+    tileLruSet(cacheKey, mvt);
+  }
 
   return new Response(mvt, {
     status: 200,
@@ -213,6 +297,14 @@ async function buildTile(
     filters.push(buildSectorFilter(p.sectorCodes));
   }
   const filterClause = filters.join(" ");
+  const filtered = filters.length > 0;
+  const emitClee =
+    p.z >=
+    (filtered ? CIRCLE_MIN_ZOOM_FILTERED : CIRCLE_MIN_ZOOM_UNFILTERED);
+  const cap =
+    !emitClee && p.z < HEATMAP_CAP_BELOW_ZOOM
+      ? HEATMAP_TILE_FEATURE_CAP
+      : TILE_FEATURE_CAP;
 
   // Tile envelope inlined as a literal expression on BOTH sides of the
   // pipeline so PostgreSQL can constant-fold at plan time. An earlier
@@ -231,6 +323,15 @@ async function buildTile(
   // ST_TileEnvelope is IMMUTABLE so duplicate calls fold to a single
   // constant during planning; no runtime cost from repeating it.
   const tileEnv3857 = `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y})`;
+  // Audit #52: prefilter with the same 64-px buffer ST_AsMVTGeom keeps, so
+  // symbols that straddle a tile seam are drawn by both tiles.
+  // Not on the world's first/last column: there the margin crosses the
+  // antimeridian, ST_Transform wraps it to +/-178 deg and the 4326 bbox
+  // inverts (2/0/1 became lon -88.6..178.6, missing almost all of Mexico).
+  const prefilterEnv3857 =
+    p.x > 0 && p.x < 2 ** p.z - 1
+      ? `ST_TileEnvelope(${p.z}, ${p.x}, ${p.y}, margin => ${MVT_BUFFER / MVT_EXTENT})`
+      : tileEnv3857;
   // LIMIT without ORDER BY — the planner short-circuits the scan as soon
   // as TILE_FEATURE_CAP matching rows are found, so an unfiltered low-
   // zoom tile completes in ~400ms instead of 16s. The trade-off is that
@@ -241,52 +342,56 @@ async function buildTile(
   // zoom never hit the cap because the bbox is small enough that all
   // matching rows fit. This is what enables the unfiltered "first
   // visit" experience to be fast without forcing default filters.
+  //
+  // Audit #136: unfiltered, the planner's defaults do not stop at LIMIT —
+  // a GiST bitmap materializes every match first (z10 CDMX: 529k TIDs,
+  // 0.5 s warm, 5.5 s cold), and with bitmaps off alone it picks a Seq
+  // Scan whose cost depends on where the (synchronized) scan starts (z9
+  // CDMX: 0.18 s to a 20 s timeout). Disabling both leaves a plain GiST
+  // index scan that stops at the cap: 0.3-0.4 s warm at z9-z11. Filtered
+  // tiles keep the default BitmapAnd plan.
+  //
+  // Below z9 the GiST scan is NOT used: LIMIT then returns the first rows
+  // in index order, which are bunched in one corner of a big tile (5/7/14
+  // held 0 points in CDMX). Those tiles are heatmap-only, so they read a
+  // fixed-rate block sample instead: spread over the whole tile, the same
+  // rate for every tile at a zoom (so density matches across seams), and
+  // REPEATABLE, so every tile at every zoom reads the same cached blocks.
+  // 5/7/14: 8,979 rows, 189 half-degree cells, 1,984 in CDMX; 70-470 ms
+  // warm, ~2 s on a cold cache. The cost is sparse areas: a tile with a few
+  // hundred rows keeps only its sampled share.
+  const sampleClause =
+    !filtered && p.z < HEATMAP_CAP_BELOW_ZOOM
+      ? ` TABLESAMPLE SYSTEM (${HEATMAP_SAMPLE_PERCENT[p.z]}) REPEATABLE (0)`
+      : ``;
   const sql =
     `WITH filtered AS (` +
-    `  SELECT clee, nombre, clase_actividad, geom` +
-    `  FROM establecimientos` +
+    `  SELECT ${emitClee ? "clee, geom" : "geom"}` +
+    `  FROM establecimientos${sampleClause}` +
     `  WHERE 1=1 ${filterClause}` +
-    `    AND geom && ST_Transform(${tileEnv3857}, 4326)` +
-    `  LIMIT ${TILE_FEATURE_CAP}` +
+    `    AND geom && ST_Transform(${prefilterEnv3857}, 4326)` +
+    `  LIMIT ${cap}` +
     `), mvt_geom AS (` +
-    `  SELECT ST_AsMVTGeom(ST_Transform(f.geom, 3857), ${tileEnv3857}, 4096, 64, true) AS geom,` +
-    `         f.clee, f.nombre, f.clase_actividad` +
+    `  SELECT ST_AsMVTGeom(ST_Transform(f.geom, 3857), ${tileEnv3857}, ${MVT_EXTENT}, ${MVT_BUFFER}, true) AS geom` +
+    (emitClee ? `, f.clee` : ``) +
     `  FROM filtered f` +
     `) SELECT encode(ST_AsMVT(mvt_geom, 'establecimientos'), 'base64') FROM mvt_geom;`;
 
-  let stdout: string;
-  try {
-    const result = await execFileAsync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-t",
-        "-A",
-        "-c",
-        sql,
-      ],
-      {
-        encoding: "utf-8",
-        timeout: 30_000,
-        maxBuffer: 50 * 1024 * 1024,
-        // Audit C3-perf round-1 closure 2026-05-10: tile generation runs
-        // ST_AsMVT on PostGIS-indexed geometry — typically <500ms but can
-        // spike under high-density urban tiles. 25s backend timeout is
-        // conservative; spawn timeout (30s) catches the kill cleanly.
-        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
-      },
-    );
-    stdout = result.stdout.trim();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new HttpError(`tile generation failed: ${msg}`, 502, "postgis.error");
-  }
+  // Audit #94/#130: the shared runner carries statement_timeout via
+  // `docker exec -e PGOPTIONS` (the host-env PGOPTIONS never reached the
+  // container) and cancels the backend on client timeout. psql failures
+  // surface as a generic 502 postgres.error.
+  const stdout = (
+    await runSql(sql, {
+      container: config.dbContainer,
+      maxBuffer: 50 * 1024 * 1024,
+      ...(!filtered &&
+      p.z >= HEATMAP_CAP_BELOW_ZOOM &&
+      p.z < INDEX_SCAN_BELOW_ZOOM
+        ? { extraSettings: ["enable_bitmapscan=off", "enable_seqscan=off"] }
+        : {}),
+    })
+  ).trim();
 
   if (!stdout) {
     // Empty tile is valid — return a zero-byte MVT (empty layer).

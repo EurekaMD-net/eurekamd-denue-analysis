@@ -3,13 +3,17 @@
 #
 # Run after any loader pass that changes establecimientos / sesnsp /
 # mortalidad / sict / sedatu / cnbv:
-#   - DENUE pipeline reload         → mv_sector_grade_matrix, mv_national_treemap, mv_coverage
+#   - DENUE pipeline reload         → mv_sector_grade_matrix, mv_national_treemap, mv_coverage,
+#                                     mv_estrato_por_entidad, mv_sector_summary
 #   - SESNSP loader (load-sesnsp.ts) → mv_delitos_municipal_yearly
 #   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
 #   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio + sict_traffic_by_estado
 #   - SEDATU loader (load-sedatu-financiamientos.ts) → sedatu_financing_by_municipio + sedatu_financing_by_estado
 #   - CNBV loader (load-cnbv-credito.ts) → cnbv_credito_by_municipio + cnbv_credito_by_estado
+#   - SINBA loader (load-sinba.ts)   → mv_sinba_morbidity_municipal (the
+#     loader recreates it in its reload transaction; first-time apply is
+#     scripts/migrations/018-mv-sinba-morbidity.sql).
 #
 # The handlers fall back to live aggregation when an MV is missing entirely
 # (audit M1, 2026-05-05), but they have NO way to detect "MV exists but is
@@ -42,8 +46,15 @@ CONTAINER="${SUPABASE_DB_CONTAINER:-supabase-db}"
 
 echo "[refresh-matviews] using container: $CONTAINER"
 
+# ON_ERROR_STOP (audit #115, 2026-09-26): without it psql prints a failed
+# REFRESH (dropped MV, lock timeout, CONCURRENTLY unique violation), carries
+# on and exits 0, so the systemd unit reports success on a stale MV. Now the
+# first failure stops the run and fails the unit. lock_timeout bounds the
+# wait behind a loader transaction that holds the MV.
 start=$(date +%s)
-docker exec -i "$CONTAINER" psql -U postgres -d postgres <<'SQL'
+docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<'SQL'
+SET lock_timeout = '60s';
+
 -- ===== Cheap MVs first (sub-second each) =====
 
 \echo Refreshing mv_national_treemap...
@@ -72,6 +83,17 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY cnbv_credito_by_estado;
 
 \echo Refreshing mv_mortalidad_municipal_yearly...
 REFRESH MATERIALIZED VIEW CONCURRENTLY mv_mortalidad_municipal_yearly;
+
+\echo Refreshing mv_sinba_morbidity_municipal...
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sinba_morbidity_municipal;
+
+-- ===== Mid-cost (full establecimientos GROUP BY, like mv_coverage) =====
+
+\echo Refreshing mv_estrato_por_entidad...
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_estrato_por_entidad;
+
+\echo Refreshing mv_sector_summary...
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_sector_summary;
 
 -- ===== Mid-cost (~22s) =====
 

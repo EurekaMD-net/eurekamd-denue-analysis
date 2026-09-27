@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 function mockResponse(
-  rows: Array<{ municipio: string | null; entidad: string | null }>,
+  rows: Array<{ clee?: string; municipio: string | null; entidad: string | null }>,
   total: number,
   offset = 0,
 ): Response {
@@ -129,5 +129,43 @@ describe("topMunicipios", () => {
     );
 
     await expect(topMunicipios(CONFIG)).rejects.toThrow(/HTTP 403/);
+  });
+
+  it("pagina por llave clee (order + gt) y pide count=exact solo en la primera página (audit #47)", async () => {
+    const page1 = Array.from({ length: 1000 }, (_, i) => ({
+      clee: `09${String(i).padStart(6, "0")}`,
+      municipio: "Cuauhtémoc",
+      entidad: "09",
+    }));
+    const page2 = [{ clee: "09999999", municipio: "Iztapalapa", entidad: "09" }];
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(mockResponse(page1, 1001))
+      .mockResolvedValueOnce(mockResponse(page2, 1001, 1000));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await topMunicipios(CONFIG, { entidad: "09" });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const [url1, init1] = mockFetch.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    const [url2, init2] = mockFetch.mock.calls[1] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    const p1 = new URL(url1).searchParams;
+    const p2 = new URL(url2).searchParams;
+    expect(p1.get("order")).toBe("clee.asc");
+    expect(p1.get("clee")).toBeNull();
+    expect(p1.get("offset")).toBeNull();
+    expect(p2.get("order")).toBe("clee.asc");
+    expect(p2.get("clee")).toBe("gt.09000999");
+    expect(p2.get("offset")).toBeNull();
+    expect(init1.headers["Prefer"]).toBe("count=exact");
+    expect(init2.headers["Prefer"]).toBeUndefined();
+    expect(result.rows[0]).toMatchObject({ municipio: "Cuauhtémoc", count: 1000 });
+    expect(result.rows[1]).toMatchObject({ municipio: "Iztapalapa", count: 1 });
   });
 });

@@ -19,13 +19,16 @@
  *   NN      MMM  LLLL AAAA 000  AGEB total          ← v0.2.4-B target
  *   NN      MMM  LLLL AAAA NNN  manzana             ← skip for now
  *
- * Loader strategy:
- *  1. Drop+create `censo_ageb_raw` on FIRST state (no --append flag).
- *  2. Per-state \copy into the same table — all granularities preserved.
- *  3. Subsequent states: pass `--append` to skip the drop.
- *  4. After ALL 32 states load, run POST_LOAD_SQL to create indexes +
- *     `censo_ageb` view (AGEB-level rows only) + `censo_manzana` view
- *     (manzana-level rows only). POST_LOAD is gated on `--post-load`.
+ * Loader strategy (each psql step is ONE transaction, audit #145/#147 —
+ * a failure leaves the DB as it was):
+ *  1. FIRST state (no --append flag): \copy into `censo_ageb_raw_staging`,
+ *     drop the censo_ageb / censo_manzana views explicitly (no CASCADE),
+ *     swap staging in, run POST_LOAD_SQL (indexes + views) + grants.
+ *  2. Subsequent states: pass `--append` — DELETE that entidad's rows and
+ *     \copy it in, same transaction. All granularities preserved.
+ *  3. `--post-load` re-runs POST_LOAD_SQL (idempotent) after all 32 states:
+ *     indexes + `censo_ageb` view (AGEB-level rows only) + `censo_manzana`
+ *     view (manzana-level rows only).
  *
  * The 13-char CVEGEO is built as ENTIDAD || MUN || LOC || AGEB. Joins to
  * `ageb_polygons.cvegeo` and `establecimientos.ageb` cleanly. ~9% of
@@ -54,6 +57,13 @@
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  existingRowCount,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const ENTIDAD_RE = /^(0[1-9]|[12][0-9]|3[0-2])$/;
@@ -131,7 +141,10 @@ export interface LoadCensoAgebResult {
  * shape as load-censo's ITER variant but with the AGEB + MZA columns
  * the urbana dataset adds.
  */
-export function buildCensoAgebCreateTable(csvHeaderLine: string): string {
+export function buildCensoAgebCreateTable(
+  csvHeaderLine: string,
+  table = "censo_ageb_raw",
+): string {
   const stripped = csvHeaderLine.replace(/^﻿/, "").trim();
   const cols = stripped.split(",").map((c) => c.trim().toLowerCase());
   if (cols.length < 8) {
@@ -152,9 +165,11 @@ export function buildCensoAgebCreateTable(csvHeaderLine: string): string {
     }
   }
   const colDefs = cols.map((c) => `  "${c}" TEXT`).join(",\n");
+  // No CASCADE (audit #145): the loader builds `censo_ageb_raw_staging` and
+  // swaps it in after dropping the known censo views explicitly.
   return [
-    "DROP TABLE IF EXISTS censo_ageb_raw CASCADE;",
-    `CREATE TABLE censo_ageb_raw (\n${colDefs}\n);`,
+    `DROP TABLE IF EXISTS ${table};`,
+    `CREATE TABLE ${table} (\n${colDefs}\n);`,
   ].join("\n");
 }
 
@@ -167,33 +182,32 @@ export function buildCensoAgebCreateTable(csvHeaderLine: string): string {
  * MUN is 3, LOC is 4, AGEB is 4 → 13 total. Letter suffixes occur in
  * AGEB only (last 1 of 4 chars), so the result is 12 digits + 1 char.
  *
- * qa-audit C3 (2026-05-05): wrapped in BEGIN/COMMIT so DROP+CREATE VIEW
- * is atomic from the readers' perspective. Without the transaction, a
- * concurrent ageb-detail or ageb-farmacia-opportunity request mid-flight
- * would 502 with "relation censo_ageb does not exist" for ~10ms.
+ * qa-audit C3 (2026-05-05): runs inside ONE transaction so DROP+CREATE
+ * VIEW is atomic from the readers' perspective. Without it, a concurrent
+ * ageb-detail or ageb-farmacia-opportunity request mid-flight would 502
+ * with "relation censo_ageb does not exist" for ~10ms. The transaction is
+ * runPsqlScript's --single-transaction (audit #145), so this SQL carries
+ * no BEGIN/COMMIT of its own: an inner COMMIT would end the reload's
+ * transaction early.
  *
- * qa-audit C2: added non-partial cvegeo index alongside the partial one.
- * The partial index `WHERE mza='000' AND ageb!='0000'` predicate doesn't
- * always match the censo_ageb view's predicate (which adds loc/mun
- * filters), and Postgres planner may fail predicate-implication checks.
- * The non-partial cvegeo index is the safe fallback for the LEFT JOIN
- * `cab.cvegeo = a.cvegeo` in agebFarmaciaOpportunitySql.
+ * Audit #141: only the partial cvegeo index. The censo_ageb view's
+ * predicate implies `mza='000' AND ageb!='0000'` (it only adds loc/mun
+ * filters), so the planner uses it for `cvegeo = X` and the LEFT JOIN
+ * `cab.cvegeo = a.cvegeo` in agebFarmaciaOpportunitySql. The second
+ * idx_censo_ageb_raw_cvegeo (qa-audit C2) was an identical partial index
+ * on live with 0 scans; migrations/020-indexes.sql drops it.
  *
  * qa-audit W4: censo_ageb view also defends against unexpected mza
  * sentinels (`'*'`, non-numeric). manzana view already filters mza!='*';
  * the AGEB-level view now uses the same defensive approach.
  */
 export const POST_LOAD_SQL = `
-BEGIN;
-
 ALTER TABLE censo_ageb_raw
   ADD COLUMN IF NOT EXISTS cvegeo TEXT
   GENERATED ALWAYS AS (entidad || mun || loc || ageb) STORED;
 
 CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_cvegeo_ageb_only
   ON censo_ageb_raw(cvegeo) WHERE mza = '000' AND ageb != '0000';
-CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_cvegeo
-  ON censo_ageb_raw(cvegeo);
 CREATE INDEX IF NOT EXISTS idx_censo_ageb_raw_level
   ON censo_ageb_raw(entidad, mun, loc, ageb, mza);
 
@@ -254,9 +268,45 @@ SELECT
   NULLIF(vph_autom, '*')::int AS vph_autom
 FROM censo_ageb_raw
 WHERE mza != '000' AND mza != '*' AND mza ~ '^[0-9]+$';
-
-COMMIT;
 `;
+
+const CENSO_AGEB_RELATIONS = ["censo_ageb_raw", "censo_ageb", "censo_manzana"];
+
+/**
+ * First-state reload script (audit #145): \copy into staging, drop the two
+ * views explicitly (an unknown dependent makes DROP TABLE fail → rollback),
+ * swap, indexes + views, grants. Runs as ONE transaction.
+ */
+export function buildCensoAgebReloadSql(
+  csvHeaderLine: string,
+  containerPath: string,
+): string {
+  return [
+    buildCensoAgebCreateTable(csvHeaderLine, "censo_ageb_raw_staging"),
+    `\\copy censo_ageb_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`,
+    swapInStagingSql("censo_ageb_raw", [
+      "DROP VIEW IF EXISTS censo_manzana;",
+      "DROP VIEW IF EXISTS censo_ageb;",
+    ]),
+    POST_LOAD_SQL,
+    postLoadGrants(CENSO_AGEB_RELATIONS),
+  ].join("\n");
+}
+
+/**
+ * --append script (audit #147): DELETE the entidad's prior rows and \copy
+ * the new ones in ONE transaction, so a failed copy keeps the old rows.
+ * `entidad` is ENTIDAD_RE-validated (01..32) before it gets here.
+ */
+export function buildCensoAgebAppendSql(
+  entidad: string,
+  containerPath: string,
+): string {
+  return [
+    `DELETE FROM censo_ageb_raw WHERE entidad = '${entidad}';`,
+    `\\copy censo_ageb_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`,
+  ].join("\n");
+}
 
 export async function loadCensoAgeb(
   config: LoadCensoAgebConfig,
@@ -278,83 +328,24 @@ export async function loadCensoAgeb(
   }
   const entidad = readEntidadFromFirstDataRow(config.csvPath);
 
-  // 1. Create table on first state, or DELETE existing rows for this entidad
-  //    on subsequent states (idempotent re-run for one state).
-  if (!config.append) {
-    // qa-audit C1: refuse to drop a populated table without explicit --force.
-    // Forgetting --append on state 17 of 32 would silently wipe the prior 16
-    // states. Check for existing data BEFORE dropping. If the relation does
-    // not exist, the COUNT errors out — that's expected for first-ever load.
-    if (!config.force) {
-      let existingRows = 0;
-      try {
-        const out = execFileSync(
-          "docker",
-          [
-            "exec",
-            config.dbContainer,
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "postgres",
-            "-t",
-            "-A",
-            "-c",
-            "SELECT COUNT(*) FROM censo_ageb_raw;",
-          ],
-          { encoding: "utf-8", timeout: 30_000 },
-        ).trim();
-        existingRows = parseInt(out, 10);
-        if (!Number.isFinite(existingRows)) existingRows = 0;
-      } catch {
-        // Relation does not exist — first-ever load, OK to proceed.
-        existingRows = 0;
-      }
-      if (existingRows > 0) {
-        throw new Error(
-          `loadCensoAgeb: censo_ageb_raw already has ${existingRows.toLocaleString()} rows. ` +
-            `Use --append to add another state, or --force to wipe.`,
-        );
-      }
+  // 1. qa-audit C1: refuse to replace a populated table without --force.
+  //    Forgetting --append on state 17 of 32 would silently wipe the prior
+  //    16 states. Only an absent relation counts as empty (audit #157): a
+  //    probe that errors or times out is rethrown, never read as "0 rows".
+  if (!config.append && !config.force) {
+    const existingRows = existingRowCount(config.dbContainer, "censo_ageb_raw");
+    if (existingRows > 0) {
+      throw new Error(
+        `loadCensoAgeb: censo_ageb_raw already has ${existingRows.toLocaleString()} rows. ` +
+          `Use --append to add another state, or --force to wipe.`,
+      );
     }
-    const createSql = buildCensoAgebCreateTable(headerLine);
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        createSql,
-      ],
-      { encoding: "utf-8", timeout: 60_000 },
-    );
-  } else {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `DELETE FROM censo_ageb_raw WHERE entidad = '${entidad}';`,
-      ],
-      { encoding: "utf-8", timeout: 60_000 },
-    );
   }
 
-  // 2. Copy CSV into container, then \copy. Per-entidad temp filename so
-  //    concurrent loads (if ever) don't stomp on each other.
+  // 2. Copy CSV into container, then ONE transaction: first state = staging
+  //    \copy + swap + views (audit #145); --append = DELETE this entidad +
+  //    \copy (audit #147). Per-entidad temp filename so concurrent loads (if
+  //    ever) don't stomp on each other.
   const tmpName = `/tmp/censo_ageb_${entidad}.csv`;
   execFileSync(
     "docker",
@@ -363,20 +354,12 @@ export async function loadCensoAgeb(
   );
   let copyOut = "";
   try {
-    copyOut = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy censo_ageb_raw FROM '${tmpName}' WITH (FORMAT csv, HEADER true, NULL '*')`,
-      ],
-      { encoding: "utf-8", timeout: 10 * 60_000 },
+    copyOut = runPsqlScript(
+      config.dbContainer,
+      config.append
+        ? buildCensoAgebAppendSql(entidad, tmpName)
+        : buildCensoAgebReloadSql(headerLine, tmpName),
+      15 * 60_000,
     );
   } finally {
     try {
@@ -419,6 +402,9 @@ export async function loadCensoAgeb(
     `SELECT COUNT(*) FROM censo_ageb_raw WHERE entidad = '${entidad}';`,
   );
   const rows_loaded_total = cnt(`SELECT COUNT(*) FROM censo_ageb_raw;`);
+  if (!config.append) {
+    assertRelationsExist(config.dbContainer, CENSO_AGEB_RELATIONS);
+  }
 
   process.stderr.write(`[load-censo-ageb] ${copyOut.trim()}\n`);
 
@@ -431,8 +417,9 @@ export async function loadCensoAgeb(
 }
 
 /**
- * Run POST_LOAD_SQL — call once after all 32 states finish loading.
- * Idempotent (CREATE INDEX IF NOT EXISTS / DROP VIEW IF EXISTS).
+ * Run POST_LOAD_SQL + grants as ONE transaction — call once after all 32
+ * states finish loading. Idempotent (CREATE INDEX IF NOT EXISTS / CREATE
+ * OR REPLACE VIEW).
  */
 export function runPostLoad(dbContainer: string): { duration_ms: number } {
   if (!CONTAINER_RE.test(dbContainer)) {
@@ -441,21 +428,10 @@ export function runPostLoad(dbContainer: string): { duration_ms: number } {
     );
   }
   const started = Date.now();
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL,
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
+  runPsqlScript(
+    dbContainer,
+    [POST_LOAD_SQL, postLoadGrants(CENSO_AGEB_RELATIONS)].join("\n"),
+    5 * 60_000,
   );
   return { duration_ms: Date.now() - started };
 }

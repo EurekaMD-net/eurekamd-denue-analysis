@@ -17,7 +17,10 @@ export interface TopMunicipiosOptions {
 /**
  * Obtiene el ranking de municipios por número de establecimientos.
  *
- * Mismo patrón que sectorSummary: proyecta solo municipio+entidad y agrega en JS.
+ * Proyecta solo clee+municipio+entidad y agrega en JS. Pagina por llave
+ * (`order=clee.asc&clee=gt.<último>`, audit #47): sin ORDER BY las páginas
+ * por OFFSET se traslapan o saltan filas, y OFFSET es O(n²). El conteo
+ * exacto se pide solo en la primera página.
  * Para tablas > 1M rows se recomienda una vista materializada.
  */
 export async function topMunicipios(
@@ -31,34 +34,41 @@ export async function topMunicipios(
     apikey: serviceRoleKey,
     Authorization: `Bearer ${serviceRoleKey}`,
     "Content-Type": "application/json",
-    Prefer: "count=exact",
   };
 
   const PAGE_SIZE = 1000;
   const counts = new Map<string, { entidadKey: string | null; n: number }>();
-  let offset = 0;
+  let fetched = 0;
+  let lastClee: string | null = null;
   let totalRows = Infinity;
 
-  while (offset < totalRows) {
+  while (fetched < totalRows) {
     const params = new URLSearchParams({
-      select: "municipio,entidad",
+      select: "clee,municipio,entidad",
+      order: "clee.asc",
       limit: String(PAGE_SIZE),
-      offset: String(offset),
     });
+
+    if (lastClee !== null) {
+      params.set("clee", `gt.${lastClee}`);
+    }
 
     if (entidad) {
       params.set("entidad", `eq.${entidad}`);
     }
 
     const url = `${supabaseUrl}/rest/v1/establecimientos?${params.toString()}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, {
+      headers:
+        lastClee === null ? { ...headers, Prefer: "count=exact" } : headers,
+    });
 
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`topMunicipios: PostgREST returned HTTP ${res.status}: ${body}`);
     }
 
-    if (offset === 0) {
+    if (lastClee === null) {
       const contentRange = res.headers.get("content-range");
       if (contentRange) {
         const match = contentRange.match(/\/(\d+)$/);
@@ -67,6 +77,7 @@ export async function topMunicipios(
     }
 
     const page = (await res.json()) as Array<{
+      clee: string;
       municipio: string | null;
       entidad: string | null;
     }>;
@@ -83,7 +94,8 @@ export async function topMunicipios(
       }
     }
 
-    offset += PAGE_SIZE;
+    lastClee = page[page.length - 1]!.clee;
+    fetched += page.length;
     if (page.length < PAGE_SIZE) break;
   }
 

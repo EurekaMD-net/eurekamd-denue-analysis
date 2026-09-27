@@ -43,11 +43,16 @@ interface InegiCountsFile {
   counts: Record<string, number | null>;
 }
 
+let cachedInegiCounts: InegiCountsFile | null = null;
+
 /**
  * Loads the INEGI authoritative counts JSON from src/db/.
  * Exported for testability; pass an override path in tests.
+ * The default file is read once per process (audit #108); an override path
+ * is always read fresh.
  */
 export function loadInegiCounts(overridePath?: string): InegiCountsFile {
+  if (!overridePath && cachedInegiCounts) return cachedInegiCounts;
   const filePath =
     overridePath ??
     path.join(
@@ -57,7 +62,14 @@ export function loadInegiCounts(overridePath?: string): InegiCountsFile {
       "inegi_authoritative_counts.json",
     );
   const raw = readFileSync(filePath, "utf-8");
-  return JSON.parse(raw) as InegiCountsFile;
+  const parsed = JSON.parse(raw) as InegiCountsFile;
+  if (!overridePath) cachedInegiCounts = parsed;
+  return parsed;
+}
+
+/** Reset the INEGI counts memo. For tests only. */
+export function _resetInegiCountsCache(): void {
+  cachedInegiCounts = null;
 }
 
 /** Compute the coverage status bucket for one entidad. */

@@ -2,6 +2,8 @@
 --
 -- Apply once after Censo ITER is loaded:
 --   docker exec -i supabase-db psql -U postgres -d postgres < scripts/migrate-censo-views.sql
+-- scripts/load-censo.ts re-runs this file inside its reload transaction
+-- (audit #144), so keep it free of BEGIN/COMMIT and psql meta-commands.
 --
 -- Idempotent: CREATE OR REPLACE for both views. No data movement.
 -- censo_iter raw has 287 cols; v0.2.x exposed 14 in censo_municipios. This
@@ -120,7 +122,11 @@ SELECT
   -- the human-readable entidad name for /analytics/municipio-detail
   -- responses, mirroring censo_localidades which already exposes nom_ent.
   -- Audit W1 (2026-05-09).
-  nom_ent
+  nom_ent,
+
+  -- p_12ymas appended at the end (same rule): Censo PEA covers ages 12+,
+  -- so it is the denominator of locust-muni's pct_pea (audit #67).
+  NULLIF(NULLIF(p_12ymas, ''), 'N/D')::int     AS p_12ymas
 FROM censo_iter
 WHERE loc = '0000' AND mun <> '000';
 
@@ -132,12 +138,17 @@ WHERE loc = '0000' AND mun <> '000';
 -- 1.8M-pop cities. tamloc 1-14 size code (1=1-249, 14=1M+).
 --
 -- Key derivations (loc/mun/entidad in censo_iter are zero-padded text;
--- LPAD is defensive in case of historical drift):
---   cve_loc = ent(2) || mun(3) || loc(4) — 9-char DGIS-style
---   cve_mun = ent(2) || mun(3) — joins to censo_municipios
+-- verified 2026-09-26: 0 unpadded rows, cve_mun = entidad||mun everywhere):
+--   cve_loc = cve_mun || loc(4) — 9-char DGIS-style
+--   cve_mun = censo_iter's generated cve_mun column — joins to
+--             censo_municipios. Raw columns (not LPAD expressions) so the
+--             idx_censo_iter_cve_mun_loc index serves lookups (audit #118:
+--             the LPAD form seq-scanned all 195k rows, ~0.5 s per call).
 --
 -- Filter excludes the 2 rolled-up rows (loc='0000' AND mun<>'000' = muni
--- total; loc='0000' AND mun='000' = entidad total).
+-- total; loc='0000' AND mun='000' = entidad total) and INEGI's 9998/9999
+-- buckets ("Localidades de una/dos viviendas" — aggregates of many tiny
+-- places, not localities; audit #68).
 --
 -- INEGI suppresses small localities for privacy: pobtot is always
 -- emitted; derived fields (religion, language, assets) become 'N/D' when
@@ -147,17 +158,15 @@ WHERE loc = '0000' AND mun <> '000';
 -- numeric strings in the raw load. For localities with only 1-2 households
 -- INEGI sometimes ships these as 'N/D' too. Cast guards apply.
 
--- DROP+CREATE (not CREATE OR REPLACE): Postgres doesn't allow dropping or
--- renaming columns on a replacement. Safe here on first deploy (no
--- dependents). For future maintenance: add columns only at the end of the
--- SELECT and use CREATE OR REPLACE; reach for DROP+CREATE only when
--- removing or renaming, and grep consumers first.
-DROP VIEW IF EXISTS censo_localidades;
-CREATE VIEW censo_localidades AS
+-- CREATE OR REPLACE keeps grants (names and types are unchanged). Postgres
+-- doesn't allow dropping or renaming columns on a replacement: add columns
+-- only at the end of the SELECT; reach for DROP+CREATE only when removing or
+-- renaming, grep consumers first, and re-GRANT SELECT to denue_sage.
+CREATE OR REPLACE VIEW censo_localidades AS
 SELECT
   -- ─── Identity ───────────────────────────────────────────────────────────
-  LPAD(entidad, 2, '0') || LPAD(mun, 3, '0') || LPAD(loc, 4, '0') AS cve_loc,
-  LPAD(entidad, 2, '0') || LPAD(mun, 3, '0')                       AS cve_mun,
+  cve_mun || loc                                                   AS cve_loc,
+  cve_mun,
   entidad,
   mun,
   loc,
@@ -230,7 +239,7 @@ SELECT
   NULLIF(NULLIF(vph_tv,     ''), 'N/D')::int   AS vph_tv,
   NULLIF(NULLIF(vph_snbien, ''), 'N/D')::int   AS vph_snbien
 FROM censo_iter
-WHERE loc <> '0000' AND mun <> '000';
+WHERE loc <> '0000' AND mun <> '000' AND loc NOT IN ('9998', '9999');
 
 -- =============================================================================
 -- censo_entidades — state-grain (v0.2.10 follow-on, 2026-05-09)

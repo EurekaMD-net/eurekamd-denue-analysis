@@ -34,7 +34,12 @@ export async function clustersHandler(
   if (!scian || !SCIAN_RE.test(scian)) {
     throw new HttpError(`scian inválido "${scian}"`, 400, "validation.scian");
   }
-  const k = kRaw ? parseInt(kRaw, 10) : 5;
+  // Audit #53: "5.9" / "5abc" are rejected, not truncated to 5.
+  const k = kRaw
+    ? /^[1-9]\d{0,6}$/.test(kRaw)
+      ? parseInt(kRaw, 10)
+      : NaN
+    : 5;
   if (!Number.isInteger(k) || k < 1 || k > 100) {
     throw new HttpError(
       `k inválido "${kRaw ?? "(default)"}" — debe ser entero 1-100`,
@@ -51,5 +56,6 @@ export async function clustersHandler(
     },
     { entidad, scianPrefix: scian, k },
   );
-  return c.json({ entidad, scian, k, clusters: result });
+  // Audit #101: the SPA contract is `centroids: [{cluster_id, lon, lat, size}]`.
+  return c.json({ entidad, scian, k, centroids: result });
 }

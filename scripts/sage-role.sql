@@ -11,19 +11,119 @@
 --     establecimientos at runtime, slow), any *_raw table.
 --   * Re-run-safe: every GRANT/REVOKE is idempotent.
 --
--- Run via: docker exec -i supabase-db psql -U postgres -d postgres < scripts/sage-role.sql
+-- Run via: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/sage-role.sql
 
 \set ON_ERROR_STOP on
 
 BEGIN;
 
--- Role: NOLOGIN; the app server SETs ROLE to it after a transaction
--- begin. Password is for emergency direct-psql access; rotated in .env.
+-- Role: LOGIN, no password. The app connects AS denue_sage (psql -U
+-- denue_sage over the container's local socket, which pg_hba trusts) so the
+-- session is never a superuser and cannot RESET ROLE / set_config('role').
+-- pg_hba also trusts 127.0.0.1/::1 inside the container; every other TCP
+-- source (including the published port) needs scram-sha-256, and with
+-- PASSWORD NULL there is nothing to match, so the role cannot log in from
+-- outside the container.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage') THEN
-    CREATE ROLE denue_sage NOLOGIN;
+    CREATE ROLE denue_sage LOGIN;
   END IF;
+END$$;
+ALTER ROLE denue_sage LOGIN PASSWORD NULL NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOREPLICATION NOBYPASSRLS NOINHERIT;
+-- Session defaults for every denue_sage login. The app also opens each
+-- script with BEGIN READ ONLY + SET LOCAL statement_timeout; these hold
+-- even if a statement slips past the gate outside that transaction.
+ALTER ROLE denue_sage SET statement_timeout = '8s';
+ALTER ROLE denue_sage SET default_transaction_read_only = on;
+ALTER ROLE denue_sage SET search_path = public;
+
+-- Secret masking (audit #110). Custom settings stored with ALTER DATABASE
+-- (on 2026-09-27: app.service_role_key and app.webhook_url on database
+-- postgres) are readable by EVERY role through current_setting(), and
+-- current_setting / set_config cannot be revoked from PUBLIC on this shared
+-- instance (PostgREST and RLS policies call them) nor shadowed for one role
+-- (grants are additive). A role-level value wins instead: "The ALTER
+-- DATABASE command allows global settings to be overridden on a
+-- per-database basis. The ALTER ROLE command allows both global and
+-- per-database settings to be overridden with user-specific values."
+-- (PostgreSQL 15 docs, 20.1.3 Parameter Interaction via SQL). So each such
+-- setting reads as '' in every denue_sage session, RESET included, whatever
+-- SQL reaches it (ts_stat, a U& identifier, ...). It applies at login, so
+-- re-run this script after any new ALTER DATABASE ... SET of a dotted name.
+-- NOT covered: the pg_db_role_setting catalog itself stays readable by
+-- PUBLIC (non-superusers such as PostgREST's in-database config read it),
+-- so the stored value is only name-gated by sql-gate.ts until ALTER
+-- DATABASE ... RESET removes it.
+DO $$
+DECLARE
+  guc text;
+BEGIN
+  FOR guc IN
+    SELECT DISTINCT split_part(cfg, '=', 1)
+    FROM pg_db_role_setting s, unnest(s.setconfig) AS cfg
+    WHERE s.setrole = 0
+      AND s.setdatabase IN (
+        0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+      AND split_part(cfg, '=', 1) LIKE '%.%'
+  LOOP
+    EXECUTE format(
+      'ALTER ROLE denue_sage SET %s = %L',
+      (SELECT string_agg(quote_ident(part), '.' ORDER BY ord)
+         FROM unnest(string_to_array(guc, '.')) WITH ORDINALITY AS u(part, ord)),
+      '');
+  END LOOP;
+END$$;
+
+-- Functions that run a SQL string (or read server files) must not be
+-- callable by denue_sage. Revoked from PUBLIC too, because a PUBLIC grant
+-- cannot be shadowed for one role. No stored function or view on this
+-- instance calls the SQL-running ones (read-only pg_depend/prosrc check,
+-- 2026-09-27) and superusers are unaffected. The file functions and
+-- lo_import/lo_export already have no PUBLIC grant; revoking again is a
+-- no-op. dblink is not installed; if it ever is, a re-run revokes it from
+-- PUBLIC as well. current_setting / set_config are deliberately absent
+-- (see Secret masking above). Only signatures that exist are touched.
+DO $$
+DECLARE
+  fn text;
+BEGIN
+  FOR fn IN
+    SELECT to_regprocedure(sig)::text
+    FROM unnest(ARRAY[
+      'pg_catalog.ts_stat(text)',
+      'pg_catalog.ts_stat(text,text)',
+      'pg_catalog.ts_rewrite(tsquery,text)',
+      'pg_catalog.query_to_xml(text,boolean,boolean,text)',
+      'pg_catalog.query_to_xmlschema(text,boolean,boolean,text)',
+      'pg_catalog.query_to_xml_and_xmlschema(text,boolean,boolean,text)',
+      'pg_catalog.schema_to_xml(name,boolean,boolean,text)',
+      'pg_catalog.schema_to_xmlschema(name,boolean,boolean,text)',
+      'pg_catalog.schema_to_xml_and_xmlschema(name,boolean,boolean,text)',
+      'pg_catalog.database_to_xml(boolean,boolean,text)',
+      'pg_catalog.database_to_xmlschema(boolean,boolean,text)',
+      'pg_catalog.database_to_xml_and_xmlschema(boolean,boolean,text)',
+      'pg_catalog.pg_read_file(text)',
+      'pg_catalog.pg_read_file(text,bigint,bigint)',
+      'pg_catalog.pg_read_file(text,bigint,bigint,boolean)',
+      'pg_catalog.pg_read_binary_file(text)',
+      'pg_catalog.pg_read_binary_file(text,bigint,bigint)',
+      'pg_catalog.pg_read_binary_file(text,bigint,bigint,boolean)',
+      'pg_catalog.pg_ls_dir(text)',
+      'pg_catalog.pg_ls_dir(text,boolean,boolean)',
+      'pg_catalog.pg_stat_file(text)',
+      'pg_catalog.pg_stat_file(text,boolean)',
+      'pg_catalog.lo_import(text)',
+      'pg_catalog.lo_import(text,oid)',
+      'pg_catalog.lo_export(oid,text)'
+    ]) AS sig
+    WHERE to_regprocedure(sig) IS NOT NULL
+    UNION
+    SELECT p.oid::regprocedure::text FROM pg_proc p WHERE p.proname LIKE 'dblink%'
+  LOOP
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, denue_sage', fn);
+  END LOOP;
 END$$;
 
 -- Strip any prior privileges (idempotent: REVOKE is no-op when absent).
@@ -49,7 +149,15 @@ GRANT SELECT ON sedatu_financing_by_estado   TO denue_sage;
 GRANT SELECT ON sedatu_financing_by_municipio TO denue_sage;
 GRANT SELECT ON sict_traffic_by_estado       TO denue_sage;
 GRANT SELECT ON sict_traffic_by_municipio    TO denue_sage;
-GRANT SELECT ON osm_ageb_aggregates          TO denue_sage;
+-- osm_ageb_aggregates is optional (built by the OSM loader, absent on a DB
+-- that never ran it). A bare GRANT on a missing relation aborts this whole
+-- ON_ERROR_STOP transaction, so grant it only when it exists.
+DO $$
+BEGIN
+  IF to_regclass('public.osm_ageb_aggregates') IS NOT NULL THEN
+    GRANT SELECT ON osm_ageb_aggregates TO denue_sage;
+  END IF;
+END$$;
 
 -- Analytical views (no expensive base joins).
 GRANT SELECT ON aeropuertos_by_municipio       TO denue_sage;

@@ -15,3 +15,6 @@ __pycache__/
 # in src/ and scripts/load-*.
 *_tmp.ts
 scratch_*.ts
+
+# qa-auditor agent memory written into the SPA tree by Claude Code sessions.
+web/.claude/

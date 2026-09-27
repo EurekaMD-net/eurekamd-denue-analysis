@@ -347,7 +347,7 @@ export interface MortalitySummaryRow {
   def_externas: number;
   /** Mortalidad cruda per 1k inhabitants — null when poblacion is 0/null. */
   tasa_mortalidad_per_1k: number | null;
-  /** Mortalidad infantil per 1k births (proxied by < 1yr deaths / poblacion). null when poblacion is 0/null. */
+  /** Defunciones <1 año por 1k hab. (< 1yr deaths / total poblacion — NOT an infant mortality rate per 1k births). null when poblacion is 0/null. */
   tasa_infantil_per_1k: number | null;
 }
 
@@ -1051,19 +1051,25 @@ export interface ColoniasByAgebResult {
 
 export interface AirportInMunicipio {
   airport_name: string;
-  /** March 2026 flights at this airport. */
+  /** March flights at this airport in `latest_ano` (the latest loaded year). */
+  mar_flights_latest: number;
+  /** @deprecated Alias of `mar_flights_latest` (kept for compatibility; not pinned to 2026). */
   mar_flights_2026: number;
-  /** Average of March 2024+2025+2026. Smooths year-on-year noise. */
+  /** Average of March for the 3 years ending at `latest_ano`. Smooths year-on-year noise. */
   mar_flights_recent_avg: number;
   /** March 2019 baseline (last full pre-pandemic year). NULL for AIFA-era new airports. */
   mar_flights_2019: number | null;
-  /** Percent change from 2019 → 2026 March. Positive = growth, negative = recovery gap. */
+  /** Percent change from 2019 → `latest_ano` March. Positive = growth, negative = recovery gap. */
   pct_change_vs_2019: number | null;
 }
 
 export interface AirportsByMunicipioResult {
   cve_mun: string;
   cve_ent: string;
+  /** Latest year in aeropuertos_movements_yearly; every "current" figure refers to it. null when the table is empty. */
+  latest_ano: number | null;
+  num_airports_active_latest: number;
+  /** @deprecated Alias of `num_airports_active_latest` (kept for compatibility; not pinned to 2026). */
   num_airports_active_2026: number;
   /** Sum across all airports in this muni — simple aggregate flight load. */
   mar_flights_recent_avg: number;

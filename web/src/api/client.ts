@@ -23,6 +23,24 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * react-query `retry` predicate: one retry, except for deterministic 4xx
+ * failures (bad params, 403, 404), which would only repeat after the
+ * backoff and delay the error (audit #188). `session_loading` is a 401
+ * that clears once LoginGate hydrates, so it keeps its retry.
+ */
+export function shouldRetryQuery(failureCount: number, err: unknown): boolean {
+  return (
+    failureCount < 1 &&
+    !(
+      err instanceof ApiError &&
+      err.status >= 400 &&
+      err.status < 500 &&
+      err.code !== "session_loading"
+    )
+  );
+}
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // RH-10: split path + query at the first `?`. The path portion may not
@@ -48,14 +66,16 @@ export function validateApiPath(path: string): {
 } {
   if (typeof path !== "string" || path.length === 0)
     return { ok: false, reason: "empty" };
-  // Defense against encoded traversal slipping through length-limited regexes.
-  const lower = path.toLowerCase();
-  if (lower.includes("..") || lower.includes("%2e%2e"))
-    return { ok: false, reason: "traversal" };
   if (path.startsWith("//")) return { ok: false, reason: "protocol-relative" };
   const qIdx = path.indexOf("?");
   const pathOnly = qIdx === -1 ? path : path.slice(0, qIdx);
   const queryOnly = qIdx === -1 ? "" : path.slice(qIdx + 1);
+  // Defense against encoded traversal slipping through length-limited regexes.
+  // Path portion only: SAFE_QUERY forbids `/`, so `..` in the querystring
+  // cannot traverse, and a search like "S.A.." must reach the API (audit #199).
+  const lower = pathOnly.toLowerCase();
+  if (lower.includes("..") || lower.includes("%2e%2e"))
+    return { ok: false, reason: "traversal" };
   // Reject paths with a second `?` (the only legal `?` is the separator).
   if (queryOnly.includes("?")) return { ok: false, reason: "extra-question" };
   if (!SAFE_PATH_ONLY.test(pathOnly)) return { ok: false, reason: "bad-path" };
@@ -80,6 +100,9 @@ export async function apiFetch(
   path: string,
   init: RequestInit = {},
   tokenOverride?: string | null,
+  // `null` = no client timeout, only the caller's signal (the Sage SSE
+  // stream: one turn can run ~83 s server-side).
+  timeoutMs: number | null = DEFAULT_TIMEOUT_MS,
 ): Promise<Response> {
   const state = useUiStore.getState();
   const token =
@@ -105,7 +128,13 @@ export async function apiFetch(
   }
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
-  const signal = init.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  // A caller signal (TanStack's queryFn `signal`) aborts the request on
+  // cancel/supersede/sign-out; the timeout still applies (audit #176).
+  const timeout = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
+  const signal =
+    init.signal && timeout
+      ? AbortSignal.any([init.signal, timeout])
+      : (init.signal ?? timeout);
   const res = await fetch(`/api${path}`, { ...init, headers, signal });
   if (!res.ok) {
     let body: { error?: string; code?: string } = {};

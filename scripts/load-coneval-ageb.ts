@@ -40,6 +40,13 @@
 
 import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import {
+  assertRelationsExist,
+  existingRowCount,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -97,10 +104,12 @@ export interface LoadConevalAgebResult {
  * Why TEXT for raw: INEGI's `*` sentinel is text. `\copy NULL '*'` only
  * coerces to actual NULL on import — so the raw table holds nullable
  * TEXT, and the view casts to numeric where the value is non-null.
+ *
+ * Builds `coneval_grs_ageb_raw_staging`; the reload swaps it in (audit #145).
  */
 export const CREATE_TABLE_SQL = `
-DROP TABLE IF EXISTS coneval_grs_ageb_raw CASCADE;
-CREATE TABLE coneval_grs_ageb_raw (
+DROP TABLE IF EXISTS coneval_grs_ageb_raw_staging;
+CREATE TABLE coneval_grs_ageb_raw_staging (
   cvegeo TEXT NOT NULL,
   pobtot TEXT,
   vivpar_hab TEXT,
@@ -128,11 +137,13 @@ CREATE TABLE coneval_grs_ageb_raw (
 /**
  * POST_LOAD_SQL: index + view derived from `coneval_grs_ageb_raw`.
  *
- * Wrapped in BEGIN/COMMIT (carries the qa-audit C3 lesson from
- * load-censo-ageb): DROP+CREATE VIEW under concurrent reads from
+ * Runs inside the reload's single transaction (carries the qa-audit C3
+ * lesson from load-censo-ageb): DROP+CREATE VIEW under concurrent reads from
  * `agebDetailHandler` / `opportunityByAgebHandler` would 502 with
  * "relation does not exist" mid-flight. Atomic transaction collapses
- * the window. CREATE OR REPLACE VIEW is also idempotent.
+ * the window. CREATE OR REPLACE VIEW is also idempotent. No BEGIN/COMMIT
+ * of its own (audit #145): an inner COMMIT would end runPsqlScript's
+ * --single-transaction early.
  *
  * Index choice: btree on cvegeo. Hot path is `LEFT JOIN coneval_grs_ageb
  * cga ON cga.cvegeo = a.cvegeo` against a single AGEB or a list returned
@@ -143,8 +154,6 @@ CREATE TABLE coneval_grs_ageb_raw (
  * view filter (`WHERE grado IN (...)`) is the right enforcement layer.
  */
 export const POST_LOAD_SQL = `
-BEGIN;
-
 CREATE INDEX IF NOT EXISTS idx_coneval_grs_ageb_raw_cvegeo
   ON coneval_grs_ageb_raw(cvegeo);
 
@@ -173,9 +182,30 @@ SELECT
   grado
 FROM coneval_grs_ageb_raw
 WHERE grado IN ('Muy bajo', 'Bajo', 'Medio', 'Alto', 'Muy alto');
-
-COMMIT;
 `;
+
+const CONEVAL_AGEB_RELATIONS = ["coneval_grs_ageb_raw", "coneval_grs_ageb"];
+
+/** Post-load view stress test: every cast on every row (audit #163). */
+export const CONEVAL_AGEB_STRESS_SQL =
+  "SELECT count(*) FROM coneval_grs_ageb t WHERE t IS NOT NULL;";
+
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * drop the view explicitly (an unknown dependent makes DROP TABLE fail →
+ * rollback), swap, index + view, grants.
+ */
+export function buildConevalAgebReloadSql(containerPath: string): string {
+  return [
+    CREATE_TABLE_SQL,
+    `\\copy coneval_grs_ageb_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '*')`,
+    swapInStagingSql("coneval_grs_ageb_raw", [
+      "DROP VIEW IF EXISTS coneval_grs_ageb;",
+    ]),
+    POST_LOAD_SQL,
+    postLoadGrants(CONEVAL_AGEB_RELATIONS),
+  ].join("\n");
+}
 
 export async function loadConevalAgeb(
   config: LoadConevalAgebConfig,
@@ -212,33 +242,14 @@ export async function loadConevalAgeb(
 
   const started = Date.now();
 
-  // C1 guard: refuse to drop a populated table without --force. Mirrors
-  // load-censo-ageb's discipline.
+  // C1 guard: refuse to replace a populated table without --force. Mirrors
+  // load-censo-ageb's discipline. Only an absent relation counts as empty
+  // (audit #157).
   if (!config.force) {
-    let existingRows = 0;
-    try {
-      const out = execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-t",
-          "-A",
-          "-c",
-          "SELECT COUNT(*) FROM coneval_grs_ageb_raw;",
-        ],
-        { encoding: "utf-8", timeout: 60_000 },
-      ).trim();
-      const n = parseInt(out, 10);
-      if (Number.isFinite(n)) existingRows = n;
-    } catch {
-      // Relation does not exist yet — proceed with create.
-    }
+    const existingRows = existingRowCount(
+      config.dbContainer,
+      "coneval_grs_ageb_raw",
+    );
     if (existingRows > 0) {
       throw new Error(
         `loadConevalAgeb: coneval_grs_ageb_raw already has ${existingRows} rows. ` +
@@ -247,25 +258,8 @@ export async function loadConevalAgeb(
     }
   }
 
-  // 1. (Re)create the raw table.
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      CREATE_TABLE_SQL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. Copy CSV into container, then \copy.
+  // 1. Copy CSV into container, then ONE transaction: \copy into staging →
+  //    swap → index + view → grants (audit #145).
   const tmpName = "/tmp/coneval_grs_ageb.csv";
   execFileSync(
     "docker",
@@ -274,20 +268,10 @@ export async function loadConevalAgeb(
   );
   let copyOut = "";
   try {
-    copyOut = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy coneval_grs_ageb_raw FROM '${tmpName}' WITH (FORMAT csv, HEADER true, NULL '*')`,
-      ],
-      { encoding: "utf-8", timeout: 10 * 60_000 },
+    copyOut = runPsqlScript(
+      config.dbContainer,
+      buildConevalAgebReloadSql(tmpName),
+      11 * 60_000,
     );
   } finally {
     try {
@@ -300,24 +284,6 @@ export async function loadConevalAgeb(
       // best-effort
     }
   }
-
-  // 3. POST_LOAD: index + view (idempotent, atomic).
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
 
   // 4. Verify counts.
   const cnt = (sql: string): number => {
@@ -346,13 +312,17 @@ export async function loadConevalAgeb(
   };
   const rows_loaded = cnt(`SELECT COUNT(*) FROM coneval_grs_ageb_raw;`);
   const rows_in_view = cnt(`SELECT COUNT(*) FROM coneval_grs_ageb;`);
+  assertRelationsExist(config.dbContainer, CONEVAL_AGEB_RELATIONS);
 
   // 5. View stress-test — qa-audit W1 (2026-05-05). COUNT(*) doesn't evaluate
   //    non-grouping cast expressions, so a row with a malformed indicator
   //    (e.g. empty string slipping past `\copy NULL '*'`) would pass the
   //    counts above and only manifest when an endpoint hits the broken row.
-  //    Force evaluation of the typed casts on a small sample before declaring
-  //    success — mirrors C1 defense at deploy time.
+  //    Force evaluation of every typed cast on every row before declaring
+  //    success — mirrors C1 defense at deploy time. The whole-row reference
+  //    `t IS NOT NULL` builds each row in full, so every column's cast runs
+  //    (a LIMIT 5 sample of 6 columns could not catch row 40,000 or
+  //    ind_sin_luz, audit #163). ~61k rows, sub-second.
   execFileSync(
     "docker",
     [
@@ -364,7 +334,7 @@ export async function loadConevalAgeb(
       "-d",
       "postgres",
       "-c",
-      "SELECT cvegeo, pobtot, vivpar_hab, ind_analfabeta, ind_sin_internet, grado FROM coneval_grs_ageb LIMIT 5;",
+      CONEVAL_AGEB_STRESS_SQL,
     ],
     { encoding: "utf-8", timeout: 60_000 },
   );

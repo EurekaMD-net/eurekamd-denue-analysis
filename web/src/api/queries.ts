@@ -26,12 +26,13 @@ import {
   type TopSectorsResult,
 } from "./types";
 
-async function fetchJson<S extends z.ZodTypeAny>(
+export async function fetchJson<S extends z.ZodTypeAny>(
   path: string,
   schema: S,
   accessToken: string | null,
+  signal?: AbortSignal,
 ): Promise<z.infer<S>> {
-  const res = await apiFetch(path, {}, accessToken);
+  const res = await apiFetch(path, { signal }, accessToken);
   const body: unknown = await res.json();
   return schema.parse(body);
 }
@@ -41,7 +42,8 @@ export function useEntidades(): UseQueryResult<EntidadesResult> {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["entidades"],
-    queryFn: () => fetchJson("/entidades", ENTIDADES_RESULT, accessToken),
+    queryFn: ({ signal }) =>
+      fetchJson("/entidades", ENTIDADES_RESULT, accessToken, signal),
     enabled: accessToken !== null,
   });
 }
@@ -50,7 +52,8 @@ export function useSectors(): UseQueryResult<SectorsResult> {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["sectors"],
-    queryFn: () => fetchJson("/sectors", SECTORS_RESULT, accessToken),
+    queryFn: ({ signal }) =>
+      fetchJson("/sectors", SECTORS_RESULT, accessToken, signal),
     enabled: accessToken !== null,
   });
 }
@@ -59,11 +62,12 @@ export function useNationalTreemap(): UseQueryResult<NationalTreemapResult> {
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "national-treemap"],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchJson(
         "/analytics/national-treemap",
         NATIONAL_TREEMAP_RESULT,
         accessToken,
+        signal,
       ),
     enabled: accessToken !== null,
   });
@@ -73,11 +77,12 @@ export function useSectorGradeMatrix(): UseQueryResult<SectorGradeMatrixResult> 
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "sector-grade-matrix"],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchJson(
         "/analytics/sector-grade-matrix",
         SECTOR_GRADE_MATRIX_RESULT,
         accessToken,
+        signal,
       ),
     enabled: accessToken !== null,
   });
@@ -89,11 +94,12 @@ export function useMunicipiosAnalytics(
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "municipios", entidad],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchJson(
         `/analytics/municipios?entidad=${encodeURIComponent(entidad ?? "")}`,
         MUNICIPIOS_ANALYTICS_RESULT,
         accessToken,
+        signal,
       ),
     enabled: accessToken !== null && entidad !== null,
   });
@@ -106,13 +112,14 @@ export function useTopSectorsByEntidad(
   const accessToken = useUiStore((s) => s.session?.access_token ?? null);
   return useQuery({
     queryKey: ["analytics", "top-sectors", entidad, limit],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchJson(
         `/analytics/top-sectors?entidad=${encodeURIComponent(
           entidad ?? "",
         )}&limit=${limit}`,
         TOP_SECTORS_RESULT,
         accessToken,
+        signal,
       ),
     enabled: accessToken !== null && entidad !== null,
   });
@@ -127,11 +134,12 @@ export function useSearch(q: string): UseQueryResult<SearchResult> {
   const enabled = accessToken !== null && q.trim().length >= 3;
   return useQuery({
     queryKey: ["search", q],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       fetchJson(
         `/search?q=${encodeURIComponent(q)}&limit=20`,
         SEARCH_RESULT,
         accessToken,
+        signal,
       ),
     enabled,
     staleTime: 30_000,

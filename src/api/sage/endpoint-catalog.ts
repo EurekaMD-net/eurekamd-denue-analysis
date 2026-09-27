@@ -8,10 +8,19 @@
  * list — only routes the LLM should be allowed to call appear here.
  * Excluded: /tiles (binary), /health (no-op), /search (free-text, the
  * LLM should compose answers itself), /establishment/:clee (single-row,
- * usually a follow-up).
+ * usually a follow-up). The full exclusion list, with reasons, is in
+ * dispatcher.test.ts; that test fails when a new route is in neither.
  */
 
 import type { EndpointSpec } from "./providers/provider.js";
+import {
+  AGEBS_ORDER_BY,
+  COLONIAS_ORDER_BY,
+  LOCALITIES_ORDER_BY,
+  MANZANAS_ORDER_BY,
+  OPPORTUNITY_AGEB_ORDER_BY,
+  OPPORTUNITY_COLONIA_ORDER_BY,
+} from "../types.js";
 
 export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
   {
@@ -132,6 +141,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       type: "object",
       properties: {
         entidad: { type: "string" },
+        ano: {
+          type: "number",
+          description: "Año (default: más reciente cargado).",
+        },
       },
       required: ["entidad"],
     },
@@ -169,6 +182,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
         order_by: {
           type: "string",
           description: "establecimientos | farmacias | clues | area",
+          enum: [...AGEBS_ORDER_BY],
         },
         limit: { type: "number" },
       },
@@ -211,7 +225,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
           type: "string",
           description: "Códigos SCIAN coma-separados, todos del mismo tamaño.",
         },
-        order_by: { type: "string" },
+        order_by: { type: "string", enum: [...OPPORTUNITY_AGEB_ORDER_BY] },
         limit: { type: "number" },
         rezago_grado: {
           type: "string",
@@ -230,6 +244,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       properties: {
         cve_mun: { type: "string" },
         target_scian: { type: "string" },
+        order_by: {
+          type: "string",
+          enum: [...OPPORTUNITY_COLONIA_ORDER_BY],
+        },
+        limit: { type: "number" },
       },
       required: ["cve_mun", "target_scian"],
     },
@@ -239,7 +258,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Lista colonias DENUE en un municipio.",
     params_schema: {
       type: "object",
-      properties: { cve_mun: { type: "string" } },
+      properties: {
+        cve_mun: { type: "string" },
+        order_by: { type: "string", enum: [...COLONIAS_ORDER_BY] },
+        limit: { type: "number" },
+      },
       required: ["cve_mun"],
     },
   },
@@ -269,7 +292,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       type: "object",
       properties: {
         cvegeo: { type: "string" },
-        order_by: { type: "string" },
+        order_by: { type: "string", enum: [...MANZANAS_ORDER_BY] },
         limit: { type: "number" },
       },
       required: ["cvegeo"],
@@ -280,7 +303,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Colonias DENUE dentro de una AGEB.",
     params_schema: {
       type: "object",
-      properties: { cvegeo: { type: "string" } },
+      properties: {
+        cvegeo: { type: "string" },
+        limit: { type: "number" },
+      },
       required: ["cvegeo"],
     },
   },
@@ -298,7 +324,11 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
     description: "Localidades INEGI en un municipio (rural/urbana).",
     params_schema: {
       type: "object",
-      properties: { cve_mun: { type: "string" } },
+      properties: {
+        cve_mun: { type: "string" },
+        order_by: { type: "string", enum: [...LOCALITIES_ORDER_BY] },
+        limit: { type: "number" },
+      },
       required: ["cve_mun"],
     },
   },
@@ -327,8 +357,10 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
       "Detalle completo de una entidad: 6 capas estatales (CNBV Panorama estatal, CNBV Crédito estatal, SICT estatal, SEDATU estatal, ENIGH, ENOE).",
     params_schema: {
       type: "object",
-      properties: { clave: { type: "string" } },
-      required: ["clave"],
+      properties: {
+        cve_ent: { type: "string", description: "Clave 2-digit de entidad." },
+      },
+      required: ["cve_ent"],
     },
   },
 ];
@@ -364,6 +396,7 @@ mv_delitos_municipal_yearly(cve_mun, ano, robo_negocio, homicidio_doloso, extors
   -- 2026 is partial; for stable aggregates use ano < EXTRACT(YEAR FROM CURRENT_DATE)::int.
 mv_mortalidad_municipal_yearly(cve_mun, ano, total_defunciones, def_menores_1ano, def_circulatorio, def_neoplasias, def_endocrinas, def_externas)
 ce2024_municipal(cve_mun, cve_ent, sector, subsector, rama, subrama, clase, id_estrato, ue, personal_ocupado_total, valor_agregado_censal_bruto, ingresos_totales, remuneraciones, produccion_bruta_total)
+  -- Hierarchical: rows with clase IS NULL are subtotals (rama/subsector/sector/municipio; sector IS NULL = municipio total). Class-level queries must filter clase IS NOT NULL; never SUM across levels.
 sedatu_financing_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_organismo_code, top_organismo_nombre, pct_vivienda_nueva, pct_mejoramientos, pct_femenino, pct_credito_individual)
 cnbv_panorama_municipal(cve_mun, clave_municipio_num, nom_ent, nom_mun, rezago_social, poblacion_total, poblacion_adulta, sucursales_total, cajeros_total, tpv_total, cuentas_total, creditos_total, tx_tpv_total, remesas_mdd, periodo)
 cnbv_credito_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_intermediario_code, top_intermediario_nombre, top_intermediario_share, pct_vivienda_nueva, pct_femenino, pct_indigena, pct_economica, pct_popular, pct_tradicional, pct_media, pct_residencial, pct_residencial_plus)

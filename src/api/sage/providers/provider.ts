@@ -17,7 +17,7 @@
  * prompt working everywhere.
  */
 
-export type RouteKind = "endpoint" | "sql" | "decline";
+export type RouteKind = "endpoint" | "sql" | "decline" | "clarify";
 
 export interface RouteOutputEndpoint {
   kind: "endpoint";
@@ -39,10 +39,32 @@ export interface RouteOutputDecline {
   reasoning: string;
 }
 
+/**
+ * The model answered in text without calling a tool (typically a
+ * clarifying question): its text is shown as the narrative (audit #84).
+ */
+export interface RouteOutputClarify {
+  kind: "clarify";
+  reasoning: string;
+}
+
+/**
+ * The router pass produced no usable decision (audit #84): no tool call
+ * and no text, malformed or unknown tool arguments, or an SDK error
+ * result before any tool ran. `detail` is for the audit only.
+ */
+export interface RouteOutputError {
+  kind: "error";
+  code: "ROUTER_NO_TOOL" | "ROUTER_BAD_ARGS" | "ROUTER_SDK_ERROR";
+  detail: string;
+}
+
 export type RouteOutput =
   | RouteOutputEndpoint
   | RouteOutputSql
-  | RouteOutputDecline;
+  | RouteOutputDecline
+  | RouteOutputClarify
+  | RouteOutputError;
 
 export interface EndpointSpec {
   name: string;
@@ -53,21 +75,33 @@ export interface EndpointSpec {
    */
   params_schema: {
     type: "object";
-    properties: Record<string, { type: string; description?: string }>;
+    properties: Record<
+      string,
+      { type: string; description?: string; enum?: string[] }
+    >;
     required?: string[];
   };
 }
 
 export interface PriorTurnDigest {
   question: string;
-  route: { kind: RouteKind; endpoint_name?: string; sql?: string };
+  /** "router": the router pass itself failed, so the turn has no route. */
+  route: { kind: RouteKind | "router"; endpoint_name?: string; sql?: string };
   digest: {
     columns: string[];
     row_count: number;
     first_5_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    /** SQL result cut at the row cap: row_count is a floor, not the total. */
+    truncated?: boolean;
   };
   narrative: string;
+  /**
+   * Set on a failed turn (router, dispatch, SQL gate or narrative): the
+   * public code + message, so the next router pass can self-correct
+   * (audit #89).
+   */
+  error?: { code: string; message: string };
 }
 
 export interface RouteInput {
@@ -93,6 +127,10 @@ export interface NarrativeInput {
     row_count: number;
     first_n_rows: unknown[];
     numeric_stats?: Record<string, { min: number; max: number; mean: number }>;
+    /** Scalar fields beside the rows array of a keyed endpoint body. */
+    context?: Record<string, unknown>;
+    /** SQL result cut at the row cap: row_count is a floor, not the total. */
+    truncated?: boolean;
   };
   /** Last N turns, for cohesion. */
   history: PriorTurnDigest[];
@@ -101,6 +139,10 @@ export interface NarrativeInput {
 export interface UsageNormalized {
   input_tokens: number;
   output_tokens: number;
+  /** Of input_tokens, the part read from the prompt cache (audit #204). */
+  cache_read_input_tokens?: number;
+  /** Of input_tokens, the part written to the prompt cache (audit #204). */
+  cache_creation_input_tokens?: number;
   /** Provider-reported cost; 0 when the upstream doesn't expose pricing. */
   cost_usd: number;
   latency_ms: number;
@@ -148,6 +190,24 @@ export interface SageProvider {
 
   /** Best-effort token count for budgeting. */
   countTokens(text: string): number;
+}
+
+/**
+ * A provider call that throws (timeout, client abort, upstream error) has
+ * still spent tokens. Providers attach what they know to the error so the
+ * handler can audit it (audit #83); sageUsageOf reads it back.
+ */
+export function attachSageUsage(err: unknown, usage: UsageNormalized): unknown {
+  if (err !== null && typeof err === "object") {
+    const e = err as { sageUsage?: UsageNormalized };
+    e.sageUsage ??= usage;
+  }
+  return err;
+}
+
+export function sageUsageOf(err: unknown): UsageNormalized | null {
+  if (err === null || typeof err !== "object") return null;
+  return (err as { sageUsage?: UsageNormalized }).sageUsage ?? null;
 }
 
 /** Approximate token count (4 chars/token English baseline). */

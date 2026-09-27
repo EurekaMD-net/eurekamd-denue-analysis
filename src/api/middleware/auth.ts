@@ -14,11 +14,19 @@
  * On a successful JWT path, c.set("user", {...}) is attached so
  * downstream handlers can identify the caller. The X-Api-Key path
  * leaves `user` unset — handlers that need identity must guard.
+ *
+ * Both paths run the rest of the chain inside requestContext (see
+ * ../request-context.ts): the X-Api-Key path is the priority tier (its DB
+ * queries jump the psql queue and get a longer timeout), the JWT path is
+ * not. A nested in-process request (Sage's dispatcher re-enters the app
+ * with the shared key) never escalates: it inherits the outer principal
+ * and priority, so it is metered and queued as the user who asked.
  */
 
 import type { MiddlewareHandler } from "hono";
 import { timingSafeEqual } from "node:crypto";
 import { verifyBearer, type AuthedUser } from "./bearer-auth.js";
+import { requestContext } from "../request-context.js";
 
 export interface AuthMiddlewareConfig {
   /** Shared API key (machine-client path). Required. */
@@ -49,29 +57,30 @@ export function makeAuthMiddleware(
     const authHeader = c.req.header("authorization") ?? null;
     if (authHeader && /^Bearer\s+/i.test(authHeader)) {
       if (!config.supabaseJwtSecret) {
-        return c.json(
-          {
-            error:
-              "Bearer auth attempted but server has no SUPABASE_JWT_SECRET configured.",
-            code: "auth.no_jwt_secret",
-          },
-          503,
+        // Name the missing key on stderr only; the client learns nothing
+        // about server configuration (audit finding #10).
+        process.stderr.write(
+          "[auth] bearer rejected: SUPABASE_JWT_SECRET is not configured\n",
         );
+        return c.json({ error: "Service unavailable" }, 503);
       }
       const result = verifyBearer(authHeader, {
         jwtSecret: config.supabaseJwtSecret,
       });
       if (!result.ok) {
+        // Precise reason to stderr only: echoing it would be a verification
+        // oracle (valid signature vs forged) — audit finding #10.
+        process.stderr.write(`[auth] bearer rejected: ${result.reason}\n`);
         return c.json(
-          {
-            error: `JWT rejected: ${result.reason}`,
-            code: "auth.bearer_invalid",
-          },
+          { error: "Unauthorized", code: "auth.bearer_invalid" },
           401,
         );
       }
       c.set("user", result.user as AuthedUser);
-      return next();
+      return requestContext.run(
+        { principal: result.user.user_id, priority: false },
+        next,
+      );
     }
 
     // ---- Path 2: X-Api-Key (machine clients) -----------------------
@@ -92,6 +101,13 @@ export function makeAuthMiddleware(
     ) {
       return c.json({ error: "Invalid X-Api-Key", code: "auth.invalid" }, 401);
     }
-    return next();
+    const outer = requestContext.getStore();
+    return requestContext.run(
+      {
+        principal: outer?.principal ?? "apikey",
+        priority: outer ? outer.priority : true,
+      },
+      next,
+    );
   };
 }

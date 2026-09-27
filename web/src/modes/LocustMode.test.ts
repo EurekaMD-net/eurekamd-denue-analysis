@@ -54,8 +54,6 @@ describe("applyFilterPins (RH-1)", () => {
 // here first.
 const axisState = (fieldId: string | null) => ({
   field: fieldId ? (findField(fieldId) ?? null) : null,
-  geoLevel: 1 as 0 | 1 | 2,
-  scianLevel: 2 as 2 | 3 | 4 | 5 | 6,
 });
 
 describe("extractRows (X-key invariant)", () => {
@@ -676,6 +674,67 @@ describe("buildEChartsOption (per-capita label invariants)", () => {
     const yName = (option.yAxis as { name?: string }).name;
     expect(yName).not.toMatch(/\/ 1k hab/);
   });
+});
+
+describe("buildEChartsOption tooltip (#171 — Z is readable on every chart type)", () => {
+  type Item = { name?: string; value?: unknown; z?: unknown };
+  // What ECharts hands the formatter for one data item: `name` and `value`
+  // copied off the item, and the raw item itself as `data`.
+  const hover = (chartType: string, trigger: "axis" | "item") => {
+    const option = buildEChartsOption(
+      chartType,
+      [{ x: 7, y: 1200, z: 35.5 }],
+      axisState("denue.municipio_nombre"),
+      axisState("denue.total_establecimientos"),
+      axisState("coneval.pobreza_pct"),
+    );
+    const tooltip = option.tooltip as {
+      formatter: (p: unknown) => string;
+    };
+    const series = option.series as Array<{ data: Array<Item | number> }>;
+    const raw = series[0]!.data[0]!;
+    const item: Item = typeof raw === "number" ? { value: raw } : raw;
+    const name =
+      item.name ?? (option.xAxis as { data?: string[] } | undefined)?.data?.[0];
+    const params = { name, value: item.value, data: raw };
+    return tooltip.formatter(trigger === "axis" ? [params] : params);
+  };
+
+  for (const [chartType, trigger] of [
+    ["bar", "axis"],
+    ["line", "axis"],
+    ["treemap", "item"],
+    ["scatter", "item"],
+  ] as const) {
+    it(`${chartType}: shows the Z value, not a dash`, () => {
+      const html = hover(chartType, trigger);
+      expect(html).toContain("% pobreza: 35.5");
+      expect(html).not.toContain("—");
+    });
+  }
+
+  it("scatter: the X identifier heads the tooltip", () => {
+    expect(hover("scatter", "item")).toMatch(/^<b>7<\/b>/);
+  });
+});
+
+describe("buildEChartsOption tooltip escapes the X label (#193)", () => {
+  const XSS = "<img src=x onerror=alert(1)>";
+  for (const chartType of ["bar", "scatter", "treemap", "line"]) {
+    it(`${chartType}: an HTML X label comes out as inert text`, () => {
+      const option = buildEChartsOption(
+        chartType,
+        [{ x: XSS, y: 1, z: null }],
+        axisState("denue.municipio_nombre"),
+        axisState("denue.total_establecimientos"),
+        axisState(null),
+      );
+      const tooltip = option.tooltip as { formatter: (p: unknown) => string };
+      const html = tooltip.formatter({ name: XSS, value: 1, data: {} });
+      expect(html).not.toContain("<img");
+      expect(html).toMatch(/^<b>&lt;img src=x onerror=alert\(1\)&gt;<\/b>/);
+    });
+  }
 });
 
 describe("computeZRange (W3 audit fix — precomputed range)", () => {

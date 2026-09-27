@@ -4,6 +4,7 @@ import {
   formatCoverageReport,
   loadInegiCounts,
   statusFor,
+  _resetInegiCountsCache,
   type CoverageRow,
 } from "./coverage-report.js";
 
@@ -88,6 +89,16 @@ describe("loadInegiCounts", () => {
 
   it("respects override path (for tests)", () => {
     expect(() => loadInegiCounts("/nonexistent/path.json")).toThrow();
+  });
+
+  it("reads the default file once per process (audit #108)", () => {
+    _resetInegiCountsCache();
+    const first = loadInegiCounts();
+    expect(loadInegiCounts()).toBe(first);
+    // The override path bypasses the memo even while it is warm.
+    expect(() => loadInegiCounts("/nonexistent/path.json")).toThrow();
+    _resetInegiCountsCache();
+    expect(loadInegiCounts()).not.toBe(first);
   });
 });
 

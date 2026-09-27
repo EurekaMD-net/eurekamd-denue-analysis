@@ -3,15 +3,15 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 // vi.mock is hoisted above all imports, including the const declaration.
 // Use vi.hoisted to define the mock before the hoisted vi.mock factory runs.
 //
-// Audit C1-sec round-1 closure 2026-05-10: cluster-by-sector.ts switched
-// from execSync (raw shell) to execFileSync (array-arg form). Mock now
-// targets execFileSync to match.
+// Audit P08: cluster-by-sector.ts runs on the shared psql runner (async
+// spawn, SQL on stdin). The bridge routes each call into mockExec with the
+// SQL appended as the last recorded arg.
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
-  execFileSync: mockExec,
-  execFile: vi.fn(),
-}));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 // Now safe to import the server (which transitively imports the cluster runner)
 import { createServer } from "../server.js";
@@ -31,15 +31,14 @@ afterEach(() => {
 });
 
 describe("GET /clusters", () => {
-  it("returns 200 + clusters payload on happy path", async () => {
+  it("returns 200 + { entidad, scian, k, centroids } on happy path (audit #101)", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
         {
           cluster_id: 0,
-          centroid_lat: 19.4326,
-          centroid_lon: -99.1332,
-          member_count: 12,
-          member_clees: ["09001", "09002"],
+          lon: -99.1332,
+          lat: 19.4326,
+          size: 12,
         },
       ]),
     );
@@ -52,13 +51,22 @@ describe("GET /clusters", () => {
       entidad: string;
       scian: string;
       k: number;
-      clusters: Array<{ member_count: number }>;
+      centroids: unknown[];
     };
     expect(body.entidad).toBe("09");
     expect(body.scian).toBe("46");
     expect(body.k).toBe(5);
-    expect(body.clusters).toHaveLength(1);
-    expect(body.clusters[0]?.member_count).toBe(12);
+    // The SPA's zod schema requires `centroids`; the old `clusters` key
+    // made every parse throw.
+    expect(Object.keys(body).sort()).toEqual([
+      "centroids",
+      "entidad",
+      "k",
+      "scian",
+    ]);
+    expect(body.centroids).toEqual([
+      { cluster_id: 0, lon: -99.1332, lat: 19.4326, size: 12 },
+    ]);
   });
 
   it("uses default k=5 when not specified", async () => {
@@ -68,11 +76,24 @@ describe("GET /clusters", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    // Audit C1-sec round-1 closure 2026-05-10: SQL is now passed as the
-    // last array element to execFileSync, not as a shell-string.
+    // SQL travels on stdin; the bridge appends it as the last recorded arg.
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
-    expect(sql).toContain("ST_ClusterKMeans(geom, 5)");
+    expect(sql).toContain("ST_ClusterKMeans(ST_Transform(geom, 6372), 5)");
+  });
+
+  it("returns 502 postgres.error (not 500) when psql fails (audit #54)", async () => {
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error("boom"), { stderr: "ERROR: canceling" });
+    });
+    const app = createServer(CONFIG);
+    const res = await app.request("/clusters?entidad=09&scian=46", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe("postgres.error");
+    expect(body.error).not.toContain("canceling");
   });
 
   it("returns 400 on missing entidad", async () => {
@@ -103,5 +124,17 @@ describe("GET /clusters", () => {
       headers: AUTH,
     });
     expect(r2.status).toBe(400);
+  });
+
+  it("returns 400 on k with decimals or trailing garbage (audit #53)", async () => {
+    const app = createServer(CONFIG);
+    for (const k of ["5.9", "5abc", "1e1", "+5"]) {
+      const res = await app.request(`/clusters?entidad=09&scian=46&k=${k}`, {
+        headers: AUTH,
+      });
+      expect(res.status, k).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code, k).toBe("validation.k");
+    }
   });
 });

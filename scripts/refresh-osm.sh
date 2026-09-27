@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end OSM road aggregates refresh.
 #
-# Fetches the latest Geofabrik Mexico PBF, then runs the loader. Triggered
-# by ops/osm-refresh.timer (weekly Sunday 06:00 UTC); also safe to run
-# manually:
+# Fetches the latest Geofabrik Mexico PBF, then runs the loader. Run it
+# manually; nothing schedules it (ops/osm-refresh.timer is in the repo but
+# is NOT installed on the host, audit #151):
 #   ./scripts/refresh-osm.sh
 #
 # Set OSM_KEEP_PBF=1 to keep the downloaded PBF after the load (useful

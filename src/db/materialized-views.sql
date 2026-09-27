@@ -13,19 +13,23 @@
 -- mv_sector_summary
 -- Top sectores por clase_actividad_id, opcionalmente por entidad.
 -- Use: SELECT * FROM mv_sector_summary WHERE entidad = '09' ORDER BY total DESC;
+-- /sectors and /summary/sector/:scian SUM it by sector_actividad_id.
+-- The label is MAX(clase_actividad), not a group key, so label drift cannot
+-- split a clase. Applied live by scripts/migrations/021-summary-mvs.sql.
 -- -----------------------------------------------------------------------------
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sector_summary AS
 SELECT
   entidad,
+  sector_actividad_id,
   clase_actividad_id,
-  clase_actividad,
+  MAX(clase_actividad) AS clase_actividad,
   COUNT(*)::BIGINT AS total
 FROM establecimientos
-GROUP BY entidad, clase_actividad_id, clase_actividad
+GROUP BY entidad, sector_actividad_id, clase_actividad_id
 WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS mv_sector_summary_pk
-  ON mv_sector_summary (entidad, clase_actividad_id);
+  ON mv_sector_summary (entidad, sector_actividad_id, clase_actividad_id);
 
 -- -----------------------------------------------------------------------------
 -- mv_coverage
@@ -75,7 +79,7 @@ WITH NO DATA;
 CREATE UNIQUE INDEX IF NOT EXISTS mv_estrato_por_entidad_pk
   ON mv_estrato_por_entidad (entidad, estrato);
 
--- Grant read access to the anon/authenticated roles (Supabase standard)
-GRANT SELECT ON mv_sector_summary TO anon, authenticated;
-GRANT SELECT ON mv_coverage TO anon, authenticated;
-GRANT SELECT ON mv_estrato_por_entidad TO anon, authenticated;
+-- Grant read access. The two summary MVs follow scripts/migrations/021:
+-- service_role (the API's PostgREST key) and denue_sage only.
+GRANT SELECT ON mv_sector_summary TO service_role, denue_sage;
+GRANT SELECT ON mv_estrato_por_entidad TO service_role, denue_sage;

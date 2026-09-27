@@ -156,4 +156,67 @@ describe("GET /search — PostgREST path (no radius)", () => {
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("validation.radius_km");
   });
+
+  it("returns 400 on q shorter than 3 chars, without calling PostgREST (audit #36/#96)", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+    const app = createServer(CONFIG);
+    for (const q of ["ab", "%20a%20%20"]) {
+      const res = await app.request(`/search?q=${q}`, { headers: AUTH });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("validation.q_too_short");
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("passes an AbortSignal to the PostgREST fetch (audit #36/#96)", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", mockFetch);
+    const app = createServer(CONFIG);
+    await app.request("/search?q=farmacia", { headers: AUTH });
+    const init = mockFetch.mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("maps a PostgREST fetch timeout to 502 postgrest.error, not 500", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException(
+            "The operation was aborted due to timeout",
+            "TimeoutError",
+          ),
+        ),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/search?q=farmacia", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("postgrest.error");
+  });
+
+  it("returns 400 on page/limit with trailing garbage, decimals or exponents (audit #53)", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+    const app = createServer(CONFIG);
+    for (const qs of [
+      "page=2abc",
+      "page=1.5",
+      "page=-1",
+      "limit=1e3",
+      "limit=5.9",
+      "limit=+5",
+    ]) {
+      const res = await app.request(`/search?${qs}`, { headers: AUTH });
+      expect(res.status, qs).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code, qs).toMatch(/^validation\.(page|limit)$/);
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });

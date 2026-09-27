@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useUiStore } from "./store";
 
@@ -28,6 +28,7 @@ export function useUrlSync(): void {
   const sector = useUiStore((s) => s.sector);
   const setEntidad = useUiStore((s) => s.setEntidad);
   const setSector = useUiStore((s) => s.setSector);
+  const hydrated = useRef(false);
 
   // Hydrate Zustand from URL on first mount only.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only hydration; capturing setEntidad/setSector once is intentional
@@ -46,8 +47,16 @@ export function useUrlSync(): void {
   // correctness benefit. `setParams` is referentially stable from
   // react-router. The eslint exception is the price of wanting the
   // effect driven by Zustand state alone, not by router churn.
+  //
+  // The first run is skipped: it still sees the pre-hydration
+  // null/null render values and would strip the deep-link params only
+  // for the next render to add them back (audit #182).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
+    if (!hydrated.current) {
+      hydrated.current = true;
+      return;
+    }
     const next = new URLSearchParams(params);
     if (entidad) next.set("entidad", entidad);
     else next.delete("entidad");

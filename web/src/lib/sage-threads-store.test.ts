@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SageStoredTurn } from "../api/sage-client";
 import {
+  clearAllThreadIndexes,
   listSavedThreads,
   removeThread,
   savedThreadsStorageKey,
@@ -29,6 +30,19 @@ describe("sage-threads-store (RH-4)", () => {
 
   afterEach(() => {
     window.localStorage.clear();
+  });
+
+  it("clearAllThreadIndexes drops every user's index and nothing else (audit #197)", () => {
+    upsertThread("user-1", entry({ thread_id: "a" }));
+    upsertThread("user-2", entry({ thread_id: "b" }));
+    upsertThread(null, entry({ thread_id: "c" }));
+    window.localStorage.setItem("sb-ref-auth-token", "keep");
+    clearAllThreadIndexes();
+    expect(listSavedThreads("user-1")).toEqual([]);
+    expect(listSavedThreads("user-2")).toEqual([]);
+    expect(listSavedThreads(null)).toEqual([]);
+    expect(window.localStorage.getItem("sb-ref-auth-token")).toBe("keep");
+    expect(window.localStorage.length).toBe(1);
   });
 
   it("listSavedThreads returns [] when nothing stored", () => {

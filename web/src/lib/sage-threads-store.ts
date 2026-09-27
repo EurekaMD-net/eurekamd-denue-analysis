@@ -137,3 +137,30 @@ export function removeThread(
   }
   return next;
 }
+
+/**
+ * Remove every user's thread index from this browser. Called on sign-out
+ * so the next person on a shared browser cannot read the previous user's
+ * Sage questions (first_question / last_question) from devtools. Every
+ * storage access is wrapped: best-effort, never throws.
+ */
+export function clearAllThreadIndexes(): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  const keys: string[] = [];
+  try {
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (k && k.startsWith(STORAGE_PREFIX)) keys.push(k);
+    }
+  } catch {
+    // Storage access denied — nothing we can remove.
+  }
+  for (const k of keys) {
+    try {
+      storage.removeItem(k);
+    } catch {
+      // Best-effort; keep removing the rest.
+    }
+  }
+}

@@ -8,6 +8,14 @@ export function Layout() {
   // Single URL ⇄ Zustand binding for the whole app so deep-link
   // hydration works on every route (R2 audit W1).
   useUrlSync();
+  // Mode links carry the active filters so switching modes keeps
+  // ?entidad/?sector in the address bar (audit #181).
+  const entidad = useUiStore((s) => s.entidad);
+  const sector = useUiStore((s) => s.sector);
+  const filterParams = new URLSearchParams();
+  if (entidad) filterParams.set("entidad", entidad);
+  if (sector) filterParams.set("sector", sector);
+  const search = filterParams.toString() ? `?${filterParams}` : "";
   const userLabel = session?.user.email ?? session?.user.id?.slice(0, 8) ?? "";
 
   // RH-9: confirm before signing out. The flow tears down in-flight
@@ -33,9 +41,9 @@ export function Layout() {
             DENUE Analyzer
           </h1>
           <nav className="flex items-center gap-1 text-xs">
-            <ModeLink to="/locust" label="Locust" />
-            <ModeLink to="/map" label="Map" />
-            <ModeLink to="/sage" label="Sage" />
+            <ModeLink to="/locust" search={search} label="Locust" />
+            <ModeLink to="/map" search={search} label="Map" />
+            <ModeLink to="/sage" search={search} label="Sage" />
           </nav>
         </div>
         <div className="flex items-center gap-2">
@@ -60,10 +68,18 @@ export function Layout() {
   );
 }
 
-function ModeLink({ to, label }: { to: string; label: string }) {
+function ModeLink({
+  to,
+  search,
+  label,
+}: {
+  to: string;
+  search: string;
+  label: string;
+}) {
   return (
     <NavLink
-      to={to}
+      to={{ pathname: to, search }}
       className={({ isActive }) =>
         `rounded px-3 py-1 font-mono ${
           isActive

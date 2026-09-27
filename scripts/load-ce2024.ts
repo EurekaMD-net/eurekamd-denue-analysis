@@ -38,6 +38,12 @@
  *     dedicated columns. Indexed on cve_mun + sector for the analytics
  *     handlers.
  *
+ * Reload (audit #145): every state is \copy'd into `ce2024_raw_staging`
+ * (nothing live is touched), then ONE psql transaction drops
+ * ce2024_municipal explicitly, swaps staging in as ce2024_raw, rebuilds the
+ * MV + indexes and re-applies grants. A failed state or rebuild leaves the
+ * live tables as they were; readers see the old data until COMMIT.
+ *
  * Idempotent: rerun freely. ZIPs are the boundary of trust.
  */
 
@@ -45,6 +51,12 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const SAFE_PATH_RE = /^[a-zA-Z0-9_.\\/-]+$/;
@@ -240,7 +252,29 @@ CREATE INDEX idx_ce2024_mun_clase ON ce2024_municipal (clase);
 
 DROP INDEX IF EXISTS idx_ce2024_mun_estrato;
 CREATE INDEX idx_ce2024_mun_estrato ON ce2024_municipal (id_estrato);
+
+-- Audit #123: the per-entidad rollup lookup (sector IS NULL AND id_estrato
+-- IS NULL AND cve_ent = X) otherwise filters ~6.6k rows via the sector index.
+DROP INDEX IF EXISTS idx_ce2024_mun_ent_rollup;
+CREATE INDEX idx_ce2024_mun_ent_rollup ON ce2024_municipal (cve_ent)
+  WHERE sector IS NULL AND id_estrato IS NULL;
 `;
+
+/**
+ * The single-transaction swap run after every state is in
+ * `ce2024_raw_staging` (audit #145): drop ce2024_municipal explicitly (an
+ * unknown dependent makes DROP TABLE fail → rollback), swap, rebuild the
+ * MV + indexes, re-apply grants.
+ */
+export function buildCe2024SwapSql(): string {
+  return [
+    swapInStagingSql("ce2024_raw", [
+      "DROP MATERIALIZED VIEW IF EXISTS ce2024_municipal;",
+    ]),
+    POST_LOAD_SQL,
+    postLoadGrants(["ce2024_raw", "ce2024_municipal"]),
+  ].join("\n");
+}
 
 export interface LoadCe2024Config {
   zipDir: string;
@@ -313,28 +347,26 @@ export async function loadCe2024(
       }
     }
 
-    // DDL: all 105 columns as TEXT.
+    // DDL: all 105 columns as TEXT, into staging (audit #145).
     const ddl = `
-DROP TABLE IF EXISTS ce2024_raw CASCADE;
-CREATE TABLE ce2024_raw (
+DROP TABLE IF EXISTS ce2024_raw_staging;
+CREATE TABLE ce2024_raw_staging (
 ${cols.map((c) => `  ${c} TEXT`).join(",\n")}
 );
 `;
-    dockerExec(
-      config.dbContainer,
-      ["psql", "-U", "postgres", "-d", "postgres", "-c", ddl],
-      60_000,
-    );
+    runPsqlScript(config.dbContainer, ddl, 60_000);
 
-    // Per-state COPY.
+    // Per-state COPY into staging.
     for (const { stateCode, zipPath } of states) {
       const innerCsv = `conjunto_de_datos/tr_ce_${stateCode}_2024.csv`;
       // Verify each state's header matches the canonical one (catches an
       // INEGI emission drift where a later state ships an extra column).
+      // \copy is positional, so the names AND their order must match, not
+      // just the count (audit #152).
       const stateCols = readCe2024Header(zipPath, innerCsv);
-      if (stateCols.length !== cols.length) {
+      if (stateCols.join(",") !== cols.join(",")) {
         throw new Error(
-          `loadCe2024: ${stateCode} header has ${stateCols.length} cols, expected ${cols.length}`,
+          `loadCe2024: ${stateCode} header differs from ${firstZip.stateCode} (${stateCols.length} cols, expected ${cols.length} in the same order)`,
         );
       }
 
@@ -356,7 +388,7 @@ ${cols.map((c) => `  ${c} TEXT`).join(",\n")}
             "-d",
             "postgres",
             "-c",
-            `\\copy ce2024_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+            `\\copy ce2024_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
           ],
           10 * 60_000,
         );
@@ -369,12 +401,8 @@ ${cols.map((c) => `  ${c} TEXT`).join(",\n")}
       }
     }
 
-    // Build the materialized view + indexes.
-    dockerExec(
-      config.dbContainer,
-      ["psql", "-U", "postgres", "-d", "postgres", "-c", POST_LOAD_SQL],
-      5 * 60_000,
-    );
+    // ONE transaction: swap staging in, rebuild the MV + indexes, grants.
+    runPsqlScript(config.dbContainer, buildCe2024SwapSql(), 15 * 60_000);
 
     // Counts.
     const cnt = (sql: string): number => {
@@ -389,10 +417,13 @@ ${cols.map((c) => `  ${c} TEXT`).join(",\n")}
       }
       return n;
     };
+    const raw_rows = cnt("SELECT COUNT(*) FROM ce2024_raw;");
+    const municipal_rows = cnt("SELECT COUNT(*) FROM ce2024_municipal;");
+    assertRelationsExist(config.dbContainer, ["ce2024_raw", "ce2024_municipal"]);
     return {
       states_loaded: states.length,
-      raw_rows: cnt("SELECT COUNT(*) FROM ce2024_raw;"),
-      municipal_rows: cnt("SELECT COUNT(*) FROM ce2024_municipal;"),
+      raw_rows,
+      municipal_rows,
       duration_ms: Date.now() - started,
     };
   } finally {

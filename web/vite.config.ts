@@ -21,6 +21,23 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // Audit 2026-09-26 #12/#190/#196: Caddy served the .map files (full
+    // sourcesContent) publicly. Vite empties dist/ on build, so they go.
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Vendor code that rarely changes gets its own hashed chunks, so
+        // a redeploy of app code doesn't re-download it (audit #179).
+        // Matched by path: the object form mis-assigns the CommonJS
+        // react/react-dom modules and leaves them in the router chunk.
+        manualChunks(id) {
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id))
+            return "react";
+          if (/[\\/]node_modules[\\/]react-router(-dom)?[\\/]/.test(id))
+            return "router";
+          return undefined;
+        },
+      },
+    },
   },
 });

@@ -10,13 +10,19 @@ const { mockOpen, mockRead, mockClose } = vi.hoisted(() => ({
   mockRead: vi.fn(),
   mockClose: vi.fn(),
 }));
-vi.mock("node:fs", () => ({
+// Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
   openSync: mockOpen,
   readSync: mockRead,
   closeSync: mockClose,
 }));
 
-import { loadClues, POST_LOAD_SQL_FOR_TEST } from "./load-clues.js";
+import {
+  buildCluesReloadSql,
+  loadClues,
+  POST_LOAD_SQL_FOR_TEST,
+} from "./load-clues.js";
 
 beforeEach(() => {
   mockExec.mockReset();
@@ -113,14 +119,13 @@ describe("loadClues (orchestration)", () => {
   it("passes csvPath positionally with `--` separator to docker cp", async () => {
     stubHeader(VALID_CLUES_HEADER);
     mockExec
-      .mockReturnValueOnce("DROP TABLE\nCREATE TABLE\n") // DDL
       .mockReturnValueOnce("") // docker cp
-      .mockReturnValueOnce("COPY 63708\n") // \copy
+      .mockReturnValueOnce("COPY 63708\n") // reload transaction
       .mockReturnValueOnce("") // rm
-      .mockReturnValueOnce("CREATE MATERIALIZED VIEW\n") // post-load
       .mockReturnValueOnce("63708\n") // count raw
       .mockReturnValueOnce("41381\n") // count clues (EN OPERACION)
-      .mockReturnValueOnce("41200\n"); // count with geom
+      .mockReturnValueOnce("41200\n") // count with geom
+      .mockReturnValueOnce(""); // to_regclass: nothing missing
 
     const result = await loadClues({
       csvPath: "/data/clues.csv",
@@ -140,18 +145,27 @@ describe("loadClues (orchestration)", () => {
     expect(cpArgs[1]).toBe("--"); // flag-injection defense
     expect(cpArgs[2]).toBe("/data/clues.csv");
 
-    // S1: confirm the post-load step was actually invoked with the
-    // exported SQL constant. Catches refactors that drop the view step
-    // or wire it to a different SQL string.
-    const postLoadCalled = mockExec.mock.calls.some((c) => {
-      const args = c[1] as string[];
-      return (
-        Array.isArray(args) &&
-        args.includes("-c") &&
-        args.includes(POST_LOAD_SQL_FOR_TEST)
-      );
-    });
-    expect(postLoadCalled).toBe(true);
+    // Audit #145: DDL, \copy and the MV rebuild run as ONE
+    // single-transaction psql session carrying the exported SQL constant.
+    const tx = mockExec.mock.calls[1] as [string, string[], { input: string }];
+    expect(tx[1]).toContain("--single-transaction");
+    expect(tx[2].input).toBe(buildCluesReloadSql("/tmp/clues_raw.csv"));
+    expect(tx[2].input).toContain(POST_LOAD_SQL_FOR_TEST);
+  });
+
+  it("fails loud when clues is missing after the load", async () => {
+    stubHeader(VALID_CLUES_HEADER);
+    mockExec
+      .mockReturnValueOnce("") // docker cp
+      .mockReturnValueOnce("") // reload transaction
+      .mockReturnValueOnce("") // rm
+      .mockReturnValueOnce("1\n")
+      .mockReturnValueOnce("1\n")
+      .mockReturnValueOnce("1\n")
+      .mockReturnValueOnce("clues\n");
+    await expect(
+      loadClues({ csvPath: "/c.csv", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/missing after load: clues/);
   });
 
   it("guards every numeric cast against empty string", () => {
@@ -199,17 +213,35 @@ describe("loadClues (orchestration)", () => {
     expect(POST_LOAD_SQL_FOR_TEST).toMatch(/CREATE MATERIALIZED VIEW clues/);
   });
 
+  it("buildCluesReloadSql: staging \\copy before any live DROP, no CASCADE on clues_raw (audit #145)", () => {
+    const sql = buildCluesReloadSql("/tmp/clues_raw.csv");
+    const copy = sql.indexOf("\\copy clues_raw_staging FROM '/tmp/clues_raw.csv'");
+    const dropMv = sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS clues;");
+    const dropRaw = sql.indexOf("DROP TABLE IF EXISTS clues_raw;");
+    const swap = sql.indexOf("ALTER TABLE clues_raw_staging RENAME TO clues_raw;");
+    const rebuild = sql.indexOf("CREATE MATERIALIZED VIEW clues AS");
+    expect(copy).toBeGreaterThan(-1);
+    expect(copy).toBeLessThan(dropMv);
+    expect(dropMv).toBeLessThan(dropRaw);
+    expect(dropRaw).toBeLessThan(swap);
+    expect(swap).toBeLessThan(rebuild);
+    expect(sql).not.toMatch(/DROP TABLE[^;]*CASCADE/);
+    expect(sql).toContain("GRANT SELECT ON clues TO denue_sage;");
+  });
+
   it("cleans up in-container temp file even when \\copy fails", async () => {
     stubHeader(VALID_CLUES_HEADER);
     let copyAttempted = false;
-    mockExec.mockImplementation((_bin: string, args: string[]) => {
-      if (args.some((a) => typeof a === "string" && a.includes("\\copy"))) {
-        copyAttempted = true;
-        const e = new Error("psql copy failed");
-        throw e;
-      }
-      return "";
-    });
+    mockExec.mockImplementation(
+      (_bin: string, _args: string[], opts?: { input?: string }) => {
+        if (opts?.input?.includes("\\copy")) {
+          copyAttempted = true;
+          const e = new Error("psql copy failed");
+          throw e;
+        }
+        return "";
+      },
+    );
     await expect(
       loadClues({ csvPath: "/c.csv", dbContainer: "supabase-db" }),
     ).rejects.toThrow(/psql copy failed/);

@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reloadPage } from "../lib/reload";
 
 interface State {
   error: Error | null;
@@ -26,7 +27,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
             </pre>
             <button
               type="button"
-              onClick={() => this.setState({ error: null })}
+              // Reload, not a state reset: React.lazy caches a rejected
+              // import, so re-rendering the same tree re-throws (audit #178).
+              onClick={reloadPage}
               className="mt-3 rounded bg-red-700 px-3 py-1 text-xs hover:bg-red-600"
             >
               Reintentar

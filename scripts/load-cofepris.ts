@@ -29,6 +29,13 @@
 
 import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import {
+  assertRelationsExist,
+  existingRowCount,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 
@@ -62,7 +69,9 @@ function assertUtf8(path: string): void {
     const buf = Buffer.alloc(16 * 1024);
     const bytes = readSync(fd, buf, 0, buf.length, 0);
     const decoder = new TextDecoder("utf-8", { fatal: true });
-    decoder.decode(buf.subarray(0, bytes));
+    // stream: a multibyte char cut by the 16 KB boundary is buffered, not
+    // reported as invalid (audit #160).
+    decoder.decode(buf.subarray(0, bytes), { stream: true });
   } catch (err) {
     throw new Error(
       `loadCofepris: CSV at ${path} is not valid UTF-8. ` +
@@ -103,11 +112,13 @@ export interface LoadCofeprisResult {
  * Schema is fixed at v0.2.8. New COFEPRIS columns would require a migration
  * — unlike SINBA's wide age-band table this dataset has a stable shape
  * (the form was designed by COFEPRIS, not exported from a normalized DB).
+ *
+ * Builds `cofepris_farmacias_staging`; the reload swaps it in (audit #145).
  */
 export const CREATE_TABLE_SQL = `
-DROP TABLE IF EXISTS cofepris_farmacias CASCADE;
+DROP TABLE IF EXISTS cofepris_farmacias_staging;
 
-CREATE TABLE cofepris_farmacias (
+CREATE TABLE cofepris_farmacias_staging (
   consec                    TEXT NOT NULL,
   nombre                    TEXT,
   giro                      TEXT,
@@ -154,12 +165,12 @@ CREATE TABLE cofepris_farmacias (
  * from raw row → muni-aggregate so /licensed-pharmacies-by-municipio can
  * surface "muni X has 12 farmacias authorized for Estupefacientes".
  *
- * Wrapped in BEGIN/COMMIT so concurrent endpoint reads don't 502 with
- * relation-missing during atomic redeploy. Carries v0.2.6 C3 lesson.
+ * Runs inside the reload's single transaction so concurrent endpoint reads
+ * don't 502 with relation-missing during atomic redeploy. Carries v0.2.6 C3
+ * lesson. No BEGIN/COMMIT of its own (audit #145): an inner COMMIT would
+ * end runPsqlScript's --single-transaction early.
  */
 export const POST_LOAD_SQL = `
-BEGIN;
-
 -- Hot path for both views: WHERE estatus_licencia = 'Vigente' AND cve_mun = '...'.
 -- Partial-on-Vigente cuts the index to ~92% of rows and matches the planner's
 -- predicate exactly. Replaces the v0.2.7-style un-conditional index +
@@ -204,9 +215,31 @@ WHERE estatus_licencia = 'Vigente'
   AND cvegeo_ageb IS NOT NULL
   AND cvegeo_ageb ~ '^([0-9A-Z]{9}|[0-9A-Z]{13})$'
 GROUP BY cvegeo_ageb;
-
-COMMIT;
 `.trim();
+
+const COFEPRIS_RELATIONS = [
+  "cofepris_farmacias",
+  "cofepris_farmacias_by_municipio",
+  "cofepris_farmacias_by_ageb",
+];
+
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * drop both views explicitly (an unknown dependent makes DROP TABLE fail →
+ * rollback), swap, indexes + views, grants.
+ */
+export function buildCofeprisReloadSql(containerPath: string): string {
+  return [
+    CREATE_TABLE_SQL,
+    `\\copy cofepris_farmacias_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL '')`,
+    swapInStagingSql("cofepris_farmacias", [
+      "DROP VIEW IF EXISTS cofepris_farmacias_by_ageb;",
+      "DROP VIEW IF EXISTS cofepris_farmacias_by_municipio;",
+    ]),
+    POST_LOAD_SQL,
+    postLoadGrants(COFEPRIS_RELATIONS),
+  ].join("\n");
+}
 
 export async function loadCofepris(
   config: LoadCofeprisConfig,
@@ -237,32 +270,13 @@ export async function loadCofepris(
 
   const started = Date.now();
 
-  // C1 guard from v0.2.4-B: refuse to drop a populated table without --force.
+  // C1 guard from v0.2.4-B: refuse to replace a populated table without
+  // --force. Only an absent relation counts as empty (audit #157).
   if (!config.force) {
-    let existingRows = 0;
-    try {
-      const out = execFileSync(
-        "docker",
-        [
-          "exec",
-          config.dbContainer,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-t",
-          "-A",
-          "-c",
-          "SELECT COUNT(*) FROM cofepris_farmacias;",
-        ],
-        { encoding: "utf-8", timeout: 60_000 },
-      ).trim();
-      const n = parseInt(out, 10);
-      if (Number.isFinite(n)) existingRows = n;
-    } catch {
-      // table absent — proceed
-    }
+    const existingRows = existingRowCount(
+      config.dbContainer,
+      "cofepris_farmacias",
+    );
     if (existingRows > 0) {
       throw new Error(
         `loadCofepris: cofepris_farmacias already has ${existingRows} rows. Use --force to drop and re-load.`,
@@ -270,28 +284,12 @@ export async function loadCofepris(
     }
   }
 
-  // 1. CREATE TABLE.
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      CREATE_TABLE_SQL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
-
-  // 2. Copy + \copy. Booleans land as '0'/'1' from Python — use NULL '' so
-  //    blank cells become NULL rather than failing the bool cast.
-  //    qa-audit W3 from R1: tmpName is a literal const, never operator input,
-  //    so the \copy meta-command path can't be threaded by a caller.
+  // 1. Copy CSV in, then ONE transaction: \copy into staging → swap →
+  //    indexes + views → grants (audit #145). Booleans land as '0'/'1' from
+  //    Python — NULL '' so blank cells become NULL rather than failing the
+  //    bool cast. qa-audit W3 from R1: tmpName is a literal const, never
+  //    operator input, so the \copy meta-command path can't be threaded by
+  //    a caller.
   const tmpName = TMP_CSV_PATH;
   execFileSync(
     "docker",
@@ -300,20 +298,10 @@ export async function loadCofepris(
   );
   let copyOut = "";
   try {
-    copyOut = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy cofepris_farmacias FROM '${tmpName}' WITH (FORMAT csv, HEADER true, NULL '')`,
-      ],
-      { encoding: "utf-8", timeout: 5 * 60_000 },
+    copyOut = runPsqlScript(
+      config.dbContainer,
+      buildCofeprisReloadSql(tmpName),
+      6 * 60_000,
     );
   } finally {
     try {
@@ -326,24 +314,6 @@ export async function loadCofepris(
       // best-effort
     }
   }
-
-  // 3. POST_LOAD: indexes + views.
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      POST_LOAD_SQL,
-    ],
-    { encoding: "utf-8", timeout: 60_000 },
-  );
 
   // 4. Counts + stress test.
   const cnt = (sql: string): number => {
@@ -383,6 +353,7 @@ export async function loadCofepris(
   const munis_in_view = cnt(
     `SELECT COUNT(*) FROM cofepris_farmacias_by_municipio;`,
   );
+  assertRelationsExist(config.dbContainer, COFEPRIS_RELATIONS);
 
   // Stress-test: force evaluation of view CASTs (qa-audit W1 from v0.2.6).
   execFileSync(

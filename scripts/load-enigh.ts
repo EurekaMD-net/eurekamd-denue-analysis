@@ -18,9 +18,11 @@
  * household-level rolled-up summary with all 126 derived income/expense
  * variables) since that's the canonical source for state aggregation.
  *
- * Behavior:
- *   1. Drop+create enigh_concentradohogar_raw (126 TEXT cols) idempotently.
- *   2. \copy CSV in (~91k household rows for ENIGH 2024).
+ * Behavior (steps 1-3 run as ONE psql --single-transaction session, audit
+ * #145 — a failed \copy leaves the live raw table and calibrators untouched):
+ *   1. Drop+create enigh_concentradohogar_raw_staging (126 TEXT cols).
+ *   2. \copy CSV into staging (~91k household rows for ENIGH 2024), swap it
+ *      in, index it.
  *   3. Drop+create calibrators_enigh_state (32 rows, parameter table) with
  *      weighted aggregations: factor-weighted mean income/expense, weighted
  *      decile cuts (P10/P50/P90), and per-category expense shares.
@@ -32,6 +34,12 @@
 
 import { execFileSync } from "node:child_process";
 import { openSync, readSync, closeSync } from "node:fs";
+import {
+  assertRelationsExist,
+  postLoadGrants,
+  runPsqlScript,
+  swapInStagingSql,
+} from "./_psql-tx.js";
 
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const ANIO_RE = /^(19|20)[0-9]{2}$/;
@@ -221,13 +229,17 @@ export function expectEnighHeader(headerLine: string): void {
   }
 }
 
+// Builds the `_staging` table; the reload swaps it in (audit #145). The
+// index is created after the swap: its name must not collide with the live
+// table's index while both tables exist.
 const ENIGH_RAW_DDL = `
-DROP TABLE IF EXISTS enigh_concentradohogar_raw CASCADE;
-CREATE TABLE enigh_concentradohogar_raw (
+DROP TABLE IF EXISTS enigh_concentradohogar_raw_staging;
+CREATE TABLE enigh_concentradohogar_raw_staging (
   ${ENIGH_CONCENTRADOHOGAR_COLUMNS.map((c) => `${c} TEXT`).join(",\n  ")}
 );
-CREATE INDEX idx_enigh_ubica_geo ON enigh_concentradohogar_raw (LEFT(ubica_geo, 2));
 `;
+
+const ENIGH_RAW_INDEX_SQL = `CREATE INDEX idx_enigh_ubica_geo ON enigh_concentradohogar_raw (LEFT(ubica_geo, 2));`;
 
 export const ENIGH_RAW_DDL_FOR_TEST = ENIGH_RAW_DDL;
 
@@ -356,6 +368,21 @@ export function calibratorsDdlForTest(year: number): string {
   return calibratorsDdl(year);
 }
 
+/**
+ * The single-transaction reload script (audit #145): \copy into staging,
+ * swap (no dependents), index, calibrators, grants.
+ */
+export function buildEnighReloadSql(containerPath: string, year: number): string {
+  return [
+    ENIGH_RAW_DDL,
+    `\\copy enigh_concentradohogar_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
+    swapInStagingSql("enigh_concentradohogar_raw", []),
+    ENIGH_RAW_INDEX_SQL,
+    calibratorsDdl(year),
+    postLoadGrants(["enigh_concentradohogar_raw"]),
+  ].join("\n");
+}
+
 export interface LoadEnighConfig {
   csvPath: string;
   dbContainer: string;
@@ -384,25 +411,8 @@ export async function loadEnigh(
 
   const started = Date.now();
 
-  // 1. Create raw table
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      ENIGH_RAW_DDL,
-    ],
-    { encoding: "utf-8", timeout: 120_000 },
-  );
-
-  // 2. Copy CSV via temp container path
+  // 1-3. One transaction: staging DDL → \copy → swap → index →
+  //      calibrators (year inlined; pre-validated by ANIO_RE) → grants.
   const containerPath = `/tmp/enigh_raw_${Date.now()}.csv`;
   execFileSync(
     "docker",
@@ -410,20 +420,10 @@ export async function loadEnigh(
     { encoding: "utf-8", timeout: 5 * 60_000 },
   );
   try {
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-c",
-        `\\copy enigh_concentradohogar_raw FROM '${containerPath}' WITH (FORMAT csv, HEADER true)`,
-      ],
-      { encoding: "utf-8", timeout: 10 * 60_000 },
+    runPsqlScript(
+      config.dbContainer,
+      buildEnighReloadSql(containerPath, config.year),
+      15 * 60_000,
     );
   } finally {
     try {
@@ -436,24 +436,6 @@ export async function loadEnigh(
       // best-effort
     }
   }
-
-  // 3. Build calibrators table (year inlined; pre-validated by ANIO_RE)
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-c",
-      calibratorsDdl(config.year),
-    ],
-    { encoding: "utf-8", timeout: 5 * 60_000 },
-  );
 
   // 4. Counts
   const cnt = (sql: string): number => {
@@ -484,6 +466,10 @@ export async function loadEnigh(
   const calibrators_rows = cnt(
     `SELECT COUNT(*) FROM calibrators_enigh_state WHERE ano_levantamiento = ${config.year};`,
   );
+  assertRelationsExist(config.dbContainer, [
+    "enigh_concentradohogar_raw",
+    "calibrators_enigh_state",
+  ]);
   return { raw_rows, calibrators_rows, duration_ms: Date.now() - started };
 }
 

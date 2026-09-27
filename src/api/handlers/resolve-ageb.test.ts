@@ -3,11 +3,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 // vi.mock is hoisted above all imports — define the mock via vi.hoisted so
 // the factory can reference it (same bridge as sibling handler tests).
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
-  execFileSync: mockExec,
-  execFile: vi.fn(),
-}));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
@@ -48,7 +48,14 @@ describe("GET /resolve/ageb", () => {
     // point goes into ST_MakePoint as (lon, lat) — pin the order
     const sql = mockExec.mock.calls[0]![1].at(-1) as string;
     expect(sql).toContain("ST_MakePoint(-99.1332, 19.4326)");
-    expect(sql).toContain("ST_Contains");
+    // #71: boundary points must resolve (ST_Contains excludes the boundary)
+    // and the pick between two touching AGEBs must be deterministic.
+    expect(sql).toContain("ST_Intersects(geom, ST_SetSRID(ST_MakePoint(");
+    expect(sql).not.toContain("ST_Contains");
+    expect(sql).toMatch(/ORDER BY cvegeo\s+LIMIT 1/);
+    // #26: the URL carries the caller's geocode — never shared-cacheable.
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=86400");
+    expect(res.headers.get("Vary")).toBe("Authorization, X-Api-Key");
   });
 
   it("passes rural 9-char cvegeos through and preserves ambito", async () => {
