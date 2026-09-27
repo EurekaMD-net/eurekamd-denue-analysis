@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import ReactECharts from "../lib/echarts-core";
 import { useMunicipiosAnalytics } from "../api/queries";
 import { ChartCard } from "./ChartCard";
@@ -8,6 +8,9 @@ interface Props {
   entidad: string | null;
   entidadNombre?: string;
 }
+
+// Module scope so the memoized option keeps one formatter identity.
+const per100kValueFormatter = (v: number) => `${v.toFixed(1)} / 100k hab`;
 
 /**
  * Cobertura de salud per 100k habitantes — top 10 municipios in entidad
@@ -19,7 +22,10 @@ interface Props {
  *   - Long CLUES, short farma → public-only zone, low private demand
  *   - Both short        → desierto de salud
  */
-export function SaludCobertura({ entidad, entidadNombre }: Props) {
+export const SaludCobertura = memo(function SaludCobertura({
+  entidad,
+  entidadNombre,
+}: Props) {
   const { data, isLoading, isError, error } = useMunicipiosAnalytics(entidad);
 
   const { labels, clues_per_100k, farmacias_per_100k } = useMemo(() => {
@@ -43,57 +49,62 @@ export function SaludCobertura({ entidad, entidadNombre }: Props) {
     };
   }, [data]);
 
-  const option = {
-    ...ECHARTS_BASE,
-    legend: {
-      data: ["Unidades CLUES", "Farmacias DENUE"],
-      textStyle: { color: COLOR.textMuted, fontSize: 11 },
-      top: 0,
-      itemWidth: 12,
-      itemHeight: 10,
-    },
-    tooltip: {
-      ...ECHARTS_BASE.tooltip,
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      valueFormatter: (v: number) => `${v.toFixed(1)} / 100k hab`,
-    },
-    grid: { left: 140, right: 16, top: 28, bottom: 24 },
-    xAxis: {
-      type: "value",
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: { ...ECHARTS_AXIS_DARK.axisLabel },
-    },
-    yAxis: {
-      type: "category",
-      data: labels,
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: {
-        ...ECHARTS_AXIS_DARK.axisLabel,
-        fontFamily:
-          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        fontSize: 10,
-        width: 130,
-        overflow: "truncate",
+  // Memoized on the data so an unrelated parent render does not hand
+  // ReactECharts a new notMerge option (which resets legend toggles).
+  const option = useMemo(
+    () => ({
+      ...ECHARTS_BASE,
+      legend: {
+        data: ["Unidades CLUES", "Farmacias DENUE"],
+        textStyle: { color: COLOR.textMuted, fontSize: 11 },
+        top: 0,
+        itemWidth: 12,
+        itemHeight: 10,
       },
-    },
-    series: [
-      {
-        name: "Unidades CLUES",
-        type: "bar",
-        data: clues_per_100k,
-        itemStyle: { color: COLOR.grado["Muy bajo"] }, // emerald
-        barMaxWidth: 14,
+      tooltip: {
+        ...ECHARTS_BASE.tooltip,
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        valueFormatter: per100kValueFormatter,
       },
-      {
-        name: "Farmacias DENUE",
-        type: "bar",
-        data: farmacias_per_100k,
-        itemStyle: { color: COLOR.accent }, // cyan
-        barMaxWidth: 14,
+      grid: { left: 140, right: 16, top: 28, bottom: 24 },
+      xAxis: {
+        type: "value",
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: { ...ECHARTS_AXIS_DARK.axisLabel },
       },
-    ],
-  };
+      yAxis: {
+        type: "category",
+        data: labels,
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: {
+          ...ECHARTS_AXIS_DARK.axisLabel,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 10,
+          width: 130,
+          overflow: "truncate",
+        },
+      },
+      series: [
+        {
+          name: "Unidades CLUES",
+          type: "bar",
+          data: clues_per_100k,
+          itemStyle: { color: COLOR.grado["Muy bajo"] }, // emerald
+          barMaxWidth: 14,
+        },
+        {
+          name: "Farmacias DENUE",
+          type: "bar",
+          data: farmacias_per_100k,
+          itemStyle: { color: COLOR.accent }, // cyan
+          barMaxWidth: 14,
+        },
+      ],
+    }),
+    [labels, clues_per_100k, farmacias_per_100k],
+  );
 
   return (
     <ChartCard
@@ -125,4 +136,4 @@ export function SaludCobertura({ entidad, entidadNombre }: Props) {
       />
     </ChartCard>
   );
-}
+});

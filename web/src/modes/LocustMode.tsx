@@ -17,6 +17,7 @@ import {
   type FieldDef,
 } from "../lib/fields";
 import { LOCUST_PRESETS, type LocustPreset } from "../lib/presets";
+import { escapeHtml } from "../lib/escape-html";
 
 type AxisSlot = "x" | "y" | "z";
 
@@ -1012,7 +1013,7 @@ export function buildEChartsOption(
     // Every chart type stores z on its data item (scatter's value[2] is
     // the same number), so one read covers bar, line, treemap and scatter.
     const zLabel = zAxisName ? `<br/>${zAxisName}: ${fmt(single.data?.z)}` : "";
-    return `<b>${name}</b><br/>${yAxisName}: ${fmt(v)}${zLabel}`;
+    return `<b>${escapeHtml(name)}</b><br/>${yAxisName}: ${fmt(v)}${zLabel}`;
   };
 
   if (chartType === "bar") {

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import ReactECharts from "../lib/echarts-core";
 import { useSectorGradeMatrix, useSectors } from "../api/queries";
 import type { IrsGrado } from "../api/types";
@@ -9,6 +9,21 @@ import {
   ECHARTS_AXIS_DARK,
   IRS_GRADO_ORDER,
 } from "./theme";
+import { escapeHtml } from "../lib/escape-html";
+
+// Module scope: built once per sector list inside the memoized option.
+export const sectorGradeTooltipFormatter =
+  (sectorList: string[]) => (p: { data: [number, number, number] }) => {
+    const [x, y, v] = p.data;
+    const grado = IRS_GRADO_ORDER[x] as IrsGrado;
+    const scian = sectorList[y];
+    return (
+      `<b>SCIAN ${escapeHtml(scian)}</b> · <b>${escapeHtml(grado)}</b><br/>` +
+      `${v.toLocaleString("es-MX")} establecimientos`
+    );
+  };
+
+const gradoAxisLabel = (v: string) => (v === "sin_dato" ? "s/d" : v);
 
 /**
  * SCIAN sector × IRS grade heatmap. Rows are SCIAN 2-digit sectors
@@ -16,7 +31,7 @@ import {
  * order. Cell color = log-scaled count. Reads at a glance which sectors
  * structurally live in higher-rezago municipios.
  */
-export function SectorGradeMatrix() {
+export const SectorGradeMatrix = memo(function SectorGradeMatrix() {
   const { data, isLoading, isError, error } = useSectorGradeMatrix();
   const { data: sectors } = useSectors();
 
@@ -51,83 +66,81 @@ export function SectorGradeMatrix() {
     return { grid: matrix, sectorList: knownScians, max: mx };
   }, [data, sectors]);
 
-  // ECharts heatmap data: [xIdx, yIdx, value]
-  const heatData: Array<[number, number, number]> = [];
-  for (let y = 0; y < grid.length; y++) {
-    const row = grid[y]!;
-    for (let x = 0; x < row.length; x++) {
-      heatData.push([x, y, row[x]!]);
+  // Memoized on the matrix so an unrelated parent render does not hand
+  // ReactECharts a new notMerge option (full rebuild + animation replay).
+  const option = useMemo(() => {
+    // ECharts heatmap data: [xIdx, yIdx, value]
+    const heatData: Array<[number, number, number]> = [];
+    for (let y = 0; y < grid.length; y++) {
+      const row = grid[y]!;
+      for (let x = 0; x < row.length; x++) {
+        heatData.push([x, y, row[x]!]);
+      }
     }
-  }
 
-  const option = {
-    ...ECHARTS_BASE,
-    grid: { left: 36, right: 8, top: 24, bottom: 60 },
-    tooltip: {
-      ...ECHARTS_BASE.tooltip,
-      formatter: (p: { data: [number, number, number] }) => {
-        const [x, y, v] = p.data;
-        const grado = IRS_GRADO_ORDER[x] as IrsGrado;
-        const scian = sectorList[y];
-        return (
-          `<b>SCIAN ${scian}</b> · <b>${grado}</b><br/>` +
-          `${v.toLocaleString("es-MX")} establecimientos`
-        );
+    return {
+      ...ECHARTS_BASE,
+      grid: { left: 36, right: 8, top: 24, bottom: 60 },
+      tooltip: {
+        ...ECHARTS_BASE.tooltip,
+        formatter: sectorGradeTooltipFormatter(sectorList),
       },
-    },
-    xAxis: {
-      type: "category",
-      data: IRS_GRADO_ORDER,
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: {
-        ...ECHARTS_AXIS_DARK.axisLabel,
-        rotate: 30,
-        formatter: (v: string) => (v === "sin_dato" ? "s/d" : v),
+      xAxis: {
+        type: "category",
+        data: IRS_GRADO_ORDER,
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: {
+          ...ECHARTS_AXIS_DARK.axisLabel,
+          rotate: 30,
+          formatter: gradoAxisLabel,
+        },
+        splitArea: { show: false },
       },
-      splitArea: { show: false },
-    },
-    yAxis: {
-      type: "category",
-      data: sectorList,
-      ...ECHARTS_AXIS_DARK,
-      axisLabel: {
-        ...ECHARTS_AXIS_DARK.axisLabel,
-        fontFamily:
-          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      yAxis: {
+        type: "category",
+        data: sectorList,
+        ...ECHARTS_AXIS_DARK,
+        axisLabel: {
+          ...ECHARTS_AXIS_DARK.axisLabel,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        },
       },
-    },
-    visualMap: {
-      type: "continuous",
-      min: 0,
-      max,
-      // Log-ish scaling so 1.5M doesn't drown 5k cells
-      inRange: {
-        color: [
-          COLOR.panelMuted,
-          "#0e7490", // cyan-700
-          "#22d3ee", // cyan-400
-          "#facc15", // yellow-400
-          "#fb7185", // rose-400
-        ],
+      visualMap: {
+        type: "continuous",
+        min: 0,
+        max,
+        // Log-ish scaling so 1.5M doesn't drown 5k cells
+        inRange: {
+          color: [
+            COLOR.panelMuted,
+            "#0e7490", // cyan-700
+            "#22d3ee", // cyan-400
+            "#facc15", // yellow-400
+            "#fb7185", // rose-400
+          ],
+        },
+        text: ["alta", "baja"],
+        textStyle: { color: COLOR.textMuted, fontSize: 10 },
+        orient: "horizontal",
+        left: "center",
+        bottom: 0,
+        itemWidth: 12,
+        itemHeight: 100,
       },
-      text: ["alta", "baja"],
-      textStyle: { color: COLOR.textMuted, fontSize: 10 },
-      orient: "horizontal",
-      left: "center",
-      bottom: 0,
-      itemWidth: 12,
-      itemHeight: 100,
-    },
-    series: [
-      {
-        type: "heatmap",
-        data: heatData,
-        progressive: 200,
-        progressiveThreshold: 200,
-        emphasis: { itemStyle: { borderColor: COLOR.accent, borderWidth: 1 } },
-      },
-    ],
-  };
+      series: [
+        {
+          type: "heatmap",
+          data: heatData,
+          progressive: 200,
+          progressiveThreshold: 200,
+          emphasis: {
+            itemStyle: { borderColor: COLOR.accent, borderWidth: 1 },
+          },
+        },
+      ],
+    };
+  }, [grid, sectorList, max]);
 
   return (
     <ChartCard
@@ -146,4 +159,4 @@ export function SectorGradeMatrix() {
       />
     </ChartCard>
   );
-}
+});

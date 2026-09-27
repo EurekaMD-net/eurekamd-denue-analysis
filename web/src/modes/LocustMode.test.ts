@@ -718,6 +718,25 @@ describe("buildEChartsOption tooltip (#171 — Z is readable on every chart type
   });
 });
 
+describe("buildEChartsOption tooltip escapes the X label (#193)", () => {
+  const XSS = "<img src=x onerror=alert(1)>";
+  for (const chartType of ["bar", "scatter", "treemap", "line"]) {
+    it(`${chartType}: an HTML X label comes out as inert text`, () => {
+      const option = buildEChartsOption(
+        chartType,
+        [{ x: XSS, y: 1, z: null }],
+        axisState("denue.municipio_nombre"),
+        axisState("denue.total_establecimientos"),
+        axisState(null),
+      );
+      const tooltip = option.tooltip as { formatter: (p: unknown) => string };
+      const html = tooltip.formatter({ name: XSS, value: 1, data: {} });
+      expect(html).not.toContain("<img");
+      expect(html).toMatch(/^<b>&lt;img src=x onerror=alert\(1\)&gt;<\/b>/);
+    });
+  }
+});
+
 describe("computeZRange (W3 audit fix — precomputed range)", () => {
   it("returns null when no row has a finite z", () => {
     expect(
