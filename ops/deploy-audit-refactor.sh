@@ -7,6 +7,7 @@
 #   deploy-audit-refactor.sh deploy [--hold-heavy] # steps 0-4, 6, 7, 8, 11 smoke (one window, off-hours)
 #   deploy-audit-refactor.sh gotrue               # step 5 / G2: close self-signup (shared instance)
 #   deploy-audit-refactor.sh verify               # step 11 read-only checks
+#   deploy-audit-refactor.sh finish               # resume after a drop during step 4: MV refresh, 020, steps 6-8, smoke
 #   deploy-audit-refactor.sh all                  # push + deploy + verify (tag must already be done)
 #
 # NOT automated on purpose (shared infra, needs coordination): step 9 (Caddy paste) and
@@ -115,6 +116,12 @@ phase_deploy() {
     phase_heavy
   fi
 
+  phase_cutover
+}
+
+# steps 6, 7, 8 + smoke: the restart window proper
+phase_cutover() {
+  cd "$MAIN"
   log "step 6: systemd drop-ins (take effect at the restart)"
   mkdir -p /etc/systemd/system/$UNIT.service.d
   printf '[Service]\nEnvironment=TRUST_PROXY=1\n' > /etc/systemd/system/$UNIT.service.d/trust-proxy.conf
@@ -144,6 +151,28 @@ phase_deploy() {
 
   phase_smoke
   print_manual
+}
+
+# Resume after a terminal drop during step 4 (merge, roles, 024..002, 009, 014 already applied).
+# Idempotent: refresh-matviews and 020 (validity guard) are safe to re-run.
+phase_finish() {
+  log "finish: pre-checks"
+  cd "$MAIN"
+  [[ $(git rev-parse --short HEAD) != "$BASE_SHA" ]] || die "main is still at $BASE_SHA (not merged); run 'deploy' instead"
+  git merge-base --is-ancestor HEAD "$BRANCH" || die "main is not on the $BRANCH history"
+  git merge --ff-only "$BRANCH"
+  [[ $("${PSQL_RO[@]}" "SELECT coalesce((SELECT indisvalid::text FROM pg_index WHERE indexrelid=to_regclass('idx_estab_nombre_trgm')),'missing')") == t ]] || die "009 trigram index missing/invalid: run '$0 heavy' instead"
+  local left; left=$("${PSQL_RO[@]}" "SELECT count(*) FROM establecimientos WHERE entidad='09' AND clase_actividad_id='464111' AND clase_actividad NOT ILIKE '%farmacia%'")
+  [[ $left -eq 0 ]] || die "014 backfill incomplete ($left rows left): re-run $M/014-estab-scian-municipio-backfill.sql, then '$0 finish'"
+  local busy; busy=$("${PSQL_RO[@]}" "SELECT count(*) FROM pg_stat_activity WHERE datname='postgres' AND state<>'idle' AND pid<>pg_backend_pid() AND query NOT ILIKE '%pg_stat_activity%'")
+  [[ $busy -eq 0 ]] || die "$busy active DB session(s); let them finish first"
+  systemctl stop denue-matview-refresh.timer
+  ok "code merged, 009 valid, 014 complete, DB idle"
+  log "refresh every MV after the backfill"
+  ./scripts/refresh-matviews.sh
+  log "020 index hygiene"
+  sqlf "$M/020-indexes.sql"
+  phase_cutover
 }
 
 # 009 -> 014 -> 020, in that order (heavy IO on the 13 GB heap)
@@ -244,6 +273,7 @@ case ${1:-} in
   heavy)  phase_heavy ;;
   gotrue) phase_gotrue ;;
   verify) phase_verify ;;
+  finish) phase_finish ;;
   all)    phase_push; phase_deploy; phase_verify ;;
   *)      sed -n '2,14p' "$0"; exit 1 ;;
 esac
