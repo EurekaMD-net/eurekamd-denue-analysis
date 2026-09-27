@@ -249,10 +249,16 @@ export function MapMode() {
 
         {activePickedLayers.length > 0 && (
           <div className="border-t border-slate-800 px-3 py-2">
-            <BivariateLegend
-              layers={activePickedLayers}
-              values={layerValues.data?.values}
-            />
+            {grain === "ageb" && entidad === null ? (
+              <div className="font-mono text-[10px] text-amber-400">
+                Elige una entidad para ver capas por AGEB
+              </div>
+            ) : (
+              <BivariateLegend
+                layers={activePickedLayers}
+                values={layerValues.data?.values}
+              />
+            )}
           </div>
         )}
 

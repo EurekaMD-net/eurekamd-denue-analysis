@@ -16,6 +16,26 @@ export interface LayerValuesResult {
   values: Record<string, Record<string, number | null>>;
 }
 
+/**
+ * Whether the layers/values request may fire. The ageb grain requires an
+ * entidad: the API rejects a national AGEB request (400
+ * param.entidad_required_for_ageb) because it is a multi-MB payload that
+ * only feeds the legend tertiles (audit #173 / #25).
+ */
+export function layerValuesEnabled(
+  accessToken: string | null,
+  grain: "muni" | "ageb",
+  layers: string[],
+  entidad: string | null,
+): boolean {
+  return (
+    accessToken !== null &&
+    layers.length > 0 &&
+    layers.length <= 3 &&
+    (grain === "muni" || entidad !== null)
+  );
+}
+
 export function useLayerValues(
   grain: "muni" | "ageb",
   layers: string[],
@@ -31,7 +51,7 @@ export function useLayerValues(
       const res = await apiFetch(`/analytics/layers/values?${sp}`, {}, accessToken);
       return res.json() as Promise<LayerValuesResult>;
     },
-    enabled: accessToken !== null && layers.length > 0 && layers.length <= 3,
+    enabled: layerValuesEnabled(accessToken, grain, layers, entidad),
     staleTime: 5 * 60 * 1000,
   });
 }
