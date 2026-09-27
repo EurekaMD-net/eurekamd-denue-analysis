@@ -1,36 +1,25 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { buildSectorFilter, parseSectorParam } from "./tiles.js";
 
-// Tile handler runs psql via promisify(execFile) — async — so the mock has
-// to honor the callback-style API that promisify wraps. mockExec records the
-// (file, args, options) it was called with, then invokes the callback with
-// { stdout, stderr } shaped like the real execFile callback. Tests set the
-// resolved stdout via mockExec.__stdout (default ""), or simulate failure via
+// Tile handler runs psql via the shared runner (async spawn, SQL on
+// stdin). The bridge (psql-bridge.test-helper.ts) routes each call into
+// mockExec(file, args, opts) with the SQL appended as the last arg; the
+// return value becomes stdout, a throw becomes a non-zero exit. Tests set
+// the stdout via mockExec.__stdout (default ""), or simulate failure via
 // mockExec.__error.
 const { mockExec } = vi.hoisted(() => {
-  const fn = vi.fn(
-    (
-      _file: string,
-      _args: string[],
-      _opts: unknown,
-      cb: (
-        err: Error | null,
-        result: { stdout: string; stderr: string },
-      ) => void,
-    ) => {
-      const err = (fn as unknown as { __error?: Error }).__error;
-      if (err) return cb(err, { stdout: "", stderr: "" });
-      const stdout = (fn as unknown as { __stdout?: string }).__stdout ?? "";
-      cb(null, { stdout, stderr: "" });
-    },
-  );
+  const fn = vi.fn((_file: string, _args: string[], _opts: unknown) => {
+    const err = (fn as unknown as { __error?: Error }).__error;
+    if (err) throw err;
+    return (fn as unknown as { __stdout?: string }).__stdout ?? "";
+  });
   return { mockExec: fn };
 });
-vi.mock("node:child_process", () => ({
-  execFile: mockExec,
-  execFileSync: vi.fn(),
-  execSync: vi.fn(),
-}));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
@@ -336,6 +325,18 @@ describe("buildSectorFilter (RH-5)", () => {
     const res = await app.request("/tiles/12/1900/2300.mvt", { headers: AUTH });
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
-    expect(body.code).toBe("postgis.error");
+    // Audit P08: shared runner error shape (was postgis.error).
+    expect(body.code).toBe("postgres.error");
+  });
+
+  it("statement_timeout reaches the container via docker exec -e (audit #94/#130)", async () => {
+    const app = createServer(CONFIG);
+    await app.request("/tiles/12/1900/2300.mvt", { headers: AUTH });
+    // Old code set PGOPTIONS in the host env, which docker exec never
+    // forwards; there was no -e flag in the argv.
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const i = argList.indexOf("-e");
+    expect(i).toBeGreaterThan(0);
+    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
   });
 });

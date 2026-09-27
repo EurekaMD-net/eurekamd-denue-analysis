@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  afterEach,
+  beforeEach,
+  type Mock,
+} from "vitest";
 // clusterBySector imported dynamically per-test below so vi.doMock("node:child_process")
 // applies fresh mocks to each invocation; static-imported binding bypasses doMock.
 import { formatClusters } from "./cluster-by-sector.js";
@@ -9,16 +17,18 @@ const BASE_CONFIG = {
   dbContainer: "test-supabase-db",
 };
 
-let mockExec: ReturnType<typeof vi.fn>;
+let mockExec: Mock;
 
 beforeEach(() => {
   mockExec = vi.fn();
-  // Audit C1-sec round-1 closure 2026-05-10: cluster-by-sector.ts switched
-  // from execSync (raw shell) to execFileSync (array-arg form).
-  vi.doMock("node:child_process", () => ({
-    execSync: vi.fn(),
-    execFileSync: mockExec,
-  }));
+  // Audit P08: cluster-by-sector.ts runs on the shared psql runner (async
+  // spawn, SQL on stdin). The bridge routes each call into mockExec with the
+  // SQL appended as the last recorded arg.
+  vi.doMock("node:child_process", async () =>
+    (await import("../api/db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+      mockExec,
+    ),
+  );
 });
 
 afterEach(() => {
@@ -86,13 +96,13 @@ describe("clusterBySector — psql interaction", () => {
     });
 
     expect(mockExec).toHaveBeenCalledOnce();
-    // execFileSync(file, args, opts): file is "docker", args[1] is the
-    // container, args[-1] is the SQL string.
+    // spawn(file, args): file is "docker", args carries the container,
+    // args[-1] is the stdin SQL (appended by the bridge).
     const file = mockExec.mock.calls[0]?.[0] as string;
     const args = mockExec.mock.calls[0]?.[1] as string[];
     expect(file).toBe("docker");
     expect(args[0]).toBe("exec");
-    expect(args[1]).toBe("test-supabase-db");
+    expect(args).toContain("test-supabase-db");
     expect(args).toContain("psql");
     const sql = args[args.length - 1] ?? "";
     expect(sql).toContain("ST_ClusterKMeans");
@@ -126,7 +136,29 @@ describe("clusterBySector — psql interaction", () => {
       { entidad: "06", scianPrefix: "62", k: 3 },
     );
     const args = mockExec.mock.calls[0]?.[1] as string[];
-    expect(args[1]).toBe("supabase-db");
+    expect(args).toContain("supabase-db");
+  });
+
+  it("statement_timeout=50s reaches the container via docker exec -e (audit #94/#130)", async () => {
+    mockExec.mockReturnValue("[]");
+    const { clusterBySector: cbs } = await import("./cluster-by-sector.js");
+    await cbs(BASE_CONFIG, { entidad: "06", scianPrefix: "62", k: 3 });
+    // Old code set PGOPTIONS in the host env (never forwarded by docker
+    // exec) and had no -e flag.
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const i = args.indexOf("-e");
+    expect(i).toBeGreaterThan(0);
+    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=50000/);
+  });
+
+  it("psql failure rejects with a 502 postgres.error HttpError (audit #54)", async () => {
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error("boom"), { stderr: "ERROR: canceling" });
+    });
+    const { clusterBySector: cbs } = await import("./cluster-by-sector.js");
+    await expect(
+      cbs(BASE_CONFIG, { entidad: "06", scianPrefix: "62", k: 3 }),
+    ).rejects.toMatchObject({ status: 502, code: "postgres.error" });
   });
 });
 

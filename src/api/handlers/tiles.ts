@@ -30,12 +30,9 @@
  * unparsed.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { Context } from "hono";
-
-const execFileAsync = promisify(execFile);
 import { HttpError } from "../middleware/error.js";
+import { runSql } from "../db/psql-runner.js";
 import {
   ENTIDAD_RE,
   MAX_TILE_ZOOM,
@@ -254,39 +251,16 @@ async function buildTile(
     `  FROM filtered f` +
     `) SELECT encode(ST_AsMVT(mvt_geom, 'establecimientos'), 'base64') FROM mvt_geom;`;
 
-  let stdout: string;
-  try {
-    const result = await execFileAsync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-t",
-        "-A",
-        "-c",
-        sql,
-      ],
-      {
-        encoding: "utf-8",
-        timeout: 30_000,
-        maxBuffer: 50 * 1024 * 1024,
-        // Audit C3-perf round-1 closure 2026-05-10: tile generation runs
-        // ST_AsMVT on PostGIS-indexed geometry — typically <500ms but can
-        // spike under high-density urban tiles. 25s backend timeout is
-        // conservative; spawn timeout (30s) catches the kill cleanly.
-        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
-      },
-    );
-    stdout = result.stdout.trim();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new HttpError(`tile generation failed: ${msg}`, 502, "postgis.error");
-  }
+  // Audit #94/#130: the shared runner carries statement_timeout via
+  // `docker exec -e PGOPTIONS` (the host-env PGOPTIONS never reached the
+  // container) and cancels the backend on client timeout. psql failures
+  // surface as a generic 502 postgres.error.
+  const stdout = (
+    await runSql(sql, {
+      container: config.dbContainer,
+      maxBuffer: 50 * 1024 * 1024,
+    })
+  ).trim();
 
   if (!stdout) {
     // Empty tile is valid — return a zero-byte MVT (empty layer).

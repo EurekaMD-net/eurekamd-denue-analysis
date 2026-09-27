@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execFileSync: mockExec,
-  execSync: vi.fn(),
-  // tiles.ts (transitively imported via server.ts) uses promisify(execFile);
-  // never called from this file but the mock must export it so module load
-  // succeeds.
-  execFile: vi.fn(),
-}));
+// Audit P08: the handler runs on the shared psql runner (async spawn, SQL
+// on stdin). The bridge routes it into mockExec and appends the SQL as the
+// last recorded arg.
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig, SectorsResult } from "../types.js";
@@ -66,7 +66,7 @@ describe("GET /sectors", () => {
     expect(anomaly?.national_count).toBe(1);
   });
 
-  it("uses execFileSync (no shell injection surface)", async () => {
+  it("uses an args array with the SQL on stdin (no shell injection surface)", async () => {
     mockExec.mockReturnValue(JSON.stringify([{ scian: "46", count: 100 }]));
     const app = createServer(CONFIG);
     await app.request("/sectors", { headers: AUTH });
@@ -82,6 +82,16 @@ describe("GET /sectors", () => {
     const sql = argList[argList.length - 1];
     expect(sql).toMatch(/sector_actividad_id/);
     expect(sql).not.toMatch(/SUBSTR\(clee/);
+  });
+
+  it("statement_timeout reaches the container via docker exec -e (audit #94/#130)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/sectors", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const i = argList.indexOf("-e");
+    expect(i).toBeGreaterThan(0);
+    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
   });
 
   it("returns empty array when DB returns null", async () => {

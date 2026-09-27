@@ -1,7 +1,22 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+
+// Audit P08: the handler runs on the shared psql runner (async spawn, SQL
+// on stdin). The bridge routes each call into mockExec and appends the SQL
+// as the last recorded arg.
+const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
+
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
-import { MAP_LAYER_REGISTRY, SAFE_LAYER_ID_RE } from "./layers-values.js";
+import {
+  MAP_LAYER_REGISTRY,
+  SAFE_LAYER_ID_RE,
+  _resetLayerValuesMemo,
+} from "./layers-values.js";
 
 const CONFIG: ApiServerConfig = {
   supabaseUrl: "http://localhost:8100",
@@ -11,7 +26,16 @@ const CONFIG: ApiServerConfig = {
 };
 const AUTH = { "X-Api-Key": "key" };
 
+beforeEach(() => {
+  mockExec.mockReset();
+  _resetLayerValuesMemo();
+});
 afterEach(() => vi.restoreAllMocks());
+
+function lastSql(): string {
+  const args = mockExec.mock.calls.at(-1)?.[1] as string[];
+  return args[args.length - 1] ?? "";
+}
 
 describe("MAP_LAYER_REGISTRY contract (R1 audit pins)", () => {
   it("SESNSP-backed layers exclude catch-all 99[89] rows", () => {
@@ -153,5 +177,156 @@ describe("GET /analytics/layers/values — input validation", () => {
       "/analytics/layers/values?grain=muni&layers=pobreza_pct",
     );
     expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /analytics/layers/values — query execution (audit P05/P08)", () => {
+  it("inlines the validated entidad literal; no :'var' and no -v entidad (#22/#33)", async () => {
+    mockExec.mockReturnValue('{"09002":{"pobreza_pct":25.4}}');
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct&entidad=09",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = lastSql();
+    // psql never expands :'entidad' inside -c — the old SQL was a syntax
+    // error on every entidad-scoped request.
+    expect(sql).not.toContain(":'");
+    expect(sql).toContain("LEFT(cve_mun, 2) = '09'");
+    expect(args.slice(0, -1).some((a) => a.startsWith("entidad="))).toBe(
+      false,
+    );
+    expect(args).not.toContain("-c");
+  });
+
+  it("statement_timeout reaches the container via docker exec -e (#94)", async () => {
+    mockExec.mockReturnValue("{}");
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct",
+      { headers: AUTH },
+    );
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const i = args.indexOf("-e");
+    expect(args[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
+  });
+
+  it("requires entidad for grain=ageb (#25)", async () => {
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=ageb&layers=pobtot_ageb",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("param.entidad_required_for_ageb");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("sources the AGEB key universe from cve_ent, no DISTINCT scan (#102)", async () => {
+    mockExec.mockReturnValue("{}");
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=ageb&layers=pobtot_ageb&entidad=14",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    const sql = lastSql();
+    expect(sql).toContain(
+      "keys AS (SELECT cvegeo AS k FROM ageb_polygons WHERE cve_ent = '14')",
+    );
+    expect(sql).not.toContain("SELECT DISTINCT cvegeo");
+  });
+
+  it("returns the psql JSON as-is inside {grain, layers, values} (#102)", async () => {
+    mockExec.mockReturnValue('{"09002":{"pobreza_pct":25.4,"irs_indice":null}}\n');
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct,irs_indice&entidad=09",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.json()).toEqual({
+      grain: "muni",
+      layers: ["pobreza_pct", "irs_indice"],
+      values: { "09002": { pobreza_pct: 25.4, irs_indice: null } },
+    });
+  });
+
+  it("empty psql output yields values {}", async () => {
+    mockExec.mockReturnValue("");
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct",
+      { headers: AUTH },
+    );
+    expect(((await res.json()) as { values: unknown }).values).toEqual({});
+  });
+
+  it("memoizes per (grain, sorted layers, entidad) (#102)", async () => {
+    mockExec.mockReturnValue('{"09002":{"pobreza_pct":1,"irs_indice":2}}');
+    const app = createServer(CONFIG);
+    const r1 = await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct,irs_indice&entidad=09",
+      { headers: AUTH },
+    );
+    const r2 = await app.request(
+      "/analytics/layers/values?grain=muni&layers=irs_indice,pobreza_pct&entidad=09",
+      { headers: AUTH },
+    );
+    expect(mockExec).toHaveBeenCalledOnce();
+    const b1 = (await r1.json()) as { layers: string[]; values: unknown };
+    const b2 = (await r2.json()) as { layers: string[]; values: unknown };
+    expect(b2.values).toEqual(b1.values);
+    // The echoed layer list follows each request, not the cached one.
+    expect(b2.layers).toEqual(["irs_indice", "pobreza_pct"]);
+    // A different entidad is a different key.
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct,irs_indice&entidad=14",
+      { headers: AUTH },
+    );
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("psql failure → 502 postgres.error without psql text (#24)", async () => {
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error("boom"), {
+        stderr: 'ERROR:  syntax error at or near ":"\nLINE 1: ...FROM censo_municipios',
+      });
+    });
+    const app = createServer(CONFIG);
+    const res = await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct&entidad=09",
+      { headers: AUTH },
+    );
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe("postgres.error");
+    expect(body.error).not.toMatch(/syntax|LINE|censo/);
+  });
+
+  it("defunciones_total follows config.currentMortalityAno (#45)", async () => {
+    mockExec.mockReturnValue("{}");
+    const app = createServer({ ...CONFIG, currentMortalityAno: 2025 });
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=defunciones_total",
+      { headers: AUTH },
+    );
+    expect(lastSql()).toContain("ano = 2025");
+    expect(lastSql()).not.toContain("ano = 2024");
+  });
+
+  it("defunciones_total falls back to MORTALITY_DEFAULT_CURRENT_ANO (#45)", async () => {
+    mockExec.mockReturnValue("{}");
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=defunciones_total",
+      { headers: AUTH },
+    );
+    expect(lastSql()).toContain("ano = 2024");
   });
 });

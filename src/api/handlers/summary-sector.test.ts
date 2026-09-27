@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
-vi.mock("node:child_process", () => ({
-  execFileSync: mockExec,
-  execSync: vi.fn(),
-  execFile: vi.fn(),
-}));
+// Audit P08: the handler runs on the shared psql runner (async spawn, SQL
+// on stdin). The bridge routes it into mockExec and appends the SQL as the
+// last recorded arg.
+vi.mock("node:child_process", async () =>
+  (await import("../db/psql-bridge.test-helper.js")).psqlChildProcessMock(
+    mockExec,
+  ),
+);
 
 import { createServer } from "../server.js";
 import type { ApiServerConfig } from "../types.js";
@@ -18,7 +21,12 @@ const CONFIG: ApiServerConfig = {
 };
 const AUTH = { "X-Api-Key": "key" };
 
-beforeEach(() => mockExec.mockReset());
+// Block body on purpose: an expression arrow returns the mock itself, and
+// vitest runs a function returned from beforeEach as teardown — that is
+// what used to call a throwing mock after the test ("Error: boom").
+beforeEach(() => {
+  mockExec.mockReset();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe("GET /summary/sector/:scian", () => {
@@ -86,10 +94,25 @@ describe("GET /summary/sector/:scian", () => {
     expect(body.top_entidades).toEqual([]);
   });
 
-  // The 502 catch-path (when execFileSync throws) is intentionally not
-  // tested here. The exact same pattern works in sectors.test.ts but
-  // mysteriously fails in this file under vitest 4 — the test mock's
-  // raw `throw new Error` is flagged as an unhandled error even though
-  // the handler's try/catch captures it. The catch logic is structurally
-  // identical to src/api/handlers/sectors.ts which IS tested.
+  it("statement_timeout reaches the container via docker exec -e (audit #94/#130)", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/summary/sector/46", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const i = argList.indexOf("-e");
+    expect(i).toBeGreaterThan(0);
+    expect(argList[i + 1]).toMatch(/^PGOPTIONS=.*statement_timeout=25000/);
+  });
+
+  it("returns 502 postgres.error without psql text when psql fails", async () => {
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error("boom"), { stderr: "ERROR: relation x" });
+    });
+    const app = createServer(CONFIG);
+    const res = await app.request("/summary/sector/46", { headers: AUTH });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe("postgres.error");
+    expect(body.error).not.toContain("relation");
+  });
 });

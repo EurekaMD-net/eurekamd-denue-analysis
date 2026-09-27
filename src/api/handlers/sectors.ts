@@ -14,12 +14,11 @@
  * a server-side RPC. Same pattern as src/analysis/cluster-by-sector.ts.
  */
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Context } from "hono";
-import { HttpError } from "../middleware/error.js";
+import { runJson } from "../db/psql-runner.js";
 import {
   type ApiServerConfig,
   type SectorEntry,
@@ -94,45 +93,14 @@ async function fetchSectorCounts(
     "  ORDER BY 1" +
     ") t;";
 
-  let stdout: string;
-  try {
-    stdout = execFileSync(
-      "docker",
-      [
-        "exec",
-        config.dbContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        "postgres",
-        "-t",
-        "-A",
-        "-c",
-        sql,
-      ],
-      {
-        encoding: "utf-8",
-        timeout: 30_000,
-        // Audit C3-perf round-1 closure 2026-05-10: parity with analytics.ts
-        // — postgres backend stops the query at 25s; the 30s spawn timeout
-        // then surfaces as a clean kill instead of a stuck backend.
-        env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
-      },
-    ).trim();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new HttpError(
-      `sector aggregate failed: ${msg}`,
-      502,
-      "postgres.error",
-    );
-  }
-
-  if (!stdout || stdout === "null") return [];
-  const rows = JSON.parse(stdout) as Array<{
-    scian: string;
-    count: number | string;
-  }>;
+  // Audit #94/#130/#37: async shared runner — no event-loop block, and
+  // statement_timeout reaches Postgres via `docker exec -e PGOPTIONS`.
+  // psql failures surface as 502 postgres.error; null/empty → [].
+  const rows = await runJson<
+    Array<{
+      scian: string;
+      count: number | string;
+    }>
+  >(sql, { container: config.dbContainer });
   return rows.map((r) => [r.scian, Number(r.count)] as [string, number]);
 }

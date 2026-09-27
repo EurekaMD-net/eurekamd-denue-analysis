@@ -14,8 +14,8 @@
  * so even though we shell-quote them, there's no injection surface.
  */
 
-import { execFileSync } from "node:child_process";
 import type { AnalysisConfig } from "./types.js";
+import { runJson } from "../api/db/psql-runner.js";
 
 // Audit C1-sec round-1 closure 2026-05-10: parity with the rest of the
 // shell-out surface (sectors.ts, summary-sector.ts, search.ts, tiles.ts,
@@ -105,44 +105,15 @@ export async function clusterBySector(
     .replace(/\n\s+/g, " ")
     .trim();
 
-  // Use -t -A so psql returns just the JSON value (no headers, no padding).
-  // timeout: 60_000 ms — clustering on a large bank+sector can take a while
-  // but must be bounded so the API handler that wraps this can't be hung
-  // indefinitely (audit C2 from Phase 5: never shell-out without a timeout).
-  //
-  // Audit C1-sec round-1 closure 2026-05-10: rewrote from `execSync` with
-  // a shell-interpolated string to `execFileSync` array-arg form. No shell
-  // layer means metacharacters in container/sql cannot escape; matches the
-  // posture of every other shell-out site in the codebase. PGOPTIONS env
-  // bounds the postgres backend at 50s (parity with C3-perf fix).
-  const output = execFileSync(
-    "docker",
-    [
-      "exec",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-t",
-      "-A",
-      "-c",
-      sql,
-    ],
-    {
-      encoding: "utf-8",
-      timeout: 60_000,
-      env: { ...process.env, PGOPTIONS: "-c statement_timeout=50000" },
-    },
-  ).trim();
-
-  if (!output || output === "" || output === "null") {
-    return [];
-  }
-
-  const parsed = JSON.parse(output) as ClusterCentroid[] | null;
-  return parsed ?? [];
+  // Audit #94/#130/#54/#37: the shared async runner (no shell layer, SQL
+  // on stdin) carries statement_timeout=50s via `docker exec -e PGOPTIONS`
+  // — the old host-env PGOPTIONS never reached the container — cancels
+  // the backend on client timeout, and turns psql failures into a 502
+  // postgres.error instead of a generic 500. null/empty output → [].
+  return runJson<ClusterCentroid[]>(sql, {
+    container,
+    timeoutMs: 50_000,
+  });
 }
 
 /** Format a cluster list as a plain-text table for CLI output. */

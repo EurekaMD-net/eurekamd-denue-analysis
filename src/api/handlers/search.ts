@@ -15,8 +15,8 @@
  */
 
 import type { Context } from "hono";
-import { execFileSync } from "node:child_process";
 import { HttpError } from "../middleware/error.js";
+import { runJson } from "../db/psql-runner.js";
 import {
   ENTIDAD_RE,
   DEFAULT_PAGE_SIZE,
@@ -56,6 +56,11 @@ export async function searchHandler(
       400,
       "validation.q_too_long",
     );
+  }
+  // Audit #54: a NUL byte cannot travel through psql's stdin transport or
+  // a PostgREST URL; reject it as input, not as a 500.
+  if (q !== undefined && q.includes("\0")) {
+    throw new HttpError("q contiene un byte NUL", 400, "validation.q");
   }
   if (from !== undefined && !FROM_RE.test(from)) {
     throw new HttpError(
@@ -234,35 +239,13 @@ async function searchWithRadius(
     .replace(/\n\s+/g, " ")
     .trim();
 
-  // SECURITY (audit C1): use execFileSync with args array, NOT execSync with
-  // a shell-interpolated string. Shell metacharacters in `q` (`;`, `$()`, `,
-  // `"`) cannot escape an args-array invocation — there is no shell layer.
-  // The SQL `'` escape on `q` still applies for the SQL parser inside psql.
-  const output = execFileSync(
-    "docker",
-    [
-      "exec",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-t",
-      "-A",
-      "-c",
-      sql,
-    ],
-    {
-      encoding: "utf-8",
-      timeout: 30_000, // hard cap; today's lesson: never shell-out without timeout
-      // Audit C3-perf round-1 closure 2026-05-10: bound the postgres
-      // backend separately from the spawn — radius/full-text search can
-      // monopolize a connection past the 30s wall-clock kill.
-      env: { ...process.env, PGOPTIONS: "-c statement_timeout=25000" },
-    },
-  ).trim();
-
-  if (!output || output === "" || output === "null") return [];
-  return JSON.parse(output) as Array<Record<string, unknown>>;
+  // SECURITY (audit C1): no shell layer — the shared runner spawns docker
+  // with an args array and sends the SQL on stdin, so shell metacharacters
+  // in `q` cannot escape. The SQL `'` escape on `q` still applies for the
+  // SQL parser inside psql. Audit #94/#130/#54: the runner carries
+  // statement_timeout via `docker exec -e PGOPTIONS` (host env never
+  // reached the container) and turns psql failures into 502 postgres.error.
+  return runJson<Array<Record<string, unknown>>>(sql, {
+    container: config.dbContainer,
+  });
 }
