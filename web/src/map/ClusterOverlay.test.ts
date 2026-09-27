@@ -18,18 +18,27 @@ const BODY = {
   ],
 };
 
-/** In-memory stand-in for the MapLibre Map: a style that can be loaded
- * or not, sources/layers that a style swap wipes, and event listeners. */
-function fakeMap(styleLoaded: boolean) {
+/** In-memory stand-in for the MapLibre 5.x Map, modelled on its real
+ * semantics: `style._loaded` flips when the style JSON is parsed (and
+ * add/move calls throw before that), while `isStyleLoaded()` is also false
+ * while any source still has tiles loading — e.g. right after MapShell's
+ * 'load' handler adds its vector source, or while setTiles reloads. */
+function fakeMap(styleJsonLoaded: boolean) {
   const sources = new Map<string, { data: unknown; setData: (d: unknown) => void }>();
   const layers = new Map<string, unknown>();
   const listeners = new Map<string, Set<() => void>>();
   const moved: string[] = [];
-  const state = { styleLoaded };
+  const pendingTiles = new Set<string>();
+  const style = { _loaded: styleJsonLoaded };
+  const checkLoaded = () => {
+    if (!style._loaded) throw new Error("Style is not done loading.");
+  };
   const map = {
-    isStyleLoaded: () => state.styleLoaded,
+    style,
+    isStyleLoaded: () => style._loaded && pendingTiles.size === 0,
     getSource: (id: string) => sources.get(id),
-    addSource: (id: string, spec: { data: unknown }) => {
+    addSource: (id: string, spec: { type: string; data?: unknown }) => {
+      checkLoaded();
       const src = {
         data: spec.data,
         setData(d: unknown) {
@@ -37,12 +46,15 @@ function fakeMap(styleLoaded: boolean) {
         },
       };
       sources.set(id, src);
+      if (spec.type === "vector") pendingTiles.add(id);
     },
     getLayer: (id: string) => layers.get(id),
     addLayer: (spec: { id: string }) => {
+      checkLoaded();
       layers.set(spec.id, spec);
     },
     moveLayer: (id: string) => {
+      checkLoaded();
       moved.push(id);
     },
     on: (ev: string, fn: () => void) => {
@@ -59,11 +71,22 @@ function fakeMap(styleLoaded: boolean) {
     sources,
     layers,
     moved,
+    /** What MapShell's 'load' handler does before calling onMapLoad. */
+    shellAddsVectorSource() {
+      map.addSource("denue", { type: "vector" });
+    },
+    /** A setTiles reload / pan: tiles pending again. */
+    tilesReloading() {
+      pendingTiles.add("denue");
+    },
     fire(ev: string) {
-      if (ev === "load" || ev === "style.load") state.styleLoaded = true;
+      // Real MapLibre: the style JSON is parsed before 'style.load' fires,
+      // but sources are still loading tiles, so isStyleLoaded() is false.
       if (ev === "style.load") {
+        style._loaded = true;
         sources.clear();
         layers.clear();
+        pendingTiles.add("denue");
       }
       for (const fn of listeners.get(ev) ?? []) fn();
     },
@@ -138,19 +161,43 @@ describe("syncClusterLayer", () => {
     expect(f.moved).toEqual([CLUSTER_LAYER_ID]);
   });
 
-  it("does nothing while the style is not loaded", () => {
+  it("does nothing (and does not throw) while the style JSON is not loaded", () => {
     const f = fakeMap(false);
     syncClusterLayer(f.map, parseClustersResult(BODY).centroids);
     expect(f.sources.size).toBe(0);
   });
+
+  it("updates to the new centroids while tiles are still reloading (sector change)", () => {
+    const f = fakeMap(true);
+    const cs = parseClustersResult(BODY).centroids;
+    syncClusterLayer(f.map, cs);
+    expect(drawnFeatures(f)).toHaveLength(2);
+    f.tilesReloading();
+    expect(f.map.isStyleLoaded()).toBe(false);
+    syncClusterLayer(f.map, cs.slice(1));
+    expect(drawnFeatures(f)).toHaveLength(1);
+    expect(drawnFeatures(f)?.[0]?.properties?.cluster_id).toBe(1);
+  });
 });
 
 describe("attachClusterLayer (audit #167)", () => {
-  it("draws data that arrived before the map 'load' event once load fires", () => {
+  it("draws on the map MapShell hands over, while its vector source is still loading", () => {
+    // MapShell's 'load' handler: addDataLayers (vector source) → onMapLoad.
+    // 'load' has already fired and fires once, so nothing retries later.
+    const f = fakeMap(true);
+    f.shellAddsVectorSource();
+    expect(f.map.isStyleLoaded()).toBe(false);
+    attachClusterLayer(f.map, parseClustersResult(BODY).centroids);
+    expect(f.layers.has(CLUSTER_LAYER_ID)).toBe(true);
+    expect(drawnFeatures(f)).toHaveLength(2);
+  });
+
+  it("draws once the style JSON loads if attached before it", () => {
     const f = fakeMap(false);
     attachClusterLayer(f.map, parseClustersResult(BODY).centroids);
     expect(drawnFeatures(f)).toBeNull();
-    f.fire("load");
+    f.fire("style.load");
+    expect(f.map.isStyleLoaded()).toBe(false);
     expect(drawnFeatures(f)).toHaveLength(2);
   });
 
@@ -160,12 +207,6 @@ describe("attachClusterLayer (audit #167)", () => {
     expect(drawnFeatures(f)).toHaveLength(2);
     f.fire("style.load");
     expect(f.layers.has(CLUSTER_LAYER_ID)).toBe(true);
-    expect(drawnFeatures(f)).toHaveLength(2);
-  });
-
-  it("draws immediately on a freshly recreated (already loaded) map", () => {
-    const f = fakeMap(true);
-    attachClusterLayer(f.map, parseClustersResult(BODY).centroids);
     expect(drawnFeatures(f)).toHaveLength(2);
   });
 

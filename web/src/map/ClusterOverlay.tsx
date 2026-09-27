@@ -65,7 +65,7 @@ export function centroidsToGeoJSON(
 /** Minimal slice of the MapLibre Map API this module touches. */
 type ClusterMap = Pick<
   MapInstance,
-  | "isStyleLoaded"
+  | "style"
   | "getSource"
   | "addSource"
   | "getLayer"
@@ -76,15 +76,26 @@ type ClusterMap = Pick<
 >;
 
 /**
+ * True once the style JSON is parsed, i.e. addSource/addLayer will not
+ * throw "Style is not done loading". Deliberately NOT map.isStyleLoaded():
+ * that also waits for every tile of every source, which is still false
+ * when MapShell hands the map over (it has just added its vector source)
+ * and while tiles reload on a sector change or a pan.
+ */
+function styleReady(map: ClusterMap): boolean {
+  return map.style?._loaded === true;
+}
+
+/**
  * Ensures the cluster source + layer exist on the current style and
- * pushes `centroids` into it. No-op until the style is loaded. Keeps the
- * layer on top, since MapShell re-adds its data layers on filter change.
+ * pushes `centroids` into it. No-op until the style JSON is loaded. Keeps
+ * the layer on top, since MapShell re-adds its data layers on filter change.
  */
 export function syncClusterLayer(
   map: ClusterMap,
   centroids: ClusterCentroid[],
 ): void {
-  if (!map.isStyleLoaded()) return;
+  if (!styleReady(map)) return;
   const data = centroidsToGeoJSON(centroids);
   const src = map.getSource(CLUSTER_SOURCE_ID) as
     | { setData: (d: GeoJSON.FeatureCollection) => void }
@@ -120,7 +131,7 @@ export function syncClusterLayer(
 }
 
 /**
- * Draws `centroids` now if the style is ready, and again on every
+ * Draws `centroids` now if the style JSON is ready, and again on every
  * 'load' / 'style.load' so the layer survives map recreation, a style
  * swap, and data that arrives before the map finished loading.
  * Returns the listener cleanup.
