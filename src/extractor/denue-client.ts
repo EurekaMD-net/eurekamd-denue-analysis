@@ -50,6 +50,17 @@ export function resetThrottle(): void {
   _throttleChain = Promise.resolve();
 }
 
+/**
+ * Since 2026-09 INEGI answers `Accept: application/json` requests with the
+ * array double-encoded (a JSON string whose content is the JSON array).
+ * Unwrap one string layer; the caller's shape guards still apply. Throws on
+ * invalid JSON at either layer.
+ */
+function parseJsonMaybeDoubleEncoded(text: string): unknown {
+  const parsed: unknown = JSON.parse(text);
+  return typeof parsed === "string" ? JSON.parse(parsed) : parsed;
+}
+
 export class DenueApiError extends Error {
   constructor(
     message: string,
@@ -112,7 +123,7 @@ export class DenueClient {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      parsed = parseJsonMaybeDoubleEncoded(text);
     } catch {
       throw new DenueApiError(
         `Respuesta inesperada de la API: ${this.redact(text.slice(0, 200))}`,
@@ -162,7 +173,7 @@ export class DenueClient {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      parsed = parseJsonMaybeDoubleEncoded(text);
     } catch {
       throw new DenueApiError(
         `Respuesta inesperada de la API: ${this.redact(text.slice(0, 200))}`,

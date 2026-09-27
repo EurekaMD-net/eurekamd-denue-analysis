@@ -161,6 +161,42 @@ describe("DenueClient", () => {
       expect((err as Error).message).toMatch(/respuesta no-array: \{"error":"limite excedido"\}/);
     });
 
+    it("unwraps a double-encoded array body (INEGI 2026-09, Accept: application/json)", async () => {
+      mockText(JSON.stringify(JSON.stringify([MOCK_ESTABLISHMENT])));
+      const client = new DenueClient(MOCK_TOKEN);
+      expect(await client.buscarEntidad("09", 1, 500)).toEqual([MOCK_ESTABLISHMENT]);
+    });
+
+    it("still throws no-array on a double-encoded non-array body", async () => {
+      mockText(JSON.stringify(JSON.stringify({ error: "x" })));
+      const client = new DenueClient(MOCK_TOKEN);
+      const err = await client.buscarEntidad("09", 1, 500).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect((err as Error).message).toMatch(/respuesta no-array/);
+    });
+
+    it("throws Respuesta inesperada when the inner string is not valid JSON", async () => {
+      mockText(JSON.stringify("not json ["));
+      const client = new DenueClient(MOCK_TOKEN);
+      const err = await client.buscarEntidad("09", 1, 500).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect((err as Error).message).toMatch(/Respuesta inesperada/);
+    });
+
+    it("throws Respuesta inesperada on an invalid-JSON body", async () => {
+      mockText("<html>error</html>");
+      const client = new DenueClient(MOCK_TOKEN);
+      const err = await client.buscarEntidad("09", 1, 500).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect((err as Error).message).toMatch(/Respuesta inesperada/);
+    });
+
+    it("ficha unwraps a double-encoded array body", async () => {
+      mockText(JSON.stringify(JSON.stringify([MOCK_ESTABLISHMENT])));
+      const client = new DenueClient(MOCK_TOKEN);
+      expect(await client.ficha("6319819")).toEqual(MOCK_ESTABLISHMENT);
+    });
+
     it("ficha throws on an unparseable body instead of returning null", async () => {
       mockText("<html>error</html>");
       const client = new DenueClient(MOCK_TOKEN);
