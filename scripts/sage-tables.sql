@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS sage_turns_audit (
   -- Usage telemetry. cost_usd computed at write-time from current pricing.
   input_tokens  INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Of input_tokens, the parts read from / written to the prompt cache
+  -- (migration 025), so the cache hit rate is measurable.
+  cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd      NUMERIC(10, 6) NOT NULL DEFAULT 0,
   latency_ms    INTEGER NOT NULL DEFAULT 0,
   -- Structured outcome. error_code is null on success.

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { buildSageProvider } from "./index.js";
 import {
+  buildRouterCatalogPrompt,
   buildRouterUserPrompt,
   buildNarrativeUserPrompt,
   NARRATIVE_ROWS_MAX_BYTES,
@@ -70,7 +71,7 @@ describe("buildSageProvider — factory", () => {
 
 describe("buildRouterUserPrompt — params schema (audit #86)", () => {
   it("tells the model which params are required", () => {
-    const p = buildRouterUserPrompt("q", SAGE_ENDPOINT_CATALOG, [], "");
+    const p = buildRouterCatalogPrompt(SAGE_ENDPOINT_CATALOG, "");
     const line = p
       .split("\n\n")
       .find((s) => s.startsWith("- **opportunity-by-ageb**"));
@@ -164,7 +165,7 @@ describe("row cap is visible to the model (audit #87 follow-up)", () => {
   });
 
   it("router history marks a cut prior result as N+ rows", () => {
-    const p = buildRouterUserPrompt("q", SAGE_ENDPOINT_CATALOG, [prior], "");
+    const p = buildRouterUserPrompt("q", [prior]);
     expect(p).toContain("Result: 200+ rows");
   });
 
@@ -177,20 +178,15 @@ describe("row cap is visible to the model (audit #87 follow-up)", () => {
 
 describe("a failed turn reaches the next router prompt (audit #89)", () => {
   it("renders the persisted error code and message", () => {
-    const prompt = buildRouterUserPrompt(
-      "¿y en 2023?",
-      [],
-      [
-        {
-          question: "q",
-          route: { kind: "sql", sql: "SELECT nope" },
-          digest: { columns: [], row_count: 0, first_5_rows: [] },
-          narrative: "",
-          error: { code: "SQL_EXECUTION_ERROR", message: "unknown_column" },
-        },
-      ],
-      "",
-    );
+    const prompt = buildRouterUserPrompt("¿y en 2023?", [
+      {
+        question: "q",
+        route: { kind: "sql", sql: "SELECT nope" },
+        digest: { columns: [], row_count: 0, first_5_rows: [] },
+        narrative: "",
+        error: { code: "SQL_EXECUTION_ERROR", message: "unknown_column" },
+      },
+    ]);
     expect(prompt).toContain("Error: SQL_EXECUTION_ERROR: unknown_column");
   });
 });
@@ -259,5 +255,156 @@ describe("OpenAICompatibleProvider — usage survives a thrown call (audit #83)"
       output_tokens: Math.ceil("Hay 1234 unidades".length / 4),
     });
     expect(usage!.input_tokens).toBeGreaterThan(0);
+  });
+});
+
+describe("SAGE_PRICE_TABLE (audit #211)", () => {
+  const OAI = {
+    SAGE_PROVIDER: "openai-compatible",
+    SAGE_BASE_URL: "https://llm.test/v1",
+    SAGE_API_KEY: "k",
+    SAGE_MODEL_ROUTER: "r-m",
+    SAGE_MODEL_NARRATIVE: "n-m",
+  };
+
+  it("prices openai-compatible calls from the env table", async () => {
+    const p = buildSageProvider({
+      ...OAI,
+      SAGE_PRICE_TABLE: '{"r-m":{"in":1,"out":2}}',
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    function: {
+                      name: "decline",
+                      arguments: '{"reasoning":"no"}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+          usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+        }),
+      ),
+    );
+    const res = await p.routeAndDraft({
+      question: "q",
+      endpoints: [],
+      history: [],
+      sql_schema_summary: "",
+    });
+    vi.restoreAllMocks();
+    expect(res.usage.cost_usd).toBeCloseTo(3);
+  });
+
+  it("fails at build time on invalid JSON or a bad shape", () => {
+    expect(() =>
+      buildSageProvider({ ...OAI, SAGE_PRICE_TABLE: "{not json" }),
+    ).toThrow(/SAGE_PRICE_TABLE is not valid JSON/);
+    expect(() =>
+      buildSageProvider({ ...OAI, SAGE_PRICE_TABLE: '{"r-m":{"in":"1"}}' }),
+    ).toThrow(/SAGE_PRICE_TABLE must map/);
+  });
+});
+
+describe("OpenAICompatibleProvider router outcomes (audit #84 #204)", () => {
+  const provider = new OpenAICompatibleProvider({
+    baseUrl: "https://llm.test/v1",
+    apiKey: "k",
+    routerModel: "r-m",
+    narrativeModel: "n-m",
+  });
+  const INPUT = {
+    question: "¿cuántas farmacias?",
+    endpoints: SAGE_ENDPOINT_CATALOG,
+    history: [],
+    sql_schema_summary: "VIEW v_demo (cve_mun text)",
+  };
+  function reply(message: object) {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+      ),
+    );
+  }
+  const call = (name: string, args: string) => ({
+    content: null,
+    tool_calls: [{ function: { name, arguments: args } }],
+  });
+
+  it("a text-only reply is a clarify with the model's text", async () => {
+    reply({ content: "¿Qué estado?" });
+    const res = await provider.routeAndDraft(INPUT);
+    vi.restoreAllMocks();
+    expect(res.output).toEqual({ kind: "clarify", reasoning: "¿Qué estado?" });
+  });
+
+  it("no tool call and no text is ROUTER_NO_TOOL", async () => {
+    reply({ content: "" });
+    const res = await provider.routeAndDraft(INPUT);
+    vi.restoreAllMocks();
+    expect(res.output).toMatchObject({ kind: "error", code: "ROUTER_NO_TOOL" });
+  });
+
+  it("malformed tool arguments are ROUTER_BAD_ARGS, never shown as a decline", async () => {
+    reply(call("draft_sql", '{"sql": "SELECT'));
+    const res = await provider.routeAndDraft(INPUT);
+    vi.restoreAllMocks();
+    expect(res.output).toMatchObject({
+      kind: "error",
+      code: "ROUTER_BAD_ARGS",
+    });
+  });
+
+  it("an unknown tool name is ROUTER_BAD_ARGS", async () => {
+    reply(call("drop_tables", "{}"));
+    const res = await provider.routeAndDraft(INPUT);
+    vi.restoreAllMocks();
+    expect(res.output).toMatchObject({
+      kind: "error",
+      code: "ROUTER_BAD_ARGS",
+    });
+  });
+
+  it("sends the catalog and schema in the system message and only history + question as the user message", async () => {
+    const f = reply(call("decline", '{"reasoning":"x"}'));
+    await provider.routeAndDraft(INPUT);
+    const body = JSON.parse(String(f.mock.calls[0]![1]!.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    vi.restoreAllMocks();
+    const [sys, user] = body.messages;
+    expect(sys!.content.startsWith(ROUTER_SYSTEM_PROMPT)).toBe(true);
+    expect(sys!.content).toContain("# Available endpoints");
+    expect(sys!.content).toContain("VIEW v_demo");
+    expect(sys!.content).not.toContain(INPUT.question);
+    expect(user!.content).toBe(`# User question\n\n${INPUT.question}`);
+  });
+});
+
+describe("buildRouterUserPrompt order (audit #204)", () => {
+  it("puts history before the question and carries no catalog", () => {
+    const p = buildRouterUserPrompt("¿y en 2023?", [
+      {
+        question: "farmacias en NL",
+        route: { kind: "sql", sql: "SELECT 1" },
+        digest: { columns: ["n"], row_count: 1, first_5_rows: [] },
+        narrative: "n",
+      },
+    ]);
+    expect(p.indexOf("farmacias en NL")).toBeLessThan(p.indexOf("¿y en 2023?"));
+    expect(p.endsWith("# User question\n\n¿y en 2023?")).toBe(true);
+    expect(p).not.toContain("# Available endpoints");
   });
 });

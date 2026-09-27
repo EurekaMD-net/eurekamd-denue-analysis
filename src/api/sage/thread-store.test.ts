@@ -88,6 +88,35 @@ describe("thread-store on the async runner (audit #79/#104)", () => {
     expect(sql).toContain("'sql_gate'");
   });
 
+  it("appendAudit writes the prompt-cache token columns (audit #204)", async () => {
+    mockRunSql.mockResolvedValue("");
+    await appendAudit(CFG, {
+      thread_id: null,
+      call_kind: "router",
+      provider: "p",
+      model: "m",
+      prompt: {},
+      output: null,
+      usage: {
+        input_tokens: 3100,
+        output_tokens: 40,
+        cache_read_input_tokens: 3000,
+        cache_creation_input_tokens: 7,
+        cost_usd: 0.0018,
+        latency_ms: 1,
+        provider: "p",
+        model: "m",
+      },
+      error_code: null,
+      error_message: null,
+    });
+    const sql = (mockRunSql.mock.calls[0]![0] as string).replace(/\s+/g, " ");
+    expect(sql).toContain(
+      "input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost_usd",
+    );
+    expect(sql).toContain("3100, 40, 3000, 7, 0.0018");
+  });
+
   it("appendAudit returns a promise that rejects when the runner fails", async () => {
     mockRunSql.mockRejectedValue(new Error("Upstream query failed"));
     await expect(

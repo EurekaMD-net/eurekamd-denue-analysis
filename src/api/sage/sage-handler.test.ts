@@ -751,6 +751,60 @@ describe("/sage/query persistence and failure audit (audit #82 #83 #89 #92 #207)
     }
   });
 
+  it("a router error outcome is an audited error event, not a decline narrative (audit #84)", async () => {
+    reset();
+    const res = await ask(
+      provider(
+        routeTo({
+          kind: "error",
+          code: "ROUTER_BAD_ARGS",
+          detail: 'draft_sql: malformed arguments: {"sql": "SELECT',
+        }),
+      ),
+    );
+    expect(eventData(res.text, "route")).toBeNull();
+    expect(eventData(res.text, "narrative")).toBeNull();
+    const err = eventData(res.text, "error")!;
+    expect(err.code).toBe("ROUTER_BAD_ARGS");
+    expect(String(err.message)).not.toContain("malformed");
+    expect(audits()).toHaveLength(1);
+    expect(audits()[0]).toMatchObject({
+      call_kind: "router",
+      error_code: "ROUTER_BAD_ARGS",
+      usage,
+    });
+    expect(audits()[0]!.error_message).toContain("malformed arguments");
+    expect(mockAppendTurn).toHaveBeenCalledTimes(1);
+    expect(mockAppendTurn.mock.calls[0]![3]).toMatchObject({
+      route: { kind: "router" },
+      error: { code: "ROUTER_BAD_ARGS", message: err.message },
+    });
+    expect(mockSql).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("a clarify outcome narrates the model's own text and is persisted (audit #84)", async () => {
+    reset();
+    const res = await ask(
+      provider(
+        routeTo({
+          kind: "clarify",
+          reasoning: "¿Te refieres al estado o al municipio?",
+        }),
+      ),
+    );
+    expect(eventData(res.text, "narrative")).toEqual({
+      text: "¿Te refieres al estado o al municipio?",
+    });
+    expect(eventData(res.text, "error")).toBeNull();
+    expect(mockAppendTurn.mock.calls[0]![3]).toMatchObject({
+      route: { kind: "clarify" },
+      narrative: "¿Te refieres al estado o al municipio?",
+    });
+    expect(eventData(res.text, "done")).toEqual({ turn_id: "t-saved" });
+    expect(mockSql).not.toHaveBeenCalled();
+  });
+
   it("a declined turn is persisted and done carries its turn_id", async () => {
     reset();
     const res = await ask(

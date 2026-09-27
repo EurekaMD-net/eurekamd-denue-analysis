@@ -7,32 +7,42 @@
  * Code subscription.
  *
  * Router pass: registers call_endpoint / draft_sql / decline as MCP
- * tools via createSdkMcpServer. The model picks exactly one (allowedTools
- * lists all three, maxTurns=1 prevents follow-up turns). The tool handler
- * captures the chosen tool name + args via closure; we return immediately
- * after the first tool call surfaces.
+ * tools via createSdkMcpServer. Only the first tool call counts: its
+ * handler captures the route, aborts the query and the loop breaks, so
+ * the tool result is never sent back for a second model call (audit
+ * #78/#200; maxTurns=1 backs this up). Usage then comes from that first
+ * assistant message. The endpoint catalog and SQL schema sit in the
+ * system prompt before SYSTEM_PROMPT_DYNAMIC_BOUNDARY so they are cached
+ * across requests; the user message carries only history + question
+ * (audit #204). No tool call is a clarify (model text) or a router error,
+ * never a silent decline (audit #84).
  *
  * Narrative pass: no MCP tools, no allowedTools. Just a systemPrompt +
- * user message. Stream text deltas from assistant messages as they arrive.
+ * user message. With includePartialMessages the SDK emits stream_event
+ * text deltas as they are generated (audit #203).
  *
- * Both calls collect usage from the SDK result message, summing
- * input_tokens + cache_creation_input_tokens + cache_read_input_tokens
- * per the Anthropic Messages API spec ("total input tokens in a request
- * is the summation of those three"). Without this you under-count by
- * the cache-hit portion which can be 90%+ of the prompt.
+ * Usage sums input_tokens + cache_creation_input_tokens +
+ * cache_read_input_tokens per the Anthropic Messages API spec ("total
+ * input tokens in a request is the summation of those three") and keeps
+ * the two cache buckets separately for the audit. Cost prefers the SDK's
+ * total_cost_usd; the fallback prices each bucket at its own rate.
+ *
+ * The SDK child gets an allowlisted env, never the host's secrets
+ * (audit #30).
  */
 
 import {
   createSdkMcpServer,
   query,
   tool as sdkTool,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type Options as SdkOptions,
-  type SDKResultSuccess,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
   ROUTER_SYSTEM_PROMPT,
   NARRATIVE_SYSTEM_PROMPT,
+  buildRouterCatalogPrompt,
   buildRouterUserPrompt,
   buildNarrativeUserPrompt,
 } from "./prompts.js";
@@ -55,21 +65,30 @@ interface AnthropicProviderConfig {
   narrativeModel: string;
 }
 
-// Per-Anthropic public pricing 2026-05 ($/M tokens). The Claude Agent
-// SDK reports a `total_cost_usd` in the result message which is the
-// canonical source; this table is a fallback when that field is absent
-// on a particular SDK version.
-const PRICE_TABLE: Record<string, { in: number; out: number }> = {
+// Anthropic list prices ($/M tokens, checked 2026-09-27). The SDK's
+// `total_cost_usd` is the canonical source; this table is the fallback
+// for calls that end before a result message (the router, which stops at
+// its first tool call, and thrown calls). Cache writes bill at 1.25x the
+// input rate and cache reads at 0.1x unless `cacheRead` says otherwise
+// (audit #91/#210).
+const PRICE_TABLE: Record<
+  string,
+  { in: number; out: number; cacheRead?: number }
+> = {
   "claude-sonnet-4-6": { in: 3, out: 15 },
-  "claude-opus-4-7": { in: 15, out: 75 },
+  "claude-sonnet-5": { in: 2, out: 10 },
+  "claude-opus-4-6": { in: 5, out: 25 },
+  "claude-opus-4-7": { in: 5, out: 25 },
+  "claude-opus-4-8": { in: 5, out: 25 },
+  "claude-opus-5": { in: 5, out: 25 },
+  "claude-opus-5-5": { in: 4, out: 20, cacheRead: 0.2 },
+  "claude-fable-5": { in: 10, out: 50 },
+  "claude-fable-5-1": { in: 10, out: 50, cacheRead: 0.25 },
+  "claude-haiku-4-5": { in: 1, out: 5 },
   "claude-haiku-4-5-20251001": { in: 1, out: 5 },
 };
 
-function fallbackPrice(model: string, inTok: number, outTok: number): number {
-  const p = PRICE_TABLE[model];
-  if (!p) return 0;
-  return (inTok * p.in + outTok * p.out) / 1_000_000;
-}
+const unpricedWarned = new Set<string>();
 
 // Per-Anthropic Messages API: "Total input tokens in a request is the
 // summation of input_tokens + cache_creation_input_tokens + cache_read_input_tokens."
@@ -77,16 +96,74 @@ function fallbackPrice(model: string, inTok: number, outTok: number): number {
 interface SdkUsageShape {
   input_tokens?: number;
   output_tokens?: number;
-  cache_creation_input_tokens?: number;
-  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
 }
-function totalInputTokens(u: SdkUsageShape | undefined): number {
-  if (!u) return 0;
+
+export function fallbackPrice(model: string, u: SdkUsageShape): number {
+  const p = PRICE_TABLE[model];
+  if (!p) {
+    if (!unpricedWarned.has(model)) {
+      unpricedWarned.add(model);
+      process.stderr.write(
+        `[sage] no fallback price for model ${model}; cost_usd recorded as 0\n`,
+      );
+    }
+    return 0;
+  }
   return (
-    (u.input_tokens ?? 0) +
-    (u.cache_creation_input_tokens ?? 0) +
-    (u.cache_read_input_tokens ?? 0)
+    ((u.input_tokens ?? 0) * p.in +
+      (u.cache_creation_input_tokens ?? 0) * p.in * 1.25 +
+      (u.cache_read_input_tokens ?? 0) * (p.cacheRead ?? p.in * 0.1) +
+      (u.output_tokens ?? 0) * p.out) /
+    1_000_000
   );
+}
+
+function normalizeSdkUsage(
+  u: SdkUsageShape | undefined,
+  model: string,
+  latency_ms: number,
+  totalCostUsd?: number,
+): UsageNormalized {
+  const read = u?.cache_read_input_tokens ?? 0;
+  const write = u?.cache_creation_input_tokens ?? 0;
+  return {
+    input_tokens: (u?.input_tokens ?? 0) + write + read,
+    output_tokens: u?.output_tokens ?? 0,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: write,
+    cost_usd:
+      typeof totalCostUsd === "number"
+        ? totalCostUsd
+        : fallbackPrice(model, u ?? {}),
+    latency_ms,
+    provider: "anthropic",
+    model,
+  };
+}
+
+// Env the SDK child needs: the binary lookup, the credentials location
+// and the auth variables it reads. Nothing else of the host env (audit
+// #30: SUPABASE_*, API_KEY, DENUE_TOKEN never reach the child).
+const SDK_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+] as const;
+
+export function sdkEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of SDK_ENV_KEYS) {
+    const v = source[key];
+    if (v !== undefined) env[key] = v;
+  }
+  return env;
 }
 
 // A call that threw (timeout, client abort) before its result message:
@@ -103,7 +180,10 @@ function estimatedUsage(
   return {
     input_tokens: inTok,
     output_tokens: outTok,
-    cost_usd: fallbackPrice(model, inTok, outTok),
+    cost_usd: fallbackPrice(model, {
+      input_tokens: inTok,
+      output_tokens: outTok,
+    }),
     latency_ms: Date.now() - t0,
     provider: "anthropic",
     model,
@@ -124,20 +204,31 @@ export class AnthropicProvider implements SageProvider {
     input: RouteInput,
     signal?: AbortSignal,
   ): Promise<RouteResult> {
-    const userPrompt = buildRouterUserPrompt(
-      input.question,
+    // Static catalog + schema before the boundary (cacheable across
+    // requests); only history + question vary (audit #204).
+    const catalogPrompt = buildRouterCatalogPrompt(
       input.endpoints,
-      input.history,
       input.sql_schema_summary,
     );
+    const userPrompt = buildRouterUserPrompt(input.question, input.history);
 
-    // Captured router decision — set by exactly one of the three tool
-    // handlers below when the model picks. Default decline if the model
-    // somehow returns without calling any tool.
-    let captured: RouteOutput = {
-      kind: "decline",
-      reasoning: "El modelo no eligió una acción.",
+    const abortController = new AbortController();
+    if (signal) {
+      if (signal.aborted) abortController.abort();
+      else signal.addEventListener("abort", () => abortController.abort());
+    }
+    const timer = setTimeout(() => abortController.abort(), 30_000);
+
+    // Router decision: the FIRST tool call wins (audit #78). Its handler
+    // aborts the query so the tool result never goes back to the model
+    // for a second turn (audit #200).
+    let captured = null as RouteOutput | null;
+    const take = (route: RouteOutput) => {
+      if (captured) return;
+      captured = route;
+      abortController.abort();
     };
+    const ok = { content: [{ type: "text" as const, text: "ok" }] };
 
     const mcpServer = createSdkMcpServer({
       name: "sage_router",
@@ -157,14 +248,14 @@ export class AnthropicProvider implements SageProvider {
             confidence: z.number().describe("0.0 to 1.0"),
           },
           async (args) => {
-            captured = {
+            take({
               kind: "endpoint",
               endpoint_name: String(args.endpoint_name ?? ""),
               params: (args.params as Record<string, string | number>) ?? {},
               reasoning: String(args.reasoning ?? ""),
               confidence: Number(args.confidence ?? 0),
-            };
-            return { content: [{ type: "text", text: "ok" }] };
+            });
+            return ok;
           },
         ),
         sdkTool(
@@ -178,13 +269,13 @@ export class AnthropicProvider implements SageProvider {
             confidence: z.number().describe("0.0 to 1.0"),
           },
           async (args) => {
-            captured = {
+            take({
               kind: "sql",
               sql: String(args.sql ?? ""),
               reasoning: String(args.reasoning ?? ""),
               confidence: Number(args.confidence ?? 0),
-            };
-            return { content: [{ type: "text", text: "ok" }] };
+            });
+            return ok;
           },
         ),
         sdkTool(
@@ -196,11 +287,11 @@ export class AnthropicProvider implements SageProvider {
               .describe("Brief Spanish explanation addressed to the user."),
           },
           async (args) => {
-            captured = {
+            take({
               kind: "decline",
               reasoning: String(args.reasoning ?? ""),
-            };
-            return { content: [{ type: "text", text: "ok" }] };
+            });
+            return ok;
           },
         ),
       ],
@@ -212,16 +303,13 @@ export class AnthropicProvider implements SageProvider {
       "mcp__sage_router__decline",
     ];
 
-    const abortController = new AbortController();
-    if (signal) {
-      if (signal.aborted) abortController.abort();
-      else signal.addEventListener("abort", () => abortController.abort());
-    }
-    const timer = setTimeout(() => abortController.abort(), 30_000);
-
     const options: SdkOptions = {
       model: this.routerModel,
-      systemPrompt: ROUTER_SYSTEM_PROMPT,
+      systemPrompt: [
+        ROUTER_SYSTEM_PROMPT,
+        catalogPrompt,
+        SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+      ],
       mcpServers: { sage_router: mcpServer },
       allowedTools,
       // Disable Claude Code built-ins; this is a pure tool-router call.
@@ -231,77 +319,88 @@ export class AnthropicProvider implements SageProvider {
       // operator config). Omitted ≠ none — [] is load-bearing.
       settingSources: [],
       permissionMode: "dontAsk",
-      maxTurns: 2,
+      maxTurns: 1,
       abortController,
       persistSession: false,
       cwd: process.cwd(),
       thinking: { type: "disabled" },
-      env: { ...process.env },
+      env: sdkEnv(),
     };
 
     const t0 = Date.now();
-    let usage: UsageNormalized = {
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_usd: 0,
-      latency_ms: 0,
-      provider: this.name,
-      model: this.routerModel,
-    };
+    // Usage of the first (only) assistant message; a result message, when
+    // one arrives, replaces it with the SDK's own totals.
+    let assistantUsage: SdkUsageShape | undefined;
+    let assistantText = "";
+    let resultUsage: UsageNormalized | null = null;
+    // Set when the query ended without any tool call (audit #84).
+    let noToolOutcome: RouteOutput | null = null;
+    const finalUsage = (): UsageNormalized =>
+      resultUsage ??
+      (assistantUsage
+        ? normalizeSdkUsage(assistantUsage, this.routerModel, Date.now() - t0)
+        : estimatedUsage(
+            this.routerModel,
+            ROUTER_SYSTEM_PROMPT + catalogPrompt + userPrompt,
+            captured ? JSON.stringify(captured).length : assistantText.length,
+            t0,
+          ));
 
     try {
       const q = query({ prompt: userPrompt, options });
       for await (const message of q) {
-        if (message.type === "result") {
-          const latency_ms = Date.now() - t0;
+        if (message.type === "assistant" && message.message) {
+          assistantUsage = message.message.usage ?? assistantUsage;
+          for (const block of message.message.content ?? []) {
+            if (block.type === "text") assistantText += block.text;
+          }
+        } else if (message.type === "result") {
+          resultUsage = normalizeSdkUsage(
+            message.usage,
+            this.routerModel,
+            Date.now() - t0,
+            message.total_cost_usd,
+          );
           if (message.subtype === "success") {
-            const success = message as SDKResultSuccess;
-            const inTok = totalInputTokens(success.usage);
-            const outTok = success.usage?.output_tokens ?? 0;
-            usage = {
-              input_tokens: inTok,
-              output_tokens: outTok,
-              cost_usd:
-                (success as { total_cost_usd?: number }).total_cost_usd ??
-                fallbackPrice(this.routerModel, inTok, outTok),
-              latency_ms,
-              provider: this.name,
-              model: (success as { model?: string }).model ?? this.routerModel,
-            };
+            const text = (message.result || assistantText).trim();
+            noToolOutcome = text
+              ? { kind: "clarify", reasoning: text }
+              : {
+                  kind: "error",
+                  code: "ROUTER_NO_TOOL",
+                  detail: `no tool call and no text (stop_reason ${message.stop_reason ?? "none"})`,
+                };
           } else {
-            // Error subtype: capture latency, leave token counts at 0 if
-            // the SDK didn't expose them on this error path.
-            const errUsage = (message as { usage?: SdkUsageShape }).usage;
-            const inTok = totalInputTokens(errUsage);
-            const outTok = errUsage?.output_tokens ?? 0;
-            usage = {
-              input_tokens: inTok,
-              output_tokens: outTok,
-              cost_usd: fallbackPrice(this.routerModel, inTok, outTok),
-              latency_ms,
-              provider: this.name,
-              model: this.routerModel,
+            noToolOutcome = {
+              kind: "error",
+              code: "ROUTER_SDK_ERROR",
+              detail: `${message.subtype}: ${(message.errors ?? []).join("; ")}`,
             };
           }
         }
+        if (captured) break;
       }
     } catch (err) {
-      throw attachSageUsage(
-        err,
-        usage.latency_ms > 0
-          ? usage
-          : estimatedUsage(
-              this.routerModel,
-              ROUTER_SYSTEM_PROMPT + userPrompt,
-              0,
-              t0,
-            ),
-      );
+      // Our own abort after the first tool call is the success path; so
+      // is an SDK throw after it already reported an error result.
+      if (!captured && !noToolOutcome) {
+        throw attachSageUsage(err, finalUsage());
+      }
     } finally {
       clearTimeout(timer);
     }
 
-    return { output: captured, usage };
+    const output: RouteOutput =
+      captured ??
+      noToolOutcome ??
+      (assistantText.trim()
+        ? { kind: "clarify", reasoning: assistantText.trim() }
+        : {
+            kind: "error",
+            code: "ROUTER_NO_TOOL",
+            detail: "query ended without a tool call or a result",
+          });
+    return { output, usage: finalUsage() };
   }
 
   async *writeNarrativeStream(
@@ -332,11 +431,13 @@ export class AnthropicProvider implements SageProvider {
       settingSources: [],
       permissionMode: "dontAsk",
       maxTurns: 1,
+      // Emit text deltas while the paragraph is generated (audit #203).
+      includePartialMessages: true,
       abortController,
       persistSession: false,
       cwd: process.cwd(),
       thinking: { type: "disabled" },
-      env: { ...process.env },
+      env: sdkEnv(),
     };
 
     const t0 = Date.now();
@@ -346,9 +447,20 @@ export class AnthropicProvider implements SageProvider {
     try {
       const q = query({ prompt: userPrompt, options });
       for await (const message of q) {
-        if (message.type === "assistant" && message.message?.content) {
-          // Each assistant message carries the cumulative text so far.
-          // Diff vs what we already yielded to keep deltas non-overlapping.
+        if (message.type === "stream_event") {
+          const ev = message.event;
+          if (
+            ev.type === "content_block_delta" &&
+            ev.delta.type === "text_delta" &&
+            ev.delta.text
+          ) {
+            emittedLen += ev.delta.text.length;
+            yield { text: ev.delta.text, usage: null };
+          }
+        } else if (message.type === "assistant" && message.message?.content) {
+          // The complete message follows its stream events: yield only
+          // text the deltas did not already deliver (none when streaming
+          // worked), keeping deltas non-overlapping.
           let totalText = "";
           for (const block of message.message.content) {
             if (
@@ -367,35 +479,13 @@ export class AnthropicProvider implements SageProvider {
             yield { text: delta, usage: null };
           }
         } else if (message.type === "result") {
-          const latency_ms = Date.now() - t0;
-          if (message.subtype === "success") {
-            const success = message as SDKResultSuccess;
-            const inTok = totalInputTokens(success.usage);
-            const outTok = success.usage?.output_tokens ?? 0;
-            usage = {
-              input_tokens: inTok,
-              output_tokens: outTok,
-              cost_usd:
-                (success as { total_cost_usd?: number }).total_cost_usd ??
-                fallbackPrice(this.narrativeModel, inTok, outTok),
-              latency_ms,
-              provider: this.name,
-              model:
-                (success as { model?: string }).model ?? this.narrativeModel,
-            };
-          } else {
-            const errUsage = (message as { usage?: SdkUsageShape }).usage;
-            const inTok = totalInputTokens(errUsage);
-            const outTok = errUsage?.output_tokens ?? 0;
-            usage = {
-              input_tokens: inTok,
-              output_tokens: outTok,
-              cost_usd: fallbackPrice(this.narrativeModel, inTok, outTok),
-              latency_ms,
-              provider: this.name,
-              model: this.narrativeModel,
-            };
-          }
+          // Success and error results both carry total_cost_usd (audit #91).
+          usage = normalizeSdkUsage(
+            message.usage,
+            this.narrativeModel,
+            Date.now() - t0,
+            message.total_cost_usd,
+          );
         }
       }
     } catch (err) {

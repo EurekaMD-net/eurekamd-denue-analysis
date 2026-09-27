@@ -129,6 +129,7 @@ if (process.env["SAGE_PROVIDER"]) {
       SAGE_API_KEY: process.env["SAGE_API_KEY"],
       SAGE_MODEL_ROUTER: process.env["SAGE_MODEL_ROUTER"],
       SAGE_MODEL_NARRATIVE: process.env["SAGE_MODEL_NARRATIVE"],
+      SAGE_PRICE_TABLE: process.env["SAGE_PRICE_TABLE"],
     });
     console.log(
       `   Sage provider: ${config.sageProvider.name} (router=${config.sageProvider.routerModel}, narrative=${config.sageProvider.narrativeModel})`,

@@ -17,13 +17,14 @@
  * blocks. We flatten to the shared RouteOutput shape at this boundary.
  *
  * Pricing: every provider reports usage differently. We rely on the
- * upstream's `usage` block when present; cost_usd computation requires
- * a SAGE_PRICE_TABLE override env (provider-specific) or stays 0.
+ * upstream's `usage` block when present; cost_usd uses the `pricing`
+ * parsed from the SAGE_PRICE_TABLE env (index.ts) or stays 0.
  */
 
 import {
   ROUTER_SYSTEM_PROMPT,
   NARRATIVE_SYSTEM_PROMPT,
+  buildRouterCatalogPrompt,
   buildRouterUserPrompt,
   buildNarrativeUserPrompt,
 } from "./prompts.js";
@@ -108,12 +109,13 @@ export class OpenAICompatibleProvider implements SageProvider {
     input: RouteInput,
     signal?: AbortSignal,
   ): Promise<RouteResult> {
-    const userPrompt = buildRouterUserPrompt(
-      input.question,
+    // Static catalog + schema first (system), per-request part last
+    // (user), so providers with prefix caching can reuse it (audit #204).
+    const systemPrompt = `${ROUTER_SYSTEM_PROMPT}\n\n${buildRouterCatalogPrompt(
       input.endpoints,
-      input.history,
       input.sql_schema_summary,
-    );
+    )}`;
+    const userPrompt = buildRouterUserPrompt(input.question, input.history);
 
     const tools: ChatToolDef[] = ROUTER_TOOL_LIST.map((t) => ({
       type: "function",
@@ -142,7 +144,7 @@ export class OpenAICompatibleProvider implements SageProvider {
           model: this.routerModel,
           max_tokens: 1024,
           messages: [
-            { role: "system", content: ROUTER_SYSTEM_PROMPT },
+            { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ] satisfies ChatMessage[],
           tools,
@@ -156,7 +158,7 @@ export class OpenAICompatibleProvider implements SageProvider {
         err,
         this.normalizeUsage(
           this.routerModel,
-          approximateTokens(ROUTER_SYSTEM_PROMPT + userPrompt),
+          approximateTokens(systemPrompt + userPrompt),
           0,
           Date.now() - t0,
         ),
@@ -181,12 +183,17 @@ export class OpenAICompatibleProvider implements SageProvider {
 
     const toolCall = body.choices[0]?.message.tool_calls?.[0];
     if (!toolCall) {
-      const text = body.choices[0]?.message.content ?? "";
+      // A text-only reply is shown as a clarification; nothing at all is
+      // a router error, not a decline (audit #84).
+      const text = (body.choices[0]?.message.content ?? "").trim();
       return {
-        output: {
-          kind: "decline",
-          reasoning: text || "Modelo no devolvió tool_call; declinando.",
-        },
+        output: text
+          ? { kind: "clarify", reasoning: text }
+          : {
+              kind: "error",
+              code: "ROUTER_NO_TOOL",
+              detail: `no tool_call and no text (finish_reason ${body.choices[0]?.finish_reason ?? "none"})`,
+            },
         usage,
       };
     }
@@ -195,12 +202,13 @@ export class OpenAICompatibleProvider implements SageProvider {
     try {
       parsedArgs = JSON.parse(toolCall.function.arguments);
     } catch {
-      // Malformed JSON from the upstream — decline gracefully so the
-      // caller can retry or fall back to a different provider/model.
+      // Malformed JSON from the upstream: a router error (audit #84).
+      // The raw arguments go to the audit only, never to the user.
       return {
         output: {
-          kind: "decline",
-          reasoning: `Tool args malformados: ${toolCall.function.arguments.slice(0, 200)}`,
+          kind: "error",
+          code: "ROUTER_BAD_ARGS",
+          detail: `${toolCall.function.name}: malformed arguments: ${toolCall.function.arguments.slice(0, 200)}`,
         },
         usage,
       };
@@ -385,10 +393,15 @@ function parseToolCall(name: string, args: unknown): RouteOutput {
         confidence: Number(obj["confidence"] ?? 0),
       };
     case "decline":
-    default:
       return {
         kind: "decline",
         reasoning: String(obj["reasoning"] ?? "Sin razón provista."),
+      };
+    default:
+      return {
+        kind: "error",
+        code: "ROUTER_BAD_ARGS",
+        detail: `unknown tool: ${name.slice(0, 100)}`,
       };
   }
 }

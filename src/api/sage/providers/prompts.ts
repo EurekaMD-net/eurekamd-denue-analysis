@@ -45,15 +45,36 @@ Tone: a sober, well-read analyst. Not chatty. No emojis. No bullet points. No fi
 
 If the user is mid-conversation, your paragraph can briefly tie back to the prior turn ("Filtrando ahora a NL, …") but stay focused on the current result.`;
 
-export function buildRouterUserPrompt(
-  question: string,
+/**
+ * The static part of the router context: the endpoint catalog and the SQL
+ * schema. Both are fixed at boot, so they belong in the system prompt
+ * where the prompt cache can reuse them across requests (audit #204).
+ */
+export function buildRouterCatalogPrompt(
   endpoints: EndpointSpec[],
-  history: PriorTurnDigest[],
   sqlSchemaSummary: string,
 ): string {
   const sections: string[] = [];
 
-  sections.push(`# User question\n\n${question}`);
+  sections.push("# Available endpoints\n");
+  for (const ep of endpoints) {
+    sections.push(
+      `- **${ep.name}**: ${ep.description}\n  Params: ${JSON.stringify(ep.params_schema)}`,
+    );
+  }
+
+  sections.push("# SQL fallback schema (read-only allowlist)\n");
+  sections.push(sqlSchemaSummary);
+
+  return sections.join("\n\n");
+}
+
+/** The per-request part: history (oldest first), then the question. */
+export function buildRouterUserPrompt(
+  question: string,
+  history: PriorTurnDigest[],
+): string {
+  const sections: string[] = [];
 
   if (history.length > 0) {
     sections.push("# Conversation so far (digests, oldest first)\n");
@@ -70,15 +91,7 @@ export function buildRouterUserPrompt(
     }
   }
 
-  sections.push("# Available endpoints\n");
-  for (const ep of endpoints) {
-    sections.push(
-      `- **${ep.name}**: ${ep.description}\n  Params: ${JSON.stringify(ep.params_schema)}`,
-    );
-  }
-
-  sections.push("# SQL fallback schema (read-only allowlist)\n");
-  sections.push(sqlSchemaSummary);
+  sections.push(`# User question\n\n${question}`);
 
   return sections.join("\n\n");
 }

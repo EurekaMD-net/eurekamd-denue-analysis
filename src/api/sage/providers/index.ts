@@ -16,6 +16,8 @@
  *   SAGE_API_KEY=gsk_...
  *   SAGE_MODEL_ROUTER=llama-3.3-70b-versatile
  *   SAGE_MODEL_NARRATIVE=qwen3-32b
+ *   # optional, $ per million tokens; without it cost_usd is 0
+ *   SAGE_PRICE_TABLE={"llama-3.3-70b-versatile":{"in":0.59,"out":0.79}}
  */
 
 import { AnthropicProvider } from "./anthropic.js";
@@ -31,6 +33,41 @@ export interface SageProviderEnv {
   SAGE_API_KEY?: string;
   SAGE_MODEL_ROUTER?: string;
   SAGE_MODEL_NARRATIVE?: string;
+  SAGE_PRICE_TABLE?: string;
+}
+
+type PriceTable = Record<string, { in: number; out: number }>;
+
+/**
+ * SAGE_PRICE_TABLE (audit #211): JSON mapping model id to $/M-token
+ * prices. Invalid JSON or shape throws, so a typo fails at boot instead
+ * of silently auditing cost_usd=0.
+ */
+function parsePriceTable(raw: string | undefined): PriceTable | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("SAGE_PRICE_TABLE is not valid JSON.");
+  }
+  const isPrice = (v: unknown): boolean =>
+    v !== null &&
+    typeof v === "object" &&
+    [(v as { in?: unknown }).in, (v as { out?: unknown }).out].every(
+      (n) => typeof n === "number" && Number.isFinite(n) && n >= 0,
+    );
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !Object.values(parsed).every(isPrice)
+  ) {
+    throw new Error(
+      'SAGE_PRICE_TABLE must map model ids to {"in": <$/M tokens>, "out": <$/M tokens>}.',
+    );
+  }
+  return parsed as PriceTable;
 }
 
 export function buildSageProvider(env: SageProviderEnv): SageProvider {
@@ -71,6 +108,7 @@ export function buildSageProvider(env: SageProviderEnv): SageProvider {
       apiKey,
       routerModel,
       narrativeModel,
+      pricing: parsePriceTable(env.SAGE_PRICE_TABLE),
     });
   }
 

@@ -17,7 +17,7 @@
  * prompt working everywhere.
  */
 
-export type RouteKind = "endpoint" | "sql" | "decline";
+export type RouteKind = "endpoint" | "sql" | "decline" | "clarify";
 
 export interface RouteOutputEndpoint {
   kind: "endpoint";
@@ -39,10 +39,32 @@ export interface RouteOutputDecline {
   reasoning: string;
 }
 
+/**
+ * The model answered in text without calling a tool (typically a
+ * clarifying question): its text is shown as the narrative (audit #84).
+ */
+export interface RouteOutputClarify {
+  kind: "clarify";
+  reasoning: string;
+}
+
+/**
+ * The router pass produced no usable decision (audit #84): no tool call
+ * and no text, malformed or unknown tool arguments, or an SDK error
+ * result before any tool ran. `detail` is for the audit only.
+ */
+export interface RouteOutputError {
+  kind: "error";
+  code: "ROUTER_NO_TOOL" | "ROUTER_BAD_ARGS" | "ROUTER_SDK_ERROR";
+  detail: string;
+}
+
 export type RouteOutput =
   | RouteOutputEndpoint
   | RouteOutputSql
-  | RouteOutputDecline;
+  | RouteOutputDecline
+  | RouteOutputClarify
+  | RouteOutputError;
 
 export interface EndpointSpec {
   name: string;
@@ -117,6 +139,10 @@ export interface NarrativeInput {
 export interface UsageNormalized {
   input_tokens: number;
   output_tokens: number;
+  /** Of input_tokens, the part read from the prompt cache (audit #204). */
+  cache_read_input_tokens?: number;
+  /** Of input_tokens, the part written to the prompt cache (audit #204). */
+  cache_creation_input_tokens?: number;
   /** Provider-reported cost; 0 when the upstream doesn't expose pricing. */
   cost_usd: number;
   latency_ms: number;

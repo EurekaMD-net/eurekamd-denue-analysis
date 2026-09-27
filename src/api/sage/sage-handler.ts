@@ -67,6 +67,10 @@ const TIMEOUT_MESSAGE = "La consulta tardó demasiado; intenta de nuevo.";
 // raw error text stays in the audit row.
 const INTERNAL_MESSAGE = "Sage no pudo responder; intenta de nuevo.";
 const ABORTED_MESSAGE = "La consulta se canceló.";
+// Public message for a router pass that produced no usable decision
+// (audit #84); the provider's detail stays in the audit row.
+const ROUTER_ERROR_MESSAGE =
+  "Sage no pudo decidir cómo responder; reformula la pregunta.";
 // Strict UUID (audit #92): sage_threads.thread_id is a uuid column, so a
 // looser pattern let a cast error surface as a 500.
 const UUID_RE =
@@ -321,21 +325,44 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             },
             abortCtrl.signal,
           );
-          send("route", routerResult.output);
+          const route: RouteOutput = routerResult.output;
+          // No usable decision (no tool call, bad args, SDK error result):
+          // an audited error, not a decline in a 200 stream (audit #84).
+          if (route.kind === "error") {
+            audits.push({
+              thread_id: threadId,
+              call_kind: "router",
+              provider: routerResult.usage.provider,
+              model: routerResult.usage.model,
+              prompt: { question, history_n: priorTurns.length },
+              output: route,
+              usage: routerResult.usage,
+              error_code: route.code,
+              error_message: route.detail.slice(0, AUDIT_ERROR_MAX),
+            });
+            send("usage", routerResult.usage);
+            await persistFailedTurn(failedRoute, {
+              code: route.code,
+              message: ROUTER_ERROR_MESSAGE,
+            });
+            send("error", { code: route.code, message: ROUTER_ERROR_MESSAGE });
+            controller.close();
+            return;
+          }
+          send("route", route);
           audits.push({
             thread_id: threadId,
             call_kind: "router",
             provider: routerResult.usage.provider,
             model: routerResult.usage.model,
             prompt: { question, history_n: priorTurns.length },
-            output: routerResult.output,
+            output: route,
             usage: routerResult.usage,
             error_code: null,
             error_message: null,
           });
           send("usage", routerResult.usage);
 
-          const route: RouteOutput = routerResult.output;
           const routeRec: NarrativeInput["route"] = {
             kind: route.kind,
             endpoint_name:
@@ -355,8 +382,9 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             first_n_rows: [],
           };
 
-          if (route.kind === "decline") {
-            // Persisted like any other turn (audit #89).
+          if (route.kind === "decline" || route.kind === "clarify") {
+            // Persisted like any other turn (audit #89). A clarify is the
+            // model's own text reply (audit #84).
             send("narrative", { text: route.reasoning });
             stage = "persist";
             const declined = await appendTurn(

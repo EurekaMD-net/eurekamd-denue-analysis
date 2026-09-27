@@ -192,7 +192,8 @@ export async function appendAudit(
     config,
     `INSERT INTO sage_turns_audit
       (thread_id, call_kind, provider, model, prompt, output,
-       input_tokens, output_tokens, cost_usd, latency_ms,
+       input_tokens, output_tokens, cache_read_input_tokens,
+       cache_creation_input_tokens, cost_usd, latency_ms,
        error_code, error_message)
      VALUES (
        ${entry.thread_id ? `(SELECT thread_id FROM sage_threads WHERE thread_id = ${quote(entry.thread_id)})` : "NULL"},
@@ -203,6 +204,8 @@ export async function appendAudit(
        ${entry.output === null ? "NULL" : `${quoteJson(entry.output)}::jsonb`},
        ${entry.usage.input_tokens},
        ${entry.usage.output_tokens},
+       ${Math.trunc(entry.usage.cache_read_input_tokens ?? 0)},
+       ${Math.trunc(entry.usage.cache_creation_input_tokens ?? 0)},
        ${entry.usage.cost_usd},
        ${entry.usage.latency_ms},
        ${entry.error_code ? quote(entry.error_code) : "NULL"},
