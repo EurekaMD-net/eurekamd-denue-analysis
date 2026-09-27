@@ -138,6 +138,78 @@ describe("DenueClient", () => {
     });
   });
 
+  describe("buscarEntidad — forma estricta de la respuesta (audit #41)", () => {
+    function mockText(text: string): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(text),
+      } as Response);
+    }
+
+    it("returns empty array when API responds with []", async () => {
+      mockText("[]");
+      const client = new DenueClient(MOCK_TOKEN);
+      expect(await client.buscarEntidad("09", 1, 500)).toEqual([]);
+    });
+
+    it("throws DenueApiError on a non-array JSON body instead of reading it as end-of-data", async () => {
+      mockText('{"error":"limite excedido"}');
+      const client = new DenueClient(MOCK_TOKEN);
+      const err = await client.buscarEntidad("09", 1, 500).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect((err as Error).message).toMatch(/respuesta no-array: \{"error":"limite excedido"\}/);
+    });
+
+    it("ficha throws on an unparseable body instead of returning null", async () => {
+      mockText("<html>error</html>");
+      const client = new DenueClient(MOCK_TOKEN);
+      await expect(client.ficha("6319819")).rejects.toBeInstanceOf(DenueApiError);
+    });
+  });
+
+  describe("token redaction (audit #46)", () => {
+    beforeEach(() => {
+      setGlobalDelay(0);
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function captureError(client: DenueClient): Promise<DenueApiError> {
+      const pending = client.buscarEntidad("09", 1, 500).catch((e: unknown) => e);
+      await vi.runAllTimersAsync(); // skip the retry backoff
+      return (await pending) as DenueApiError;
+    }
+
+    it("HTTP errors carry no token in message or endpoint", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Internal Server Error"),
+      } as Response);
+      const err = await captureError(new DenueClient(MOCK_TOKEN));
+
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect(err.message).toMatch(/^HTTP 500 en .*\/<token>\/$/);
+      expect(err.message).not.toContain(MOCK_TOKEN);
+      expect(err.endpoint).toContain("<token>");
+      expect(err.endpoint).not.toContain(MOCK_TOKEN);
+    });
+
+    it("network errors carry no token in message or endpoint", async () => {
+      globalThis.fetch = vi.fn().mockRejectedValue(new TypeError(`fetch failed for ${MOCK_TOKEN}`));
+      const err = await captureError(new DenueClient(MOCK_TOKEN));
+
+      expect(err).toBeInstanceOf(DenueApiError);
+      expect(err.message).toMatch(/Error de red tras 3 intentos/);
+      expect(err.message).not.toContain(MOCK_TOKEN);
+      expect(err.endpoint).toContain("<token>");
+      expect(err.endpoint).not.toContain(MOCK_TOKEN);
+    });
+  });
+
   describe("cuantificarEntidad", () => {
     it("throws DenueApiError (endpoint is HTTP 501 as of 2026-05-03)", async () => {
       const client = new DenueClient(MOCK_TOKEN);

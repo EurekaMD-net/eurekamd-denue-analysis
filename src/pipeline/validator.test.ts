@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { validateExtractorFile } from "./validator.js";
+import { validateExtractorFile, validateRecords } from "./validator.js";
 
 let tmpDir: string;
 
@@ -145,5 +145,20 @@ describe("Validator — sampleSize", () => {
     const result = validateExtractorFile(file, 1);
     expect(result.sampleSize).toBe(1);
     expect(result.valid).toBe(true);
+  });
+});
+
+describe("Validator — validateRecords (array ya parseado, audit #48)", () => {
+  it("valida el array sin leer ningún archivo", () => {
+    const result = validateRecords([makeValidRecord()], 1);
+    expect(result.valid).toBe(true);
+    expect(result.totalRecords).toBe(1);
+  });
+
+  it("rechaza array vacío y registros con campos críticos vacíos", () => {
+    expect(validateRecords([]).errors[0]).toMatch(/0 registros/);
+    const bad = validateRecords([makeValidRecord({ Nombre: "" })], 1);
+    expect(bad.valid).toBe(false);
+    expect(bad.errors.some((e) => e.includes("nombre"))).toBe(true);
   });
 });
