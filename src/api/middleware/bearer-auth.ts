@@ -39,6 +39,8 @@ export interface SupabaseJwtClaims {
   exp: number; // unix seconds
   iat: number;
   iss?: string;
+  /** Written only via the service role; carries app membership. */
+  app_metadata?: { apps?: unknown };
 }
 
 export interface AuthedUser {
@@ -59,8 +61,21 @@ export type BearerVerifyResult =
         | "EXPIRED"
         | "WRONG_AUD"
         | "WRONG_ROLE"
-        | "WRONG_ALG";
+        | "WRONG_ALG"
+        | "WRONG_ISS"
+        | "NOT_MEMBER";
     };
+
+// GoTrue public issuer (API_EXTERNAL_URL + "/auth/v1"). GoTrue v2.170
+// emits `iss` only when GOTRUE_JWT_ISSUER is set; with it unset the claim
+// is omitted, so an absent `iss` is accepted and a present one must match.
+export const EXPECTED_ISS = "https://db.mycommit.net/auth/v1";
+
+// The GoTrue instance and JWT secret are shared by every EurekaMD app, so
+// a valid signature proves only "some EurekaMD user". Membership in this
+// app is `app_metadata.apps` containing this id; app_metadata is writable
+// only with the service role (audit findings #1, #191).
+export const REQUIRED_APP = "uncharted";
 
 // Bearer header — accept only base64url characters (no `+` `/` `=`).
 // Audit A W3: tightening from the looser pattern that allowed base64
@@ -227,6 +242,15 @@ export function verifyBearer(
   // serialize to "[object Object]" downstream and confuse identity.
   if (typeof claims.sub !== "string" || claims.sub.length === 0) {
     return { ok: false, reason: "MALFORMED" };
+  }
+
+  if (claims.iss !== undefined && claims.iss !== EXPECTED_ISS) {
+    return { ok: false, reason: "WRONG_ISS" };
+  }
+
+  const apps = claims.app_metadata?.apps;
+  if (!Array.isArray(apps) || !apps.includes(REQUIRED_APP)) {
+    return { ok: false, reason: "NOT_MEMBER" };
   }
 
   const user: AuthedUser = {
