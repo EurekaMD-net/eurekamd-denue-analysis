@@ -10,9 +10,9 @@
 -- in scripts/refresh-matviews.sh (verified 2026-09-26: 2204 rows, 2204
 -- distinct keys, 0 NULL keys).
 --
--- load-sinba.ts runs DROP TABLE sinba_ec_raw CASCADE, which drops this MV
--- too. After every SINBA reload, re-run this file (REFRESH cannot recreate
--- a dropped MV; the handlers serve from the view until then).
+-- load-sinba.ts drops this MV explicitly and recreates it (from
+-- scripts/perf-matviews.sql) inside its reload transaction, so a SINBA
+-- reload keeps it; this file is only the first-time apply.
 --
 -- Idempotent. Apply:
 --   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/migrations/018-mv-sinba-morbidity.sql

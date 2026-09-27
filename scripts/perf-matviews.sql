@@ -237,8 +237,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_mmy_unique ON mv_mortalidad_municipal_y
 -- (~200 ms); locust-muni and opportunity-by-ageb read this MV instead and
 -- fall back to the view when it is missing. Built FROM the view so the
 -- definition lives only in scripts/load-sinba.ts. load-sinba.ts drops
--- sinba_ec_raw CASCADE, which drops this MV: re-create it after every
--- SINBA reload (scripts/migrations/018-mv-sinba-morbidity.sql).
+-- this MV before its view and recreates it from this section on every
+-- SINBA reload.
 -- =============================================================================
 DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;
 CREATE MATERIALIZED VIEW mv_sinba_morbidity_municipal AS

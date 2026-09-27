@@ -312,4 +312,16 @@ describe("loadSinba — atomic reload (audit #145)", () => {
     expect(sql).not.toMatch(/CASCADE|\bCOMMIT;/);
     expect(sql).toContain("GRANT SELECT ON sinba_morbidity_municipal TO denue_sage;");
   });
+
+  it("buildSinbaReloadSql: drops mv_sinba_morbidity_municipal before its view and recreates it after (#140)", () => {
+    const sql = buildSinbaReloadSql(HEADER, "/tmp/sinba_ec.csv");
+    const dropMv = sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;");
+    const dropView = sql.indexOf("DROP VIEW IF EXISTS sinba_morbidity_municipal;");
+    const view = sql.indexOf("CREATE OR REPLACE VIEW sinba_morbidity_municipal AS");
+    const mv = sql.indexOf("CREATE MATERIALIZED VIEW mv_sinba_morbidity_municipal AS");
+    expect(dropMv).toBeGreaterThan(-1);
+    expect(dropMv).toBeLessThan(dropView);
+    expect(view).toBeLessThan(mv);
+    expect(sql).toContain("idx_mv_smm_unique");
+  });
 });

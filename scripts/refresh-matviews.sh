@@ -11,9 +11,9 @@
 #   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio + sict_traffic_by_estado
 #   - SEDATU loader (load-sedatu-financiamientos.ts) → sedatu_financing_by_municipio + sedatu_financing_by_estado
 #   - CNBV loader (load-cnbv-credito.ts) → cnbv_credito_by_municipio + cnbv_credito_by_estado
-#   - SINBA loader (load-sinba.ts)   → mv_sinba_morbidity_municipal. The loader
-#     drops sinba_ec_raw CASCADE, which DROPS this MV: re-create it with
-#     scripts/migrations/018-mv-sinba-morbidity.sql; REFRESH cannot.
+#   - SINBA loader (load-sinba.ts)   → mv_sinba_morbidity_municipal (the
+#     loader recreates it in its reload transaction; first-time apply is
+#     scripts/migrations/018-mv-sinba-morbidity.sql).
 #
 # The handlers fall back to live aggregation when an MV is missing entirely
 # (audit M1, 2026-05-05), but they have NO way to detect "MV exists but is

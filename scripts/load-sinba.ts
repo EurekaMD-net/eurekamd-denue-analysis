@@ -49,6 +49,7 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import {
   assertRelationsExist,
   existingRowCount,
+  perfMatviewSql,
   postLoadGrants,
   runPsqlScript,
   swapInStagingSql,
@@ -230,8 +231,9 @@ const SINBA_RELATIONS = ["sinba_ec_raw", "sinba_morbidity_municipal"];
 
 /**
  * The single-transaction reload script (audit #145): \copy into staging,
- * drop the view explicitly (an unknown dependent makes DROP TABLE fail →
- * rollback), swap, index + view, grants.
+ * drop the MV and view explicitly (an unknown dependent makes DROP TABLE
+ * fail → rollback), swap, index + view, recreate mv_sinba_morbidity_municipal
+ * (audit #140; it reads the view, so the view cannot drop under it), grants.
  */
 export function buildSinbaReloadSql(
   headerLine: string,
@@ -241,10 +243,12 @@ export function buildSinbaReloadSql(
     buildSinbaCreateTable(headerLine, "sinba_ec_raw_staging"),
     `\\copy sinba_ec_raw_staging FROM '${containerPath}' WITH (FORMAT csv, HEADER true, NULL 'NULL')`,
     swapInStagingSql("sinba_ec_raw", [
+      "DROP MATERIALIZED VIEW IF EXISTS mv_sinba_morbidity_municipal;",
       "DROP VIEW IF EXISTS sinba_morbidity_municipal;",
     ]),
     buildPostLoadSql(headerLine),
-    postLoadGrants(SINBA_RELATIONS),
+    perfMatviewSql("mv_sinba_morbidity_municipal"),
+    postLoadGrants([...SINBA_RELATIONS, "mv_sinba_morbidity_municipal"]),
   ].join("\n");
 }
 
