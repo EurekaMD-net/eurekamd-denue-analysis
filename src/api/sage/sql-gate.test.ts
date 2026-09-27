@@ -184,7 +184,10 @@ describe("preCheckSql", () => {
 
   it("handles '' and E'\\'' escapes without ending the literal early", () => {
     expect(preCheckSql("SELECT 'it''s; DROP' AS s")).toBeNull();
-    expect(preCheckSql("SELECT E'it\\'s; DROP' AS s")).toBeNull();
+    // E'' escapes need a backslash, which Sage SQL may not contain at all.
+    expect(preCheckSql("SELECT E'it\\'s; DROP' AS s")?.code).toBe(
+      "SQL_PARSE_FAIL",
+    );
     // Standard string: backslash is literal, so the quote after it closes.
     expect(preCheckSql("SELECT 'a\\'; DROP TABLE x; --'")?.code).toBe(
       "SQL_PARSE_FAIL",
@@ -213,6 +216,20 @@ describe("preCheckSql", () => {
 
   it("rejects a backslash outside literals (psql meta-command)", () => {
     expect(preCheckSql("SELECT 1 \\! id")?.code).toBe("SQL_PARSE_FAIL");
+  });
+
+  // qa-audit P23: psql reads `1e` as one junk token and then a standard
+  // '\' literal, so the `\!` after it is a meta-command to psql -f -,
+  // while the tokenizer saw `1` + one E'' string. Any backslash is out.
+  it("rejects a backslash anywhere, even where the tokenizer sees a literal", () => {
+    for (const sql of [
+      "SELECT 1e'\\' \\! id\n' AS x",
+      "SELECT 1e'\\' \\echo GATE_PASSED_METACOMMAND\n' AS x",
+      "SELECT 'a\\b' AS s",
+      "SELECT 1 AS n -- \\! id",
+    ]) {
+      expect(preCheckSql(sql)?.code).toBe("SQL_PARSE_FAIL");
+    }
   });
 
   it("rejects forbidden relations when quoted or schema-qualified", () => {
@@ -455,6 +472,15 @@ describe("executeGatedSql psql invocation", () => {
     ]);
     expect(mockRunSql.mock.calls[0]![0]).toContain("EXPLAIN (FORMAT JSON)");
     expect(mockRunSql.mock.calls[1]![0]).toContain("COPY (");
+  });
+
+  it("never hands a backslash payload to psql (qa-audit P23)", async () => {
+    const res = await executeGatedSql(
+      "SELECT 1e'\\' \\echo GATE_PASSED_METACOMMAND\n' AS x",
+      { dbContainer: "supabase-db" },
+    );
+    expect(res).toMatchObject({ ok: false, error: { code: "SQL_PARSE_FAIL" } });
+    expect(mockRunSql).not.toHaveBeenCalled();
   });
 
   it("maps a statement_timeout in the runner's stderr to SQL_TIMEOUT", async () => {

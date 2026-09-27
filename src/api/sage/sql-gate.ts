@@ -343,6 +343,17 @@ function isIdent(t: SqlToken | undefined): t is SqlToken {
 }
 
 export function preCheckSql(sql: string): SqlGateError | null {
+  // psql reads the gate script from stdin, where a backslash can start a
+  // meta-command (`\!` runs a shell). psql's lexer does not split tokens
+  // exactly like tokenizeSql (`1e'\'` is junk + a standard literal to psql,
+  // `1` + an E'' string here), so a backslash "inside a literal" is not
+  // proof of safety. No backslash anywhere means no meta-command, full stop.
+  if (sql.includes("\\")) {
+    return {
+      code: "SQL_PARSE_FAIL",
+      message: "backslash not allowed in Sage SQL",
+    };
+  }
   const tokens = tokenizeSql(sql);
   if (typeof tokens === "string") {
     return { code: "SQL_PARSE_FAIL", message: tokens };
@@ -525,8 +536,9 @@ export function checkExplainPlan(
  * Both calls go through the shared async psql runner (audit #79/#202):
  * the event loop is never blocked, the script goes on stdin, and aborting
  * `config.signal` kills the client and cancels the backend. psql reads
- * the script as a file, but preCheckSql rejects any backslash outside a
- * string literal, so no psql meta-command (`\!`) can reach it. pg_hba
+ * the script as a file, so preCheckSql rejects any backslash anywhere in
+ * the SQL (literals and comments included): no psql meta-command (`\!`,
+ * `\o`) can reach it, whatever psql's lexer makes of the text. pg_hba
  * trusts the container's local socket, so `-U denue_sage` needs no
  * password (TCP needs one the role does not have).
  */
