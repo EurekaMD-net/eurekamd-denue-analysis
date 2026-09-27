@@ -133,7 +133,9 @@ json:
 2. Run `bash ops/denue-refresh.sh stale-report` (read-only). It prints stale candidates per
    entidad, the total, and its percentage of the baseline, and writes the CLEE list to
    `data/state/denue-refresh-2026-09.stale-clees.txt`. If the stale share is above 10%, suspect a
-   short extraction.
+   short extraction. The >10% WARN is expected whenever INEGI re-keys CLEEs between editions (it did
+   for 05/2026); confirm with `bash ops/denue-stale-cleanup.sh report` before treating it as a short
+   extraction.
 3. Spot-check with `curl -s http://127.0.0.1:3030/health` and a `/search` in the UI.
    `mv_coverage.last_updated_at` should have moved.
 4. Keep `data/raw/*.json` (about 3.5 GB) until the stale decision is made. The stale report reads
@@ -141,6 +143,94 @@ json:
 5. Remember that `geom` is now correct for moved establishments, but their `ageb` is still the old
    one, because the backfill fills only NULL. A spatial query by `ageb` can therefore still place a
    moved establishment in its old AGEB.
+
+## Stale-row cleanup
+
+`ops/denue-stale-cleanup.sh` deletes the rows listed in
+`data/state/denue-refresh-2026-09.stale-clees.txt`, meaning CLEEs that are in the database but
+absent from the 05/2026 extraction.
+
+**Why 18.8% stale is expected for this edition.** INEGI re-keyed the CLEE of most establishments
+between 11/2025 and 05/2026. The middle digits changed, while `denue_id`, `nombre` and the
+coordinates stayed the same. The upsert is keyed on `clee`, so each re-keyed establishment now has
+two rows: the old one (stale) and a new one created by this run. On 2026-09-27 the report showed
+1,146,694 stale rows. Of these, 1,086,261 (94.7%) have a `denue_id` that also exists on a row
+created by this run, so they are re-keyed duplicates. The other 60,433 are real departures. Every
+estado extracted at least its previous count, and the truncation guard printed no warnings, so
+deleting the stale rows removes duplicates and departures and nothing from the new edition.
+
+**Deletion is by CLEE list, never by `updated_at`.** `updated_at < <run date>` also matches
+14,422 live rows whose `raw_json` did not change this edition, because the trigger only moves
+`updated_at` when `raw_json` changes. `report` prints that split. `backup` and `apply` load the
+CLEE list into a session-private temp table and join on it.
+
+Modes (run as root; every mode first runs the common guards):
+
+| Mode | What it does |
+|---|---|
+| `report` (default, read-only) | Prints a per-estado table: stale rows in the DB, re-keyed (`denue_id` on a row created on or after the run date), real departures, new rows, and genuinely new rows (`denue_id` not among the stale rows). It asserts that every stale CLEE is in the DB and that none was created or updated by this run, and it estimates the backup size. It takes about 3 min. |
+| `backup` | Streams `COPY` of exactly the stale rows through `gzip -1` into `data/state/denue-stale-2026-09.rows.csv.gz`. It needs at least 5 GB free, asserts that the row count equals the stale count, and prints the sha256 and size. If the file already exists with a matching count, it skips. |
+| `apply` | Needs the backup with a matching count, then asks once. It runs one transaction per estado (01..32). Each transaction asserts that all of that estado's stale CLEEs are present, deletes them, and asserts the deleted count; on any mismatch it rolls back that estado and stops. An estado whose stale rows are already gone is skipped. Progress goes to `data/state/denue-stale-2026-09.cleanup.log`, and the per-estado counts go to the ledger `data/state/denue-stale-2026-09.cleanup.json`. After the last estado it runs `VACUUM (ANALYZE, PARALLEL 0)` with `vacuum_cost_delay=2ms`, then `scripts/refresh-matviews.sh`, and asserts that the final `count(*)` equals the `records_extracted` sum in `pipeline-state.json`. It stops `denue-matview-refresh.timer` if it is active, before the confirmation prompt. It starts the timer again after the final count check; an exit trap also starts it if `apply` fails or is aborted. Because the timer is `Persistent=true`, it may fire one extra matview refresh right after it is re-armed if 04:00 UTC passed during the run, which is harmless. It refuses to run without a terminal. On a resumed run it refuses if the backup's sha256 no longer matches the ledger, so a backup regenerated after the ledger exists fails that check; remove the ledger only if no estado has been deleted yet (its `.estados` is empty). |
+
+Common guards:
+
+- The `denue-refresh` unit is inactive, the baseline has `finished_at`, and `pipeline-state.json`
+  shows 32/32 estados `done`.
+- The stale file is newer than `finished_at`, is sorted and unique, and every line is a CLEE. One
+  legacy row has a 27-character CLEE, so the check accepts 27 or 28 characters. Every CLEE's
+  estado prefix is between 01 and 32.
+- `count(*)` minus the extraction total equals the stale count minus the rows the ledger records
+  as deleted. This means the DB has not changed since `stale-report`. There is one accepted
+  exception, covered under "Interrupted apply" below.
+- No client backend is busy on `establecimientos` or running `REFRESH MATERIALIZED`.
+
+```bash
+cd /root/claude/projects/data-intelligence/denue-data-analysis
+bash ops/denue-stale-cleanup.sh report
+bash ops/denue-stale-cleanup.sh backup
+tmux new -s stale                       # apply is interactive and long: 32 transactions, a throttled VACUUM, ~5 min of matviews
+bash ops/denue-stale-cleanup.sh apply   # reattach after a drop: tmux attach -t stale
+```
+
+**Interrupted apply.** To recover, rerun `apply`; no manual ledger edit is needed.
+
+- Each estado commits on its own, so a crash or SSH drop loses at most the estado in flight. That
+  estado either rolled back, or committed before its ledger entry was written.
+- The committed-but-unrecorded case leaves `count(*)` short of what the ledger predicts. When that
+  happens, the guards count, per estado outside the ledger, how many of its stale CLEEs are still
+  present (read-only). They accept the shortfall only if it equals the stale count of the estados
+  that have 0 left, and otherwise print the per-estado breakdown and refuse.
+- On the rerun, those estados hit the SKIP branch (0 present), which records them in the ledger
+  with `recovered: true`. Estados already in the ledger are skipped. The run then continues from
+  the next estado.
+
+**Rollback (after a complete apply).** Re-insert the backup inside the container:
+
+```bash
+zcat data/state/denue-stale-2026-09.rows.csv.gz \
+  | docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+      -c "\copy public.establecimientos FROM STDIN WITH (FORMAT csv, HEADER)"
+```
+
+The CSV carries every column, including `id`. An `id` conflict is impossible because the deleted
+ids are gone and the sequence only moves forward. The CLEE unique key is also free, because the
+same rows were deleted. Then move the ledger away, because its guard would refuse with a negative shortfall:
+`mv data/state/denue-stale-2026-09.cleanup.json{,.rolled-back-$(date +%s)}`. Finally, run `bash scripts/refresh-matviews.sh`.
+
+**Rollback after a partial apply.** Some of the backup's CLEEs are still in the table, so the full
+`\copy` above fails on the first one. Load the CSV into a temp table and insert only the missing
+rows:
+
+```bash
+zcat data/state/denue-stale-2026-09.rows.csv.gz \
+  | docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+      -c "CREATE TEMP TABLE t (LIKE public.establecimientos)" \
+      -c "\copy t FROM STDIN WITH (FORMAT csv, HEADER)" \
+      -c "INSERT INTO public.establecimientos SELECT * FROM t WHERE NOT EXISTS (SELECT 1 FROM public.establecimientos e WHERE e.clee = t.clee)"
+```
+
+Then move the ledger away, because its guard would refuse with a negative shortfall:
+`mv data/state/denue-stale-2026-09.cleanup.json{,.rolled-back-$(date +%s)}`. Finally, run `bash scripts/refresh-matviews.sh`.
 
 ## Known limitations
 
@@ -151,7 +241,8 @@ json:
   files. Before diffing, it checks that each file is newer than `run_start` and that its record
   count matches the state file. For the same reason, the status counters "new" (`created_at`) and
   "changed-or-new" (`updated_at`) are informational only.
-- **Stale rows are reported, never deleted.** Removing them is a separate operator decision.
+- **Stale rows are reported, never deleted.** Removing them is a separate operator decision,
+  made with `ops/denue-stale-cleanup.sh` (see [Stale-row cleanup](#stale-row-cleanup)).
 - **Moved establishments keep their old `ageb`.** The geometry step corrects `geom`, but
   `backfill-ageb` fills only NULL values.
 - **The edition exists only in the baseline json** (`"edition": "05/2026"`). The API returns an

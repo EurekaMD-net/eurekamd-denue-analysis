@@ -17,7 +17,7 @@ the OSM finding (section 3) was re-checked directly.
 | P2 | SEDATU financiamientos | 2025 full year | `Financiamientos_2026.csv` ene–jun (9.9 MB) | Parametrise the year-locked loader, add 2026 alongside 2025 |
 | P2 | CNBV crédito vivienda | 2025 full year | `CNBV_2026.csv` ene–jun (3.4 MB) | Same as SEDATU (same `_2025` hardcoding) |
 | P2 | Encuesta Intercensal 2025 | not loaded (new) | released 2026-09-22, state + municipio | New loader; 2,478 municipios vs 2,469 keys |
-| P3 | DENUE | 11/2025 (inferred from `created_at`) | 05/2026; **11/2026 due 2026-11-25** | One API re-extract after 11-25 covers both |
+| ~~P3~~ DONE 09-27 | DENUE | **05/2026 loaded 2026-09-27** (6,138,075; was 11/2025, 6,097,681) | **11/2026 due 2026-11-25** | `ops/denue-refresh.sh` (11 h). Pending: `ops/denue-stale-cleanup.sh` removes 1,146,694 re-keyed/departed CLEE rows (see `docs/DENUE-REFRESH.md`) |
 | P3 | Aeropuertos | March-of-year 2006–2026 | AFAC through July 2026 | Semantics decision first (March-only pivot) |
 | P3 | Marco Geoestadístico | MG 2020 | MG 2025 (2.9 GB, 2025-12-15; 2,478 municipios) | Load alongside 2020, not replace; key bridge needed |
 | watch | EDR defunciones | 2024 definitive | 2025 preliminary (Aug 2026); definitive ~Nov 2026 | `--append` 2025 when the open-data zip appears |
@@ -81,6 +81,6 @@ the OSM finding (section 3) was re-checked directly.
    2025 (analytics views need a year dimension or a "latest" convention).
 4. EIC 2025 municipal layer (new loader; decide the 2,478→2,469 key bridge
    together with the MG 2025 question).
-5. After 2026-11-25: DENUE 11/2026 re-extract (hours of API paging);
+5. DENUE 05/2026 loaded 2026-09-27 (stale-row cleanup pending, operator). After 2026-11-25: DENUE 11/2026 re-extract (~11 h of API paging);
    after ~Nov 2026: EDR 2025 definitive with `--append` + MV refresh.
 6. Aeropuertos: rule on March-only vs latest-month semantics, then reload.

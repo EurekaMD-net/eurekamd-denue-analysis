@@ -147,6 +147,17 @@ El DENUE es el directorio más completo de establecimientos económicos en Méxi
 | Conveniencia / abarrotes       | 461          | Competencia OXXO             |
 | Gimnasios / fitness            | 7139         | NSE alto                     |
 
+### Refresh DENUE 05/2026 (2026-09-27)
+
+Segunda corrida nacional con `ops/denue-refresh.sh` (unidad systemd transitoria, 11 h 04 min, 32/32 entidades, 0 fallas de truncamiento). Los números de la tabla de abajo son el snapshot histórico de la primera carga (11/2025).
+
+| Métrica | Valor | Notas |
+| --- | --- | --- |
+| Registros extraídos/cargados 05/2026 | **6,138,075** | `data/state/pipeline-state.json`; +40,394 vs 11/2025. Tlaxcala 24,711 → 99,366 (la corrida de mayo quedó corta ahí) |
+| Filas en Supabase (antes de la limpieza) | 7,284,769 | 6,138,075 de esta edición + 1,146,694 CLEE que ya no existen en 05/2026 |
+| CLEE obsoletos | 1,146,694 (18.8 %) | INEGI **re-asigna el CLEE** entre ediciones (~93 % tienen el mismo `denue_id` en una fila nueva); no es churn real. Limpieza: `ops/denue-stale-cleanup.sh report → backup → apply` (operador). Detalle en [`docs/DENUE-REFRESH.md`](docs/DENUE-REFRESH.md) |
+| Post-pasos | geom → backfill-ageb → VACUUM → mat-views | 19:33–19:59 UTC; `geom` null = 0, `ageb` null = 18 filas nuevas |
+
 ### Validación end-to-end (2026-05-04)
 
 Pipeline nacional completado en una sola corrida desatendida (~8h 24min, 0 fallas, 32/32 entidades).
