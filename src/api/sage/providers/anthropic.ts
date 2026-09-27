@@ -330,6 +330,9 @@ export class AnthropicProvider implements SageProvider {
     const t0 = Date.now();
     // Usage of the first (only) assistant message; a result message, when
     // one arrives, replaces it with the SDK's own totals.
+    // The abort at the first tool call lands before message_delta, so that
+    // message carries message_start's placeholder output_tokens (1); floor it
+    // at the captured tool call's size so the output charge is not lost.
     let assistantUsage: SdkUsageShape | undefined;
     let assistantText = "";
     let resultUsage: UsageNormalized | null = null;
@@ -338,7 +341,19 @@ export class AnthropicProvider implements SageProvider {
     const finalUsage = (): UsageNormalized =>
       resultUsage ??
       (assistantUsage
-        ? normalizeSdkUsage(assistantUsage, this.routerModel, Date.now() - t0)
+        ? normalizeSdkUsage(
+            captured
+              ? {
+                  ...assistantUsage,
+                  output_tokens: Math.max(
+                    assistantUsage.output_tokens ?? 0,
+                    approximateTokens(JSON.stringify(captured)),
+                  ),
+                }
+              : assistantUsage,
+            this.routerModel,
+            Date.now() - t0,
+          )
         : estimatedUsage(
             this.routerModel,
             ROUTER_SYSTEM_PROMPT + catalogPrompt + userPrompt,

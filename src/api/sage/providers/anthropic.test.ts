@@ -151,7 +151,7 @@ describe("AnthropicProvider router — one model call per turn (audit #78 #200)"
     mocks.stream = null;
   });
 
-  it("returns after the first tool call: first call wins, no second turn, usage from the first assistant message", async () => {
+  it("returns after the first tool call: first call wins, no second turn, usage from the first assistant message, output floored at the tool call", async () => {
     let secondTurn = false;
     let abortedAtHandler = false;
     mocks.stream = async function* (options) {
@@ -165,7 +165,9 @@ describe("AnthropicProvider router — one model call per turn (audit #78 #200)"
             input_tokens: 100,
             cache_read_input_tokens: 3000,
             cache_creation_input_tokens: 0,
-            output_tokens: 40,
+            // The real CLI aborts before message_delta: only message_start's
+            // placeholder output count reaches the router.
+            output_tokens: 1,
           },
         },
       };
@@ -203,14 +205,20 @@ describe("AnthropicProvider router — one model call per turn (audit #78 #200)"
     expect(secondTurn).toBe(false);
     expect(abortedAtHandler).toBe(true);
     expect(mocks.capturedOptions[0]!.maxTurns).toBe(1);
+    // Floor: approximateTokens(JSON.stringify(captured tool call)).
+    const outTok = Math.ceil(JSON.stringify(res.output).length / 4);
+    expect(outTok).toBeGreaterThan(1);
     expect(res.usage).toMatchObject({
       input_tokens: 3100,
       cache_read_input_tokens: 3000,
       cache_creation_input_tokens: 0,
-      output_tokens: 40,
+      output_tokens: outTok,
     });
-    // 100 x $3 + 3000 x $0.30 (cache read) + 40 x $15, per million.
-    expect(res.usage.cost_usd).toBeCloseTo(0.0018, 10);
+    // 100 x $3 + 3000 x $0.30 (cache read) + outTok x $15, per million.
+    expect(res.usage.cost_usd).toBeCloseTo(
+      (100 * 3 + 3000 * 0.3 + outTok * 15) / 1e6,
+      10,
+    );
   });
 
   it("the SDK's abort throw after the first tool call is the success path", async () => {
