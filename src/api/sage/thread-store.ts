@@ -1,13 +1,13 @@
 /**
  * Thin persistence layer over sage_threads + sage_turns_audit. Uses the
- * same docker-exec psql pattern as the rest of the API.
+ * shared async psql runner (audit #79/#104): no event-loop blocking, and
+ * every call has a 10 s statement_timeout plus the runner's client kill.
  *
  * Threads are append-only; turns are JSONB digests, never full results.
  */
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { assertSafeContainer } from "../handlers/_safe-container.js";
+import { runSql } from "../db/psql-runner.js";
 import type { PriorTurnDigest } from "./providers/provider.js";
 import type { UsageNormalized } from "./providers/provider.js";
 
@@ -20,33 +20,17 @@ export interface TurnRecord extends PriorTurnDigest {
   created_at: string;
 }
 
-function execSql(
-  config: ThreadStoreConfig,
-  sql: string,
-  params: string[] = [],
-): string {
-  assertSafeContainer(config.dbContainer);
-  // We deliberately pass SQL as a single -c arg via array form (no
-  // shell). Parameters interpolated into SQL must use psql's
-  // server-side parsing — for the simple inserts/selects below we
-  // build SQL with explicitly-escaped string params (no user input
-  // ever reaches this path; all values are app-controlled JSON).
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      config.dbContainer,
-      "psql",
-      "-U",
-      "postgres",
-      "-tA",
-      "-c",
-      sql,
-      ...params.flatMap((p) => ["-v", p]),
-    ],
-    { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 },
-  );
+const THREAD_STORE_TIMEOUT_MS = 10_000;
+
+function execSql(config: ThreadStoreConfig, sql: string): Promise<string> {
+  // SQL goes on stdin via the runner. Values interpolated into SQL are
+  // escaped with quote()/quoteJson() below (no user input ever reaches
+  // this path; all values are app-controlled JSON).
+  return runSql(sql, {
+    container: config.dbContainer,
+    readOnly: false,
+    timeoutMs: THREAD_STORE_TIMEOUT_MS,
+  });
 }
 
 function quote(s: string): string {
@@ -57,20 +41,22 @@ function quoteJson(value: unknown): string {
   return quote(JSON.stringify(value));
 }
 
-export function createThread(config: ThreadStoreConfig): string {
+export async function createThread(
+  config: ThreadStoreConfig,
+): Promise<string> {
   const threadId = randomUUID();
-  execSql(
+  await execSql(
     config,
     `INSERT INTO sage_threads (thread_id, turns) VALUES (${quote(threadId)}, '[]'::jsonb);`,
   );
   return threadId;
 }
 
-export function getThread(
+export async function getThread(
   config: ThreadStoreConfig,
   threadId: string,
-): TurnRecord[] {
-  const raw = execSql(
+): Promise<TurnRecord[]> {
+  const raw = await execSql(
     config,
     `SELECT COALESCE(turns::text, '[]') FROM sage_threads WHERE thread_id = ${quote(threadId)};`,
   );
@@ -82,11 +68,49 @@ export function getThread(
   }
 }
 
-export function appendTurn(
+export interface ThreadHead {
+  /** Total turns stored on the thread (0 when the row does not exist). */
+  turnCount: number;
+  /** The last `n` turns, oldest first. */
+  lastTurns: TurnRecord[];
+}
+
+/**
+ * One round trip for what /sage/query needs (audit #88/#208): the turn
+ * count for the cap check plus only the last `n` turns for history, so
+ * the full turns JSONB is never shipped and parsed just to count it.
+ */
+export async function getThreadHead(
+  config: ThreadStoreConfig,
+  threadId: string,
+  n: number,
+): Promise<ThreadHead> {
+  const raw = await execSql(
+    config,
+    `SELECT json_build_object(
+       'count', jsonb_array_length(t),
+       'tail', COALESCE(
+         (SELECT jsonb_agg(e ORDER BY i)
+            FROM jsonb_array_elements(t) WITH ORDINALITY AS x(e, i)
+           WHERE i > jsonb_array_length(t) - ${Math.trunc(n)}),
+         '[]'::jsonb))::text
+     FROM (SELECT COALESCE(turns, '[]'::jsonb) AS t
+             FROM sage_threads WHERE thread_id = ${quote(threadId)}) s;`,
+  );
+  if (!raw.trim()) return { turnCount: 0, lastTurns: [] };
+  try {
+    const parsed = JSON.parse(raw) as { count: number; tail: TurnRecord[] };
+    return { turnCount: parsed.count, lastTurns: parsed.tail };
+  } catch {
+    return { turnCount: 0, lastTurns: [] };
+  }
+}
+
+export async function appendTurn(
   config: ThreadStoreConfig,
   threadId: string,
   turn: PriorTurnDigest,
-): TurnRecord {
+): Promise<TurnRecord> {
   const turnRecord: TurnRecord = {
     ...turn,
     turn_id: randomUUID(),
@@ -98,7 +122,7 @@ export function appendTurn(
   // history (in sage-handler), then race to append — data is preserved
   // (jsonb || is atomic) but the logical ordering is undefined.
   // Closure audit C4-perf.
-  execSql(
+  await execSql(
     config,
     `BEGIN;
      SELECT pg_advisory_xact_lock(hashtext(${quote(threadId)}));
@@ -111,11 +135,11 @@ export function appendTurn(
   return turnRecord;
 }
 
-export function deleteThread(
+export async function deleteThread(
   config: ThreadStoreConfig,
   threadId: string,
-): void {
-  execSql(
+): Promise<void> {
+  await execSql(
     config,
     `DELETE FROM sage_threads WHERE thread_id = ${quote(threadId)};`,
   );
@@ -133,11 +157,11 @@ export interface AuditEntry {
   error_message: string | null;
 }
 
-export function appendAudit(
+export async function appendAudit(
   config: ThreadStoreConfig,
   entry: AuditEntry,
-): void {
-  execSql(
+): Promise<void> {
+  await execSql(
     config,
     `INSERT INTO sage_turns_audit
       (thread_id, call_kind, provider, model, prompt, output,

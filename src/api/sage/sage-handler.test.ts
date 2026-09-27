@@ -1,9 +1,18 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { AbortError } from "@anthropic-ai/claude-agent-sdk";
 
-const { mockDispatch, mockSql, mockAppendTurn } = vi.hoisted(() => ({
+const {
+  mockDispatch,
+  mockSql,
+  mockAppendTurn,
+  mockAppendAudit,
+  mockGetThreadHead,
+} = vi.hoisted(() => ({
   mockDispatch: vi.fn(),
   mockSql: vi.fn(),
   mockAppendTurn: vi.fn(),
+  mockAppendAudit: vi.fn(async () => {}),
+  mockGetThreadHead: vi.fn(),
 }));
 vi.mock("./dispatcher.js", async (orig) => ({
   ...(await orig<typeof import("./dispatcher.js")>()),
@@ -14,10 +23,11 @@ vi.mock("./sql-gate.js", async (orig) => ({
   executeGatedSql: mockSql,
 }));
 vi.mock("./thread-store.js", () => ({
-  createThread: () => "00000000-0000-0000-0000-000000000001",
-  getThread: () => [],
+  createThread: async () => "00000000-0000-0000-0000-000000000001",
+  getThread: async () => [],
+  getThreadHead: mockGetThreadHead,
   appendTurn: mockAppendTurn,
-  appendAudit: vi.fn(),
+  appendAudit: mockAppendAudit,
   deleteThread: vi.fn(),
 }));
 
@@ -326,5 +336,190 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
       digest: Record<string, unknown>;
     };
     expect(persisted.digest).not.toHaveProperty("truncated");
+  });
+});
+
+describe("/sage/query async runner, abort signal and thread read (audit #79 #88 #90 #202 #206 #208)", () => {
+  const usage = {
+    input_tokens: 1,
+    output_tokens: 1,
+    cost_usd: 0,
+    latency_ms: 1,
+    provider: "fake",
+    model: "fake",
+  };
+  const SQL_ROUTE = {
+    kind: "sql",
+    sql: "SELECT 1 AS n",
+    reasoning: "",
+    confidence: 1,
+  } as RouteOutput;
+  const EXISTING = "11111111-1111-1111-1111-111111111111";
+
+  function provider(
+    routeAndDraft: SageProvider["routeAndDraft"],
+  ): SageProvider {
+    return {
+      name: "fake",
+      routerModel: "fake",
+      narrativeModel: "fake",
+      routeAndDraft,
+      async *writeNarrativeStream() {
+        yield { text: "ok", usage };
+      },
+      countTokens: () => 0,
+    };
+  }
+  function eventNames(text: string) {
+    return [...text.matchAll(/^event: (\w+)$/gm)].map((m) => m[1]);
+  }
+  function errorEvent(text: string) {
+    const m = /event: error\ndata: (.*)\n/.exec(text);
+    return m ? (JSON.parse(m[1]!) as { code: string; message: string }) : null;
+  }
+  async function ask(p: SageProvider, body: object = {}) {
+    const app = createServer({ ...CONFIG_NO_SAGE, sageProvider: p });
+    const res = await app.request("/sage/query", {
+      method: "POST",
+      headers: { ...AUTH, "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "cuantos negocios", ...body }),
+    });
+    return { status: res.status, text: await res.text() };
+  }
+  function resetMocks() {
+    mockSql.mockReset();
+    mockDispatch.mockReset();
+    mockAppendTurn.mockReset();
+    mockAppendAudit.mockReset();
+    mockGetThreadHead.mockReset();
+    mockAppendTurn.mockResolvedValue({ turn_id: "t1" });
+    mockAppendAudit.mockResolvedValue(undefined);
+    mockSql.mockResolvedValue({
+      ok: true,
+      data: { rows: [{ n: "1" }], columns: ["n"] },
+    });
+  }
+
+  it("passes the turn's abort signal to the SQL gate", async () => {
+    resetMocks();
+    await ask(provider(async () => ({ output: SQL_ROUTE, usage })));
+    expect(mockSql.mock.calls[0]![1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("passes the turn's abort signal to dispatchEndpoint", async () => {
+    resetMocks();
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      endpoint_path: "/analytics/x",
+      body: [{ a: 1 }],
+    });
+    const route = {
+      kind: "endpoint",
+      endpoint_name: "risk-trend",
+      params: { cve_mun: "20067" },
+      reasoning: "",
+      confidence: 1,
+    } as RouteOutput;
+    await ask(provider(async () => ({ output: route, usage })));
+    expect(mockDispatch.mock.calls[0]![3]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("a new thread skips the thread read; an existing one is read once for cap + history", async () => {
+    resetMocks();
+    const histories: number[] = [];
+    const p = provider(async (input) => {
+      histories.push(input.history.length);
+      return { output: SQL_ROUTE, usage };
+    });
+    await ask(p);
+    expect(mockGetThreadHead).not.toHaveBeenCalled();
+
+    const turn = {
+      question: "q",
+      route: { kind: "sql", sql: "SELECT 1" },
+      digest: { columns: ["n"], row_count: 1, first_5_rows: [] },
+      narrative: "n",
+      turn_id: "x",
+      created_at: "2026-09-27T00:00:00Z",
+    };
+    mockGetThreadHead.mockResolvedValue({
+      turnCount: 12,
+      lastTurns: [turn, turn, turn, turn, turn],
+    });
+    await ask(p, { thread_id: EXISTING });
+    expect(mockGetThreadHead).toHaveBeenCalledTimes(1);
+    expect(mockGetThreadHead.mock.calls[0]!.slice(1)).toEqual([EXISTING, 5]);
+    expect(histories).toEqual([0, 5]);
+  });
+
+  it("rejects a thread at the 50-turn cap with 429 before any LLM call", async () => {
+    resetMocks();
+    mockGetThreadHead.mockResolvedValue({ turnCount: 50, lastTurns: [] });
+    const route = vi.fn();
+    const res = await ask(provider(route), { thread_id: EXISTING });
+    expect(res.status).toBe(429);
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it("a failed audit write is logged and does not fail the turn", async () => {
+    resetMocks();
+    mockAppendAudit.mockImplementation(async () => {
+      throw new Error("Upstream query failed");
+    });
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const res = await ask(provider(async () => ({ output: SQL_ROUTE, usage })));
+    const logged = stderr.mock.calls.map((c) => String(c[0]));
+    stderr.mockRestore();
+    expect(mockAppendAudit).toHaveBeenCalledTimes(2);
+    expect(eventNames(res.text)).toEqual([
+      "thread",
+      "route",
+      "usage",
+      "table",
+      "delta",
+      "narrative",
+      "usage",
+      "done",
+    ]);
+    expect(
+      logged.filter((l) => l.includes("[sage] audit write failed")),
+    ).toHaveLength(2);
+  });
+
+  it("maps the Agent SDK's AbortError (a provider timer) to SAGE_TIMEOUT", async () => {
+    resetMocks();
+    const res = await ask(
+      provider(async () => {
+        throw new AbortError("Claude Code process aborted by user");
+      }),
+    );
+    expect(errorEvent(res.text)).toEqual({
+      code: "SAGE_TIMEOUT",
+      message: "La consulta tardó demasiado; intenta de nuevo.",
+    });
+  });
+
+  it("maps a fetch TimeoutError (OpenAI path) to SAGE_TIMEOUT", async () => {
+    resetMocks();
+    const res = await ask(
+      provider(async () => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }),
+    );
+    expect(errorEvent(res.text)?.code).toBe("SAGE_TIMEOUT");
+  });
+
+  it("other failures stay SAGE_INTERNAL", async () => {
+    resetMocks();
+    const res = await ask(
+      provider(async () => {
+        throw new Error("boom");
+      }),
+    );
+    expect(errorEvent(res.text)).toEqual({
+      code: "SAGE_INTERNAL",
+      message: "boom",
+    });
   });
 });

@@ -262,6 +262,28 @@ describe("dispatchEndpoint — required params (audit #86)", () => {
     });
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it("builds the in-process Request with the caller's abort signal (audit #79/#202)", async () => {
+    const fetch = vi.fn(async () => Response.json([{ total: 1 }]));
+    const ac = new AbortController();
+    const r = await dispatchEndpoint(
+      { fetch } as unknown as Hono,
+      "key",
+      {
+        kind: "endpoint",
+        endpoint_name: "risk-trend",
+        params: { cve_mun: "20067" },
+        reasoning: "",
+        confidence: 1,
+      } as Parameters<typeof dispatchEndpoint>[2],
+      ac.signal,
+    );
+    expect(r.ok).toBe(true);
+    const req = (fetch.mock.calls[0] as unknown as [Request])[0];
+    expect(req.signal.aborted).toBe(false);
+    ac.abort();
+    expect(req.signal.aborted).toBe(true);
+  });
 });
 
 describe("catalog ↔ server routes (audit #77)", () => {

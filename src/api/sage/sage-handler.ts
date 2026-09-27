@@ -14,6 +14,7 @@
  */
 
 import type { Context } from "hono";
+import { AbortError } from "@anthropic-ai/claude-agent-sdk";
 import type { ApiServerConfig } from "../types.js";
 import {
   SAGE_ENDPOINT_CATALOG,
@@ -33,6 +34,8 @@ import {
   createThread,
   deleteThread,
   getThread,
+  getThreadHead,
+  type AuditEntry,
 } from "./thread-store.js";
 import type {
   NarrativeInput,
@@ -55,6 +58,20 @@ const MAX_ROW_CAP = 5000;
 // Rows the `table` event carries when the caller sets no max_rows. The
 // narrative digest still sees only its own 20 rows.
 const TABLE_ROW_CAP = DEFAULT_ROW_CAP;
+const TIMEOUT_MESSAGE = "La consulta tardó demasiado; intenta de nuevo.";
+
+/**
+ * Audit rows are written in the background (audit #208): a slow or failed
+ * INSERT must not delay the SSE stream or fail the turn.
+ */
+function auditInBackground(config: ApiServerConfig, entry: AuditEntry): void {
+  appendAudit({ dbContainer: config.dbContainer }, entry).catch(
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[sage] audit write failed: ${msg}\n`);
+    },
+  );
+}
 
 export interface SageQueryBody {
   thread_id?: string | null;
@@ -143,18 +160,27 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
       maxRows = body.max_rows;
     }
 
-    const threadId =
+    const existingThreadId =
       body.thread_id && /^[0-9a-f-]{36}$/i.test(body.thread_id)
         ? body.thread_id
-        : createThread({ dbContainer: config.dbContainer });
+        : null;
+    const threadId =
+      existingThreadId ??
+      (await createThread({ dbContainer: config.dbContainer }));
+
+    // One read gives both the cap check and the history window (audit
+    // #88/#208); a thread created by this request has neither.
+    const head = existingThreadId
+      ? await getThreadHead(
+          { dbContainer: config.dbContainer },
+          existingThreadId,
+          HISTORY_WINDOW,
+        )
+      : { turnCount: 0, lastTurns: [] };
 
     // Reject when the thread is already at the cap so we don't pay LLM
     // cost for a turn we won't be able to persist.
-    const existingTurnCount = getThread(
-      { dbContainer: config.dbContainer },
-      threadId,
-    ).length;
-    if (existingTurnCount >= MAX_TURNS_PER_THREAD) {
+    if (head.turnCount >= MAX_TURNS_PER_THREAD) {
       return c.json(
         {
           error: `thread has reached the cap of ${MAX_TURNS_PER_THREAD} turns; start a new thread.`,
@@ -164,19 +190,17 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
       );
     }
 
-    const priorTurns = getThread({ dbContainer: config.dbContainer }, threadId)
-      .slice(-HISTORY_WINDOW)
-      .map<PriorTurnDigest>((t) => ({
-        question: t.question,
-        route: t.route,
-        digest: {
-          columns: t.digest.columns,
-          row_count: t.digest.row_count,
-          first_5_rows: t.digest.first_5_rows,
-          numeric_stats: t.digest.numeric_stats,
-        },
-        narrative: t.narrative,
-      }));
+    const priorTurns = head.lastTurns.map<PriorTurnDigest>((t) => ({
+      question: t.question,
+      route: t.route,
+      digest: {
+        columns: t.digest.columns,
+        row_count: t.digest.row_count,
+        first_5_rows: t.digest.first_5_rows,
+        numeric_stats: t.digest.numeric_stats,
+      },
+      narrative: t.narrative,
+    }));
 
     // AbortController for the whole turn: SSE cancel() aborts it, which
     // in turn cancels the upstream LLM call, in-process app.fetch, and
@@ -213,21 +237,18 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             },
             abortCtrl.signal,
           );
-          appendAudit(
-            { dbContainer: config.dbContainer },
-            {
-              thread_id: threadId,
-              call_kind: "router",
-              provider: routerResult.usage.provider,
-              model: routerResult.usage.model,
-              prompt: { question, history_n: priorTurns.length },
-              output: routerResult.output,
-              usage: routerResult.usage,
-              error_code: null,
-              error_message: null,
-            },
-          );
           send("route", routerResult.output);
+          auditInBackground(config, {
+            thread_id: threadId,
+            call_kind: "router",
+            provider: routerResult.usage.provider,
+            model: routerResult.usage.model,
+            prompt: { question, history_n: priorTurns.length },
+            output: routerResult.output,
+            usage: routerResult.usage,
+            error_code: null,
+            error_message: null,
+          });
           send("usage", routerResult.usage);
 
           const route: RouteOutput = routerResult.output;
@@ -255,6 +276,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               app,
               config.apiKey,
               route,
+              abortCtrl.signal,
             );
             if (!dispatched.ok) {
               send("error", {
@@ -288,6 +310,7 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
             const result = await executeGatedSql(route.sql, {
               dbContainer: config.dbContainer,
               rowCap: cap + 1,
+              signal: abortCtrl.signal,
             });
             if (!result.ok) {
               send("error", {
@@ -343,25 +366,22 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           }
           send("narrative", { text: fullNarrative });
           if (narrativeUsage) {
-            appendAudit(
-              { dbContainer: config.dbContainer },
-              {
-                thread_id: threadId,
-                call_kind: "narrative",
-                provider: narrativeUsage.provider,
-                model: narrativeUsage.model,
-                prompt: { question },
-                output: { text: fullNarrative },
-                usage: narrativeUsage,
-                error_code: null,
-                error_message: null,
-              },
-            );
+            auditInBackground(config, {
+              thread_id: threadId,
+              call_kind: "narrative",
+              provider: narrativeUsage.provider,
+              model: narrativeUsage.model,
+              prompt: { question },
+              output: { text: fullNarrative },
+              usage: narrativeUsage,
+              error_code: null,
+              error_message: null,
+            });
             send("usage", narrativeUsage);
           }
 
           // ----- 5. Persist the turn ---------------------------------
-          const turnRec = appendTurn(
+          const turnRec = await appendTurn(
             { dbContainer: config.dbContainer },
             threadId,
             {
@@ -385,17 +405,21 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
           send("done", { turn_id: turnRec.turn_id });
           controller.close();
         } catch (err) {
-          // AbortError on caller disconnect is the expected exit path;
-          // don't bother emitting an error event because the client is
-          // already gone.
-          const isAbort =
-            err !== null &&
-            typeof err === "object" &&
-            "name" in err &&
-            (err as { name?: string }).name === "AbortError";
-          if (!isAbort) {
-            const message = err instanceof Error ? err.message : String(err);
-            send("error", { code: "SAGE_INTERNAL", message });
+          // A client disconnect (our own signal) is the expected exit
+          // path; don't emit an error because the client is already gone.
+          // Any other abort is a provider timer: the SDK's AbortError
+          // keeps name "Error", and the OpenAI path throws a DOMException
+          // named "TimeoutError" (audit #90/#206).
+          if (!abortCtrl.signal.aborted) {
+            const isTimeout =
+              err instanceof AbortError ||
+              (err as { name?: string } | null)?.name === "TimeoutError";
+            if (isTimeout) {
+              send("error", { code: "SAGE_TIMEOUT", message: TIMEOUT_MESSAGE });
+            } else {
+              const message = err instanceof Error ? err.message : String(err);
+              send("error", { code: "SAGE_INTERNAL", message });
+            }
           }
           try {
             controller.close();
@@ -423,23 +447,23 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
 }
 
 export function makeGetThreadHandler(config: ApiServerConfig) {
-  return (c: Context) => {
+  return async (c: Context) => {
     const id = c.req.param("id") ?? "";
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
       return c.json({ error: "thread_id must be a UUID." }, 400);
     }
-    const turns = getThread({ dbContainer: config.dbContainer }, id);
+    const turns = await getThread({ dbContainer: config.dbContainer }, id);
     return c.json({ thread_id: id, turns });
   };
 }
 
 export function makeDeleteThreadHandler(config: ApiServerConfig) {
-  return (c: Context) => {
+  return async (c: Context) => {
     const id = c.req.param("id") ?? "";
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
       return c.json({ error: "thread_id must be a UUID." }, 400);
     }
-    deleteThread({ dbContainer: config.dbContainer }, id);
+    await deleteThread({ dbContainer: config.dbContainer }, id);
     return c.json({ thread_id: id, deleted: true });
   };
 }

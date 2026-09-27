@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockExecFileSync } = vi.hoisted(() => ({
-  mockExecFileSync: vi.fn(),
+const { mockRunSql } = vi.hoisted(() => ({
+  mockRunSql: vi.fn(),
 }));
-vi.mock("node:child_process", () => ({ execFileSync: mockExecFileSync }));
+vi.mock("../db/psql-runner.js", () => ({ runSql: mockRunSql }));
 
 import {
   preCheckSql,
@@ -410,15 +410,15 @@ describe("parseCsv", () => {
 
 describe("executeGatedSql psql invocation", () => {
   beforeEach(() => {
-    mockExecFileSync.mockReset();
+    mockRunSql.mockReset();
   });
 
+  const PLAN = JSON.stringify([
+    { Plan: { "Node Type": "Limit", "Total Cost": 10 } },
+  ]);
+
   it("logs in as denue_sage in a READ ONLY txn, never SET ROLE", async () => {
-    mockExecFileSync
-      .mockReturnValueOnce(
-        JSON.stringify([{ Plan: { "Node Type": "Limit", "Total Cost": 10 } }]),
-      )
-      .mockReturnValueOnce("n\n1\n");
+    mockRunSql.mockResolvedValueOnce(PLAN).mockResolvedValueOnce("n\n1\n");
     const res = await executeGatedSql("SELECT 1 AS n -- note", {
       dbContainer: "supabase-db",
     });
@@ -426,18 +426,74 @@ describe("executeGatedSql psql invocation", () => {
       ok: true,
       data: { rows: [{ n: "1" }], columns: ["n"] },
     });
-    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
-    for (const call of mockExecFileSync.mock.calls) {
-      const args = call[1] as string[];
-      expect(args[args.indexOf("-U") + 1]).toBe("denue_sage");
-      expect(args[args.indexOf("-d") + 1]).toBe("postgres");
-      expect(args).toContain("ON_ERROR_STOP=1");
-      const script = args[args.indexOf("-c") + 1]!;
+    expect(mockRunSql).toHaveBeenCalledTimes(2);
+    for (const call of mockRunSql.mock.calls) {
+      const script = call[0] as string;
+      expect(call[1]).toMatchObject({
+        container: "supabase-db",
+        user: "denue_sage",
+        readOnly: true,
+        timeoutMs: 8000,
+      });
       expect(script.startsWith("BEGIN READ ONLY;")).toBe(true);
       expect(script).not.toMatch(/SET\s+(LOCAL\s+)?ROLE/i);
       // Default outer cap is DEFAULT_ROW_CAP=200, not 5000 (audit #87).
       expect(script).toContain("\n) AS sage_wrapped LIMIT 200");
     }
+  });
+
+  it("runs EXPLAIN and COPY on the async runner with the caller's abort signal (audit #79/#202)", async () => {
+    mockRunSql.mockResolvedValueOnce(PLAN).mockResolvedValueOnce("n\n1\n");
+    const ac = new AbortController();
+    await executeGatedSql("SELECT 1 AS n", {
+      dbContainer: "supabase-db",
+      signal: ac.signal,
+    });
+    expect(mockRunSql.mock.calls.map((c) => c[1].signal)).toEqual([
+      ac.signal,
+      ac.signal,
+    ]);
+    expect(mockRunSql.mock.calls[0]![0]).toContain("EXPLAIN (FORMAT JSON)");
+    expect(mockRunSql.mock.calls[1]![0]).toContain("COPY (");
+  });
+
+  it("maps a statement_timeout in the runner's stderr to SQL_TIMEOUT", async () => {
+    mockRunSql.mockResolvedValueOnce(PLAN).mockRejectedValueOnce(
+      Object.assign(new Error("Upstream query failed"), {
+        stderr: "ERROR:  canceling statement due to statement timeout",
+      }),
+    );
+    const res = await executeGatedSql("SELECT 1 AS n", {
+      dbContainer: "supabase-db",
+    });
+    expect(res).toEqual({
+      ok: false,
+      error: { code: "SQL_TIMEOUT", message: "query timed out" },
+    });
+  });
+
+  it("maps other runner failures to an opaque SQL_EXECUTION_ERROR", async () => {
+    mockRunSql.mockRejectedValueOnce(
+      Object.assign(new Error("Upstream query failed"), {
+        stderr: 'ERROR:  permission denied for table "secret_x"',
+      }),
+    );
+    const res = await executeGatedSql("SELECT 1 AS n", {
+      dbContainer: "supabase-db",
+    });
+    expect(res).toEqual({
+      ok: false,
+      error: { code: "SQL_EXECUTION_ERROR", message: "permission_denied" },
+    });
+    // An abort or client-side kill carries no stderr.
+    mockRunSql.mockRejectedValueOnce(new Error("Upstream query failed"));
+    const aborted = await executeGatedSql("SELECT 1 AS n", {
+      dbContainer: "supabase-db",
+    });
+    expect(aborted).toEqual({
+      ok: false,
+      error: { code: "SQL_EXECUTION_ERROR", message: "execution_error" },
+    });
   });
 
   it("never shells out when the pre-check rejects", async () => {
@@ -446,6 +502,6 @@ describe("executeGatedSql psql invocation", () => {
       { dbContainer: "supabase-db" },
     );
     expect(res.ok).toBe(false);
-    expect(mockExecFileSync).not.toHaveBeenCalled();
+    expect(mockRunSql).not.toHaveBeenCalled();
   });
 });

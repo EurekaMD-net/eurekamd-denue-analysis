@@ -114,6 +114,7 @@ export async function dispatchEndpoint(
   app: Hono,
   apiKey: string,
   route: RouteOutputEndpoint,
+  signal?: AbortSignal,
 ): Promise<DispatchResult> {
   const spec = SAGE_ENDPOINT_CATALOG.find(
     (e) => e.name === route.endpoint_name,
@@ -155,6 +156,7 @@ export async function dispatchEndpoint(
     new Request(url, {
       method: "GET",
       headers: { "X-Api-Key": apiKey },
+      signal,
     }),
   );
   if (!res.ok) {

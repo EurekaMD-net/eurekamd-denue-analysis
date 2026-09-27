@@ -29,8 +29,8 @@
  *   SQL_EXECUTION_ERROR    — postgres returned an error
  */
 
-import { execFileSync } from "node:child_process";
 import { assertSafeContainer } from "../handlers/_safe-container.js";
+import { runSql } from "../db/psql-runner.js";
 
 export type SqlGateErrorCode =
   | "SQL_PARSE_FAIL"
@@ -63,6 +63,8 @@ export interface SqlGateConfig {
   maxCost?: number;
   /** Force LIMIT N at the outer level. Default DEFAULT_ROW_CAP. */
   rowCap?: number;
+  /** Aborting kills the psql client and cancels the backend. */
+  signal?: AbortSignal;
 }
 
 /** Outer LIMIT when the caller passes no rowCap. */
@@ -508,22 +510,6 @@ export function checkExplainPlan(
   return err;
 }
 
-// Log in as the least-privileged role itself (pg_hba trusts the container's
-// local socket; TCP needs a password the role does not have). -X skips any
-// psqlrc; ON_ERROR_STOP makes psql exit non-zero on the first error.
-function sagePsqlArgs(): string[] {
-  return [
-    "psql",
-    "-X",
-    "-U",
-    "denue_sage",
-    "-d",
-    "postgres",
-    "-v",
-    "ON_ERROR_STOP=1",
-  ];
-}
-
 /**
  * Execute the gated SQL. Returns rows + columns on success or a
  * structured error code on failure. The caller (sage route) records
@@ -536,10 +522,13 @@ function sagePsqlArgs(): string[] {
  *   - ON_ERROR_STOP  (psql stops at the first failing statement)
  *   - Outer LIMIT (default 200)  (so result payload stays bounded)
  *
- * We shell out to `docker exec ... psql` rather than using node-postgres
- * because the rest of the API already uses this pattern. The script goes
- * as one -c string, which psql sends to the server verbatim: no psql
- * meta-commands (`\!`) or `:var` interpolation apply to the LLM's SQL.
+ * Both calls go through the shared async psql runner (audit #79/#202):
+ * the event loop is never blocked, the script goes on stdin, and aborting
+ * `config.signal` kills the client and cancels the backend. psql reads
+ * the script as a file, but preCheckSql rejects any backslash outside a
+ * string literal, so no psql meta-command (`\!`) can reach it. pg_hba
+ * trusts the container's local socket, so `-U denue_sage` needs no
+ * password (TCP needs one the role does not have).
  */
 export async function executeGatedSql(
   sql: string,
@@ -567,46 +556,24 @@ COMMIT;
 `.trim();
 
   // PG stmt_timeout (in-band SET LOCAL in explainScript) fires first; the
-  // execFileSync wall-clock has +5s headroom for docker exec startup +
-  // libpq handshake so the DB-side abort produces a structured error
-  // rather than racing SIGTERM (closure audit W4-perf; parity with
-  // analytics.ts 5s discipline).
+  // runner's wall-clock has +5s headroom for docker exec startup + libpq
+  // handshake so the DB-side abort produces a structured error rather
+  // than racing the kill (closure audit W4-perf). -q (set by the runner)
+  // suppresses the BEGIN / SET / COMMIT command tags that would otherwise
+  // prefix the JSON output and corrupt JSON.parse (R-audit-live
+  // 2026-05-10).
+  const psqlOpts = {
+    container: dbContainer,
+    user: "denue_sage",
+    readOnly: true,
+    timeoutMs,
+    signal: config.signal,
+  };
   let explainRaw: string;
   try {
-    // -tA: tuples-only + unaligned. -q: quiet (suppresses the BEGIN /
-    // SET / COMMIT command tags that would otherwise prefix the JSON
-    // output and corrupt JSON.parse. Without -q the parse fails on
-    // multi-statement scripts (R-audit-live finding 2026-05-10).
-    explainRaw = execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        dbContainer,
-        ...sagePsqlArgs(),
-        "-tAq",
-        "-c",
-        explainScript,
-      ],
-      {
-        encoding: "utf-8",
-        timeout: timeoutMs + 5000,
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    );
+    explainRaw = await runSql(explainScript, psqlOpts);
   } catch (err) {
-    const e = err as { stderr?: Buffer; message?: string };
-    const msg = e.stderr?.toString("utf-8") ?? e.message ?? "EXPLAIN failed";
-    if (/canceling statement due to statement timeout/i.test(msg)) {
-      return {
-        ok: false,
-        error: { code: "SQL_TIMEOUT", message: "EXPLAIN timed out" },
-      };
-    }
-    return {
-      ok: false,
-      error: { code: "SQL_EXECUTION_ERROR", message: redactPgError(msg) },
-    };
+    return { ok: false, error: runErrorToGateError(err, "EXPLAIN timed out") };
   }
 
   let explainParsed: ExplainOutput[];
@@ -634,41 +601,11 @@ COMMIT;
 
   let csvRaw: string;
   try {
-    // -q suppresses the BEGIN / SET / COMMIT command-tag lines that
-    // would otherwise interleave with the COPY-emitted CSV (same
-    // root cause as the EXPLAIN parse fix). Without -q the CSV
-    // parser sees "BEGIN\nSET\nSET\n<rows>\nCOMMIT" and treats the
-    // first three as header + data rows.
-    csvRaw = execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        dbContainer,
-        ...sagePsqlArgs(),
-        "-q",
-        "-c",
-        execScript,
-      ],
-      {
-        encoding: "utf-8",
-        timeout: timeoutMs + 5000,
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    );
+    // -q keeps the BEGIN / SET / COMMIT command tags out of the CSV that
+    // COPY writes (same root cause as the EXPLAIN parse fix).
+    csvRaw = await runSql(execScript, psqlOpts);
   } catch (err) {
-    const e = err as { stderr?: Buffer; message?: string };
-    const msg = e.stderr?.toString("utf-8") ?? e.message ?? "execution failed";
-    if (/canceling statement due to statement timeout/i.test(msg)) {
-      return {
-        ok: false,
-        error: { code: "SQL_TIMEOUT", message: "query timed out" },
-      };
-    }
-    return {
-      ok: false,
-      error: { code: "SQL_EXECUTION_ERROR", message: redactPgError(msg) },
-    };
+    return { ok: false, error: runErrorToGateError(err, "query timed out") };
   }
 
   const parsed = parseCsv(csvRaw);
@@ -747,6 +684,20 @@ export function parseCsv(csv: string): SqlGateSuccess {
     return o;
   });
   return { rows: objects, columns: header.map((h) => h ?? "") };
+}
+
+// The runner rejects with a generic error; the raw psql stderr rides on
+// its `stderr` field (absent on abort, client-side timeout or spawn
+// failure).
+function runErrorToGateError(
+  err: unknown,
+  timeoutMessage: string,
+): SqlGateError {
+  const stderr = (err as { stderr?: string }).stderr ?? "";
+  if (/canceling statement due to statement timeout/i.test(stderr)) {
+    return { code: "SQL_TIMEOUT", message: timeoutMessage };
+  }
+  return { code: "SQL_EXECUTION_ERROR", message: redactPgError(stderr) };
 }
 
 // Map Postgres errors to opaque codes so schema/role internals never
