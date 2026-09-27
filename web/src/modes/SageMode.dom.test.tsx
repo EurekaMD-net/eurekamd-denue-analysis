@@ -444,3 +444,102 @@ describe("SageMode thread ownership (#11/#82/#89)", () => {
     );
   });
 });
+
+describe("SageMode row counts: exact total vs capped floor (#87)", () => {
+  const T1 = "22222222-2222-4222-8222-222222222222";
+  const rowsOf = (n: number) => Array.from({ length: n }, (_, i) => ({ n: i }));
+
+  function counts(): { tab: string | undefined; badge: string | undefined } {
+    const tab = buttonByText("Tabla");
+    click(tab);
+    const badge = Array.from(container.querySelectorAll("div")).find((d) =>
+      d.textContent?.startsWith("muestra:"),
+    );
+    return { tab: tab?.textContent ?? undefined, badge: badge?.textContent };
+  }
+
+  async function live(ev: Extract<SageEvent, { type: "table" }>) {
+    const s = controlledStream();
+    await renderMode();
+    click(exampleButtons()[0]);
+    await s.push(
+      { type: "thread", thread_id: "t-1" },
+      ev,
+      { type: "done", turn_id: null },
+    );
+    await s.end();
+    return counts();
+  }
+
+  async function restored(digest: object) {
+    upsertThread("u1", {
+      thread_id: T1,
+      first_question: "hilo guardado",
+      last_question: "hilo guardado",
+      turn_count: 1,
+      updated_at: 1,
+    });
+    threadMock.mockResolvedValue({
+      thread_id: T1,
+      turns: [
+        {
+          turn_id: "turn-1",
+          created_at: "2026-09-27T00:00:00Z",
+          question: "hilo guardado",
+          route: { kind: "endpoint", endpoint_name: "municipios" },
+          digest,
+          narrative: "ok",
+        },
+      ],
+    });
+    await renderMode();
+    click(buttonByText("hilo guardado"));
+    await flush();
+    return counts();
+  }
+
+  it("renders an exact 570-row total as 570, not 570+", async () => {
+    expect(
+      await live({
+        type: "table",
+        columns: ["n"],
+        rows: rowsOf(200),
+        row_count: 570,
+        truncated: false,
+      }),
+    ).toEqual({ tab: "Tabla (570)", badge: "muestra: 100 de 570 filas" });
+  });
+
+  it("renders a capped result as a floor, N+", async () => {
+    expect(
+      await live({
+        type: "table",
+        columns: ["n"],
+        rows: rowsOf(200),
+        row_count: 200,
+        truncated: true,
+      }),
+    ).toEqual({ tab: "Tabla (200+)", badge: "muestra: 100 de 200+ filas" });
+  });
+
+  it("a reloaded thread renders the same counts as the live turn", async () => {
+    expect(
+      await restored({
+        columns: ["n"],
+        row_count: 570,
+        first_5_rows: rowsOf(5),
+      }),
+    ).toEqual({ tab: "Tabla (570)", badge: "muestra: 5 de 570 filas" });
+  });
+
+  it("a reloaded capped thread keeps its floor", async () => {
+    expect(
+      await restored({
+        columns: ["n"],
+        row_count: 200,
+        first_5_rows: rowsOf(5),
+        truncated: true,
+      }),
+    ).toEqual({ tab: "Tabla (200+)", badge: "muestra: 5 de 200+ filas" });
+  });
+});

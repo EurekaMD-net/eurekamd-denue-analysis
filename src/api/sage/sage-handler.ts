@@ -452,11 +452,15 @@ export function makeSageQueryHandler(app: Hono, config: ApiServerConfig) {
               0,
               TABLE_ROW_CAP,
             );
+            // row_count is the endpoint body's exact total, so the flag
+            // stays false: `truncated` means only "a row cap cut the result
+            // and row_count is a floor" (SQL path). A table shorter than
+            // row_count is a sample, which the client derives on its own.
             send("table", {
               columns,
               rows,
               row_count: digest.row_count,
-              truncated: digest.row_count > rows.length,
+              truncated: false,
             });
           } else {
             // SQL fallback. `maxRows` is the validated caller cap

@@ -244,7 +244,7 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
     return events(await res.text());
   }
 
-  it("endpoint route: keyed body is unwrapped; table carries up to 200 rows with truncated; narrative + persisted digest stay small", async () => {
+  it("endpoint route: keyed body is unwrapped; table carries up to 200 rows of an exact (not truncated) total; narrative + persisted digest stay small", async () => {
     const series = Array.from({ length: 250 }, (_, i) => ({
       ano: 2015 + Math.floor(i / 12),
       mes: (i % 12) + 1,
@@ -268,7 +268,9 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
     const table = evs.find((e) => e.event === "table")!.data;
     expect(table.row_count).toBe(250);
     expect((table.rows as unknown[]).length).toBe(200);
-    expect(table.truncated).toBe(true);
+    // 250 is the body's exact total, not a floor: the client must render
+    // "250", not "250+". Only the SQL path's row cap sets `truncated`.
+    expect(table.truncated).toBe(false);
     expect(evs.find((e) => e.event === "chart")?.data).toEqual({
       chart_type: "line",
       x_col: "ano",
@@ -277,15 +279,18 @@ describe("/sage/query table + digest caps (audit #76/#87)", () => {
 
     const digest = narrativeInputs[0]!.digest;
     expect(digest.row_count).toBe(250);
+    expect(digest.truncated).toBeUndefined();
     expect(digest.first_n_rows.length).toBeLessThanOrEqual(20);
     expect(JSON.stringify(digest.first_n_rows).length).toBeLessThanOrEqual(
       DIGEST_ROWS_MAX_BYTES,
     );
-    const persisted = mockAppendTurn.mock.calls[0]![3] as {
+    const persisted = mockAppendTurn.mock.lastCall![3] as {
       digest: { row_count: number; first_5_rows: unknown[] };
     };
     expect(persisted.digest.row_count).toBe(250);
     expect(persisted.digest.first_5_rows).toHaveLength(5);
+    // A reloaded thread renders the same exact count as the live turn.
+    expect(persisted.digest).not.toHaveProperty("truncated");
   });
 
   it("SQL route: default cap is 200 (+1 probe row) and the table says when it was cut", async () => {
