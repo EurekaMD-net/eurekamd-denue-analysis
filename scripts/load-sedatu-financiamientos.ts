@@ -7,13 +7,13 @@
  *
  * Pipeline:
  *   1. Pre-pass: iconv ISO-8859-1 → UTF-8 (raw is Latin-1 with `año` as 0xf1).
- *   2. \copy raw CSV into `sedatu_financiamientos_raw_2025` (all TEXT).
+ *   2. \copy raw CSV into `sedatu_financiamientos_raw_<year>` (all TEXT).
  *   3. Atomic BEGIN/COMMIT block builds:
  *      - 4 lookup tables (organismos, modalidades, destinos, vivienda_tiers)
  *        seeded from the codebook (hardcoded INSERTs — codebook is small + stable).
- *      - View `sedatu_financiamientos_2025` (typed cast + LPAD cve_mun + INEGI
+ *      - View `sedatu_financiamientos_<year>` (typed cast + LPAD cve_mun + INEGI
  *        5-char `cve_mun_full` join key).
- *      - View `sedatu_financiamientos_estado_grain_2025` (v0.2.16: filters on
+ *      - View `sedatu_financiamientos_estado_grain_<year>` (v0.2.16: filters on
  *        cve_ent only, re-includes the 384 state-level "no distribuido"
  *        rows the muni view excludes — needed for estado-grain rollup).
  *      - MATERIALIZED VIEW `sedatu_financing_by_municipio` (per-muni aggregates:
@@ -22,9 +22,32 @@
  *      - MATERIALIZED VIEW `sedatu_financing_by_estado` (v0.2.16: same shape
  *        as muni MV, grouped by cve_ent, sourced from estado-grain base view).
  *
+ * Years (2026-09-28, docs/SNIIV-2026-H1.md):
+ *   --year=<YYYY> (default 2025) names the raw table, the typed view and the
+ *   estado-grain view (`sedatu_financiamientos_raw_<YYYY>`,
+ *   `sedatu_financiamientos_<YYYY>`, `sedatu_financiamientos_estado_grain_<YYYY>`)
+ *   and the default CSV (`raw/sedatu/financiamientos_<YYYY>.csv`).
+ *   --mv-source-year=<YYYY> (default 2025) is the latest COMPLETE year. The two
+ *   MVs are rebuilt from that year's views only, and only when --year equals
+ *   it: the API joins them on cve_mun / cve_ent alone and exposes
+ *   periodo = MIN(ano), so a partial year (2026 = enero–junio) must never be
+ *   mixed into them. Any other --year loads its own raw table + views and
+ *   leaves the MVs AND the lookup tables untouched (the lookups are shared by
+ *   every year and the MVs depend on them, so dropping them without the MVs
+ *   would fail). Promote a year once SNIIV publishes it complete:
+ *   --year=2026 --mv-source-year=2026 --force.
+ *   Input checks run before anything touches the DB: the CSV header must equal
+ *   RAW_HEADER_COLS (\copy maps by position) and every row's `ano` must equal
+ *   --year (scripts/_sniiv-csv.ts). Every relation the run (re)creates gets
+ *   postLoadGrants (strip anon / authenticated / trustr_app, re-grant the
+ *   denue_sage SELECT that sage-role.sql allowlists). An MV rebuild still drops
+ *   the denue_api SELECT: re-run scripts/api-role.sql after one.
+ *   Source URL for a year: https://sniiv.sedatu.gob.mx/api/ReporteAPI/GetDocumentoAnio/2/<YYYY>/1
+ *
  * Usage:
  *   npx tsx --env-file=.env scripts/load-sedatu-financiamientos.ts \
- *     [--csv=raw/sedatu/financiamientos_2025.csv] [--force]
+ *     [--year=2025] [--mv-source-year=2025] \
+ *     [--csv=raw/sedatu/financiamientos_<year>.csv] [--force]
  */
 
 import { execFileSync } from "node:child_process";
@@ -38,13 +61,29 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { argv } from "node:process";
-import { copyFromStdinScript, runPsqlScript } from "./_psql-tx.js";
+import {
+  assertIdent,
+  copyFromStdinScript,
+  postLoadGrants,
+  runPsqlScript,
+} from "./_psql-tx.js";
+import { assertYear, checkSniivCsv } from "./_sniiv-csv.js";
 
 interface Args {
   csv: string;
   force: boolean;
   container: string;
+  /** Data year; names the raw table + views. Default DEFAULT_YEAR. */
+  year?: string;
+  /**
+   * Latest COMPLETE year: the only one whose views feed the MVs. Default
+   * DEFAULT_YEAR; left undefined unless passed, so the pre-flight can tell an
+   * explicit choice from the default.
+   */
+  mvSourceYear?: string;
 }
+
+export const DEFAULT_YEAR = "2025";
 
 const SAFE_CONTAINER_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const SAFE_PATH_RE = /^[A-Za-z0-9._\-/]+$/;
@@ -56,19 +95,135 @@ function assertSafePath(p: string): void {
   }
 }
 
-function parseArgs(): Args {
-  const args = argv.slice(2);
-  let csv = "raw/sedatu/financiamientos_2025.csv";
+export function defaultCsvPath(year: string): string {
+  return `raw/sedatu/financiamientos_${assertYear(year, "--year")}.csv`;
+}
+
+export function parseArgs(
+  args: readonly string[] = argv.slice(2),
+): Args & { year: string } {
+  let csv: string | undefined;
   let force = false;
+  let year = DEFAULT_YEAR;
+  let mvSourceYear: string | undefined;
   for (const a of args) {
+    // `--year 2026` (space form) or a bare `--year` would otherwise be
+    // skipped silently and load the default year.
+    if (/^--(year|mv-source-year)(?!=)/.test(a)) {
+      throw new Error(`${a} needs the = form: --year=<YYYY> / --mv-source-year=<YYYY>`);
+    }
     if (a.startsWith("--csv=")) csv = a.slice(6);
     else if (a === "--force") force = true;
+    else if (a.startsWith("--year=")) year = assertYear(a.slice(7), "--year");
+    else if (a.startsWith("--mv-source-year=")) {
+      mvSourceYear = assertYear(a.slice(17), "--mv-source-year");
+    } else {
+      // e.g. `--mv_source_year=2026` would otherwise run as a views-only load.
+      throw new Error(
+        `unknown argument "${a}"; expected --csv=<path>, --year=<YYYY>, --mv-source-year=<YYYY>, --force`,
+      );
+    }
   }
   return {
-    csv,
+    csv: csv ?? defaultCsvPath(year),
     force,
     container: process.env.SUPABASE_DB_CONTAINER ?? "supabase-db",
+    year,
+    mvSourceYear,
   };
+}
+
+/** Per-year relations. The year is validated and every name re-checked by _psql-tx's assertIdent. */
+export function yearRelations(year: string): {
+  raw: string;
+  view: string;
+  estadoView: string;
+} {
+  assertYear(year, "--year");
+  const rels = {
+    raw: `sedatu_financiamientos_raw_${year}`,
+    view: `sedatu_financiamientos_${year}`,
+    estadoView: `sedatu_financiamientos_estado_grain_${year}`,
+  };
+  for (const r of Object.values(rels)) assertIdent(r);
+  return rels;
+}
+
+// Views the two MVs read today (pg_depend via their rewrite rules); empty
+// when the MVs do not exist yet. Read-only, runs before any write.
+export const MV_SOURCE_VIEWS_SQL = `SELECT DISTINCT v.relname FROM pg_depend d JOIN pg_rewrite rw ON rw.oid = d.objid JOIN pg_class v ON v.oid = d.refobjid WHERE d.classid = 'pg_rewrite'::regclass AND d.refclassid = 'pg_class'::regclass AND v.relkind = 'v' AND rw.ev_class IN (SELECT c.oid FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('sedatu_financing_by_municipio', 'sedatu_financing_by_estado')) ORDER BY 1;`;
+
+/**
+ * Pre-flight on the --year / --mv-source-year pairing, from the
+ * MV_SOURCE_VIEWS_SQL output. Returns the year the MVs read (null on a fresh
+ * DB, where anything goes). Refuses, before the raw TRUNCATE + COPY commits:
+ *  - a views-only load of the year the MVs read (its DROP VIEW would fail on
+ *    the MVs' dependency after the raw data already changed);
+ *  - a views-only load whose --mv-source-year is not what the MVs read (the
+ *    run would not change them, so the flag would be a false statement);
+ *  - an MV rebuild from a year other than the current one when
+ *    --mv-source-year was not passed explicitly (e.g. a default --force reload
+ *    after 2026 was promoted would silently put the MVs back on 2025).
+ */
+export function checkMvSourcePairing(
+  depOut: string,
+  year: string,
+  mvSourceYear: string,
+  mvSourceExplicit: boolean,
+): string | null {
+  const years = new Set<string>();
+  for (const line of depOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const m = /^sedatu_financiamientos_(?:estado_grain_)?(20[0-9]{2})$/.exec(line);
+    if (!m) throw new Error(`unexpected MV source view "${line}"`);
+    years.add(m[1] as string);
+  }
+  if (years.size === 0) return null;
+  if (years.size > 1) {
+    throw new Error(
+      `the MVs read different years (${[...years].join(", ")}); rebuild them from one: --year=<YYYY> --mv-source-year=<YYYY> --force`,
+    );
+  }
+  const current = [...years][0] as string;
+  if (year !== mvSourceYear) {
+    if (year === current) {
+      throw new Error(
+        `the MVs read the ${current} views, so --year=${year} with --mv-source-year=${mvSourceYear} would drop views they depend on. Pass --mv-source-year=${current} to reload ${current} and rebuild the MVs with it.`,
+      );
+    }
+    if (mvSourceYear !== current) {
+      throw new Error(
+        `the MVs read ${current}, not --mv-source-year=${mvSourceYear}, and this --year=${year} run does not rebuild them. Pass --mv-source-year=${current}.`,
+      );
+    }
+    return current;
+  }
+  if (mvSourceYear !== current && !mvSourceExplicit) {
+    throw new Error(
+      `the MVs read ${current}; this run would rebuild them from the default --mv-source-year=${mvSourceYear}. Pass --mv-source-year=${current} to keep ${current}, or --mv-source-year=${mvSourceYear} explicitly to switch.`,
+    );
+  }
+  return current;
+}
+
+// Shared across years (lookups) and built from --mv-source-year only (MVs).
+const LOOKUP_TABLES = [
+  "sedatu_organismos",
+  "sedatu_modalidades",
+  "sedatu_destinos",
+  "sedatu_vivienda_tiers",
+] as const;
+const MV_RELATIONS = [
+  "sedatu_financing_by_municipio",
+  "sedatu_financing_by_estado",
+] as const;
+
+// Index names are schema-wide: a second year reusing the 2025 names would make
+// CREATE INDEX IF NOT EXISTS skip silently and leave its raw table unindexed.
+// 2025 keeps its original names so re-runs stay no-ops.
+function rawIndexName(base: string, year: string): string {
+  const name = year === "2025" ? base : `${base}_${year}`;
+  assertIdent(name);
+  return name;
 }
 
 // --- Schema ---
@@ -107,8 +262,15 @@ export const NUMERIC_RAW_COLS = [
   "monto",
 ] as const;
 
-export const RAW_DDL = `
-CREATE TABLE IF NOT EXISTS sedatu_financiamientos_raw_2025 (
+// One transaction with the grants: postgres' default ACL gives trustr_app
+// arwdDxt on every new table, so a new year's raw table must never be
+// committed without the REVOKE (and stays clean if the later COPY fails).
+export function rawDdl(year: string): string {
+  const { raw } = yearRelations(year);
+  return `
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS ${raw} (
   ano TEXT,
   mes TEXT,
   cve_ent TEXT,
@@ -128,11 +290,18 @@ CREATE TABLE IF NOT EXISTS sedatu_financiamientos_raw_2025 (
   ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_sedatu_raw_cve_ent
-  ON sedatu_financiamientos_raw_2025(cve_ent);
-CREATE INDEX IF NOT EXISTS idx_sedatu_raw_organismo
-  ON sedatu_financiamientos_raw_2025(organismo);
+CREATE INDEX IF NOT EXISTS ${rawIndexName("idx_sedatu_raw_cve_ent", year)}
+  ON ${raw}(cve_ent);
+CREATE INDEX IF NOT EXISTS ${rawIndexName("idx_sedatu_raw_organismo", year)}
+  ON ${raw}(organismo);
+
+${postLoadGrants([raw])}
+
+COMMIT;
 `.trim();
+}
+
+export const RAW_DDL = rawDdl(DEFAULT_YEAR);
 
 // Lookup table seeds — hardcoded from codebook (diccionario_financiamiento.xlsx).
 // Re-running is idempotent because LOOKUPS_DDL drops + recreates each time.
@@ -242,14 +411,16 @@ const numericCast = (col: string): string =>
 // muni MV groups on the LPAD-composed `cve_mun` (5-char) below; no handler
 // SELECTs the short or string forms. Verified zero downstream consumers
 // via grep across src/ + scripts/.
-export const FINANCIAMIENTOS_VIEW_DDL = `
-CREATE VIEW sedatu_financiamientos_2025 AS
+export function financiamientosViewDdl(year: string): string {
+  const { raw, view } = yearRelations(year);
+  return `
+CREATE VIEW ${view} AS
 SELECT
   ${NUMERIC_RAW_COLS.map(numericCast).join(",\n  ")},
   cve_ent,
   entidad,
   cve_ent || LPAD(cve_mun, 3, '0') AS cve_mun
-FROM sedatu_financiamientos_raw_2025
+FROM ${raw}
 WHERE NULLIF(TRIM(cve_ent), '') IS NOT NULL
   AND NULLIF(TRIM(cve_mun), '') IS NOT NULL
   -- TRIM-then-match: defensive against future SEDATU rows with whitespace
@@ -259,6 +430,9 @@ WHERE NULLIF(TRIM(cve_ent), '') IS NOT NULL
   AND TRIM(cve_ent) ~ '^(0[1-9]|[12][0-9]|3[0-2])$'
   AND TRIM(cve_mun) ~ '^[0-9]{1,3}$';
 `.trim();
+}
+
+export const FINANCIAMIENTOS_VIEW_DDL = financiamientosViewDdl(DEFAULT_YEAR);
 
 // View 1b (v0.2.16): estado-grain sibling. Same typed-cast shape as the
 // muni view, but the cve_mun filter is INTENTIONALLY DROPPED so that
@@ -276,24 +450,32 @@ WHERE NULLIF(TRIM(cve_ent), '') IS NOT NULL
 // the projection. Both were copy-paste residue from the muni view; the
 // estado MV groups on cve_ent and never references either column.
 // Re-add only if a future estado-grain consumer needs the strings.
-export const FINANCIAMIENTOS_ESTADO_VIEW_DDL = `
-CREATE VIEW sedatu_financiamientos_estado_grain_2025 AS
+export function financiamientosEstadoViewDdl(year: string): string {
+  const { raw, estadoView } = yearRelations(year);
+  return `
+CREATE VIEW ${estadoView} AS
 SELECT
   ${NUMERIC_RAW_COLS.map(numericCast).join(",\n  ")},
   cve_ent,
   entidad
-FROM sedatu_financiamientos_raw_2025
+FROM ${raw}
 WHERE NULLIF(TRIM(cve_ent), '') IS NOT NULL
   AND TRIM(cve_ent) ~ '^(0[1-9]|[12][0-9]|3[0-2])$';
   -- NO cve_mun filter (deliberate — see comment above).
 `.trim();
+}
+
+export const FINANCIAMIENTOS_ESTADO_VIEW_DDL =
+  financiamientosEstadoViewDdl(DEFAULT_YEAR);
 
 // View 2: per-muni aggregates with code-label resolution.
 // Composition pcts are exclude-suppressed: e.g. pct_femenino divides by
 // `acciones WHERE sexo IS NOT NULL`, not by total acciones — so the
 // reported % is among rows where sexo is known. Same posture for
 // edad/ingresos/vivienda_valor.
-export const FINANCING_BY_MUNI_DDL = `
+export function financingByMuniDdl(sourceYear: string): string {
+  const { view } = yearRelations(sourceYear);
+  return `
 CREATE MATERIALIZED VIEW sedatu_financing_by_municipio AS
 WITH per_muni AS (
   SELECT
@@ -346,7 +528,7 @@ WITH per_muni AS (
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 4), 0) AS acciones_media,
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 5), 0) AS acciones_residencial,
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 6), 0) AS acciones_residencial_plus
-  FROM sedatu_financiamientos_2025
+  FROM ${view}
   GROUP BY cve_mun, cve_ent
 ),
 top_org AS (
@@ -358,7 +540,7 @@ top_org AS (
       PARTITION BY cve_mun
       ORDER BY SUM(acciones) DESC, organismo ASC
     ) AS rk
-  FROM sedatu_financiamientos_2025
+  FROM ${view}
   GROUP BY cve_mun, organismo
 )
 SELECT
@@ -407,6 +589,9 @@ CREATE INDEX idx_sedatu_fin_cve_ent
 CREATE INDEX idx_sedatu_fin_monto_total
   ON sedatu_financing_by_municipio(monto_total DESC);
 `.trim();
+}
+
+export const FINANCING_BY_MUNI_DDL = financingByMuniDdl(DEFAULT_YEAR);
 
 // MV 2 (v0.2.16): estado-grain aggregates. Same composition formulas as the
 // muni MV (modality % over ALL acciones, demographic % with known-rows
@@ -427,7 +612,9 @@ CREATE INDEX idx_sedatu_fin_monto_total
 //  * `top_organismo` ranks by acciones (catch-alls have 0 acciones, so
 //    a publisher that ships only state-level pure-monto entries does
 //    not surface in the ranking even though its monto is captured).
-export const FINANCING_BY_ESTADO_DDL = `
+export function financingByEstadoDdl(sourceYear: string): string {
+  const { estadoView } = yearRelations(sourceYear);
+  return `
 CREATE MATERIALIZED VIEW sedatu_financing_by_estado AS
 WITH per_estado AS (
   SELECT
@@ -466,7 +653,7 @@ WITH per_estado AS (
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 4), 0) AS acciones_media,
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 5), 0) AS acciones_residencial,
     COALESCE(SUM(acciones) FILTER (WHERE vivienda_valor = 6), 0) AS acciones_residencial_plus
-  FROM sedatu_financiamientos_estado_grain_2025
+  FROM ${estadoView}
   GROUP BY cve_ent
 ),
 top_org_estado AS (
@@ -478,7 +665,7 @@ top_org_estado AS (
       PARTITION BY cve_ent
       ORDER BY SUM(acciones) DESC, organismo ASC
     ) AS rk
-  FROM sedatu_financiamientos_estado_grain_2025
+  FROM ${estadoView}
   GROUP BY cve_ent, organismo
 )
 SELECT
@@ -523,6 +710,9 @@ CREATE UNIQUE INDEX idx_sedatu_fin_est_cve_ent
 CREATE INDEX idx_sedatu_fin_est_monto_total
   ON sedatu_financing_by_estado(monto_total DESC);
 `.trim();
+}
+
+export const FINANCING_BY_ESTADO_DDL = financingByEstadoDdl(DEFAULT_YEAR);
 
 // Audit-W1 pattern from v0.2.13: views in ONE atomic transaction so a
 // partial failure (transient psql restart, OOM during MV materialization)
@@ -540,15 +730,40 @@ CREATE INDEX idx_sedatu_fin_est_monto_total
 // Without step 1, a second --force reload after v0.2.16 ships errors with
 // "cannot drop table sedatu_organismos because materialized view
 // sedatu_financing_by_estado depends on it". Mirrors the v0.2.15 SICT C1.
-export const VIEWS_DDL_TRANSACTION = `
+//
+// --year != --mv-source-year (e.g. 2026 H1 beside 2025): only that year's two
+// views are dropped + rebuilt. Lookups and MVs stay as they are; a DROP of
+// the lookups here would fail on the MVs' dependency (no CASCADE) anyway.
+export function viewsDdlTransaction(year: string, mvSourceYear: string): string {
+  const r = yearRelations(year);
+  assertYear(mvSourceYear, "--mv-source-year");
+  if (year !== mvSourceYear) {
+    return `
+BEGIN;
+
+\\echo [load-sedatu] --year=${year} is not --mv-source-year=${mvSourceYear}: rebuilding the ${year} views only (MVs + lookup tables untouched)...
+
+DROP VIEW IF EXISTS ${r.estadoView};
+DROP VIEW IF EXISTS ${r.view};
+
+${financiamientosViewDdl(year)}
+
+${financiamientosEstadoViewDdl(year)}
+
+${postLoadGrants([r.raw, r.view, r.estadoView])}
+
+COMMIT;
+`.trim();
+  }
+  return `
 BEGIN;
 
 \\echo [load-sedatu] dropping dependent views before lookup-table rebuild...
 
 DROP MATERIALIZED VIEW IF EXISTS sedatu_financing_by_estado;
 DROP MATERIALIZED VIEW IF EXISTS sedatu_financing_by_municipio;
-DROP VIEW IF EXISTS sedatu_financiamientos_estado_grain_2025;
-DROP VIEW IF EXISTS sedatu_financiamientos_2025;
+DROP VIEW IF EXISTS ${r.estadoView};
+DROP VIEW IF EXISTS ${r.view};
 
 \\echo [load-sedatu] applying lookup tables (organismos / modalidades / destinos / vivienda_tiers)...
 
@@ -556,33 +771,60 @@ ${LOOKUPS_DDL}
 
 \\echo [load-sedatu] building financiamientos view (typed cast + LPAD cve_mun)...
 
-${FINANCIAMIENTOS_VIEW_DDL}
+${financiamientosViewDdl(year)}
 
 \\echo [load-sedatu] building financiamientos estado-grain view (re-includes state-level catch-alls)...
 
-${FINANCIAMIENTOS_ESTADO_VIEW_DDL}
+${financiamientosEstadoViewDdl(year)}
 
-\\echo [load-sedatu] building financing-by-municipio MV + indexes...
+\\echo [load-sedatu] building financing-by-municipio MV + indexes (source: ${r.view})...
 
-${FINANCING_BY_MUNI_DDL}
+${financingByMuniDdl(year)}
 
-\\echo [load-sedatu] building financing-by-estado MV + indexes...
+\\echo [load-sedatu] building financing-by-estado MV + indexes (source: ${r.estadoView})...
 
-${FINANCING_BY_ESTADO_DDL}
+${financingByEstadoDdl(year)}
+
+${postLoadGrants([r.raw, r.view, r.estadoView, ...LOOKUP_TABLES, ...MV_RELATIONS])}
 
 COMMIT;
 `.trim();
+}
 
-export const POST_LOAD_VERIFY_SQL = `
+export const VIEWS_DDL_TRANSACTION = viewsDdlTransaction(
+  DEFAULT_YEAR,
+  DEFAULT_YEAR,
+);
+
+// Without an MV rebuild the check reads the year's own views (the MVs still
+// describe --mv-source-year).
+export function postLoadVerifySql(year: string, mvSourceYear: string): string {
+  const r = yearRelations(year);
+  if (year !== mvSourceYear) {
+    return `
 SELECT
-  (SELECT COUNT(*) FROM sedatu_financiamientos_raw_2025) AS raw_rows,
-  (SELECT COUNT(*) FROM sedatu_financiamientos_2025) AS view_rows,
-  (SELECT COUNT(DISTINCT cve_mun) FROM sedatu_financiamientos_2025) AS distinct_muni,
+  (SELECT COUNT(*) FROM ${r.raw}) AS raw_rows,
+  (SELECT COUNT(*) FROM ${r.view}) AS view_rows,
+  (SELECT COUNT(DISTINCT cve_mun) FROM ${r.view}) AS distinct_muni,
+  (SELECT MIN(ano)::INTEGER || '..' || MAX(ano)::INTEGER FROM ${r.estadoView}) AS ano_range,
+  (SELECT MIN(mes)::INTEGER || '..' || MAX(mes)::INTEGER FROM ${r.estadoView}) AS mes_range,
+  (SELECT TO_CHAR(SUM(acciones), 'FM999,999,999') FROM ${r.view}) AS total_acciones,
+  (SELECT TO_CHAR(SUM(monto) / 1e9, 'FM999.99') FROM ${r.view}) AS total_monto_b_mxn;
+`.trim();
+  }
+  return `
+SELECT
+  (SELECT COUNT(*) FROM ${r.raw}) AS raw_rows,
+  (SELECT COUNT(*) FROM ${r.view}) AS view_rows,
+  (SELECT COUNT(DISTINCT cve_mun) FROM ${r.view}) AS distinct_muni,
   (SELECT COUNT(*) FROM sedatu_financing_by_municipio) AS muni_with_financing,
   (SELECT COUNT(*) FROM sedatu_financing_by_estado) AS estados_with_financing,
   (SELECT TO_CHAR(SUM(acciones_total), 'FM999,999,999') FROM sedatu_financing_by_municipio) AS total_acciones,
   (SELECT TO_CHAR(SUM(monto_total) / 1e9, 'FM999.99') FROM sedatu_financing_by_municipio) AS total_monto_b_mxn;
 `.trim();
+}
+
+export const POST_LOAD_VERIFY_SQL = postLoadVerifySql(DEFAULT_YEAR, DEFAULT_YEAR);
 
 // --- Loader ---
 
@@ -638,19 +880,56 @@ export function transcodeLatin1ToUtf8(input: Buffer): Buffer {
 }
 
 export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
+  const year = assertYear(args.year ?? DEFAULT_YEAR, "--year");
+  const mvSourceYear = assertYear(
+    args.mvSourceYear ?? DEFAULT_YEAR,
+    "--mv-source-year",
+  );
+  const rel = yearRelations(year);
   if (!existsSync(args.csv)) {
     throw new Error(
-      `[load-sedatu] CSV not found: ${args.csv}. Download from https://sistemas.sedatu.gob.mx/repositorio/proxy/alfresco-noauth/api/internal/shared/node/BOZvuxwVRmy62_qG966obQ/content/financiamientos_2025.csv?a=true`,
+      year === "2025"
+        ? `[load-sedatu] CSV not found: ${args.csv}. Download from https://sistemas.sedatu.gob.mx/repositorio/proxy/alfresco-noauth/api/internal/shared/node/BOZvuxwVRmy62_qG966obQ/content/financiamientos_2025.csv?a=true`
+        : `[load-sedatu] CSV not found: ${args.csv}. Resolve the download URL with https://sniiv.sedatu.gob.mx/api/ReporteAPI/GetDocumentoAnio/2/${year}/1`,
     );
   }
   assertSafePath(args.csv);
+
+  // 0. Fail-loud input checks, before anything touches the DB: header ==
+  // RAW_HEADER_COLS (\copy is positional), every row's ano == --year.
+  const utf8 = transcodeLatin1ToUtf8(readFileSync(args.csv));
+  const shape = checkSniivCsv(utf8, RAW_HEADER_COLS, year);
+  console.log(
+    `[load-sedatu] ${args.csv}: ${shape.rows} rows, ano=${year}, mes ${shape.mesMin}..${shape.mesMax}`,
+  );
+  // 0b. Pre-flight on the year pairing (read-only), before any write.
+  checkMvSourcePairing(
+    dockerExec(args.container, [
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      "postgres",
+      "-tA",
+      "-c",
+      MV_SOURCE_VIEWS_SQL,
+    ]),
+    year,
+    mvSourceYear,
+    args.mvSourceYear !== undefined,
+  );
+  if (year !== mvSourceYear) {
+    console.log(
+      `[load-sedatu] --year=${year} != --mv-source-year=${mvSourceYear}: loading ${rel.raw} + its views only; sedatu_financing_by_municipio/_estado are NOT rebuilt and still read ${mvSourceYear}.`,
+    );
+  }
 
   // 1. Apply schema (idempotent).
   console.log("[load-sedatu] applying schema...");
   dockerExecStdin(
     args.container,
     ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-    RAW_DDL,
+    rawDdl(year),
   );
 
   // 2. Idempotency guard.
@@ -662,21 +941,20 @@ export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
     "postgres",
     "-tA",
     "-c",
-    "SELECT COUNT(*) FROM sedatu_financiamientos_raw_2025;",
+    `SELECT COUNT(*) FROM ${rel.raw};`,
   ]).trim();
   const existing = Number.parseInt(countOut || "0", 10);
   if (existing > 0 && !args.force) {
     throw new Error(
-      `[load-sedatu] sedatu_financiamientos_raw_2025 has ${existing} rows. Use --force to truncate + reload.`,
+      `[load-sedatu] ${rel.raw} has ${existing} rows. Use --force to truncate + reload.`,
     );
   }
 
   // 3. Transcode ISO-8859-1 → UTF-8 in tempdir.
   const tempdir = mkdtempSync(join(tmpdir(), "sedatu-financiamientos-"));
   try {
-    const utf8Path = join(tempdir, "financiamientos_2025.utf8.csv");
-    const raw = readFileSync(args.csv);
-    writeFileSync(utf8Path, transcodeLatin1ToUtf8(raw));
+    const utf8Path = join(tempdir, `financiamientos_${year}.utf8.csv`);
+    writeFileSync(utf8Path, utf8);
 
     // 4. Truncate raw + \copy.
     console.log(
@@ -685,12 +963,12 @@ export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
     // Audit #146: TRUNCATE and \copy share ONE psql session and
     // transaction (CSV piped inline after the \copy line), so a failed copy
     // rolls the TRUNCATE back instead of committing an empty raw table.
-    const copyCmd = `\\copy sedatu_financiamientos_raw_2025 (${RAW_HEADER_COLS.join(", ")}) FROM STDIN WITH (FORMAT csv, HEADER true)`;
+    const copyCmd = `\\copy ${rel.raw} (${RAW_HEADER_COLS.join(", ")}) FROM STDIN WITH (FORMAT csv, HEADER true)`;
     const csvBuf = readFileSync(utf8Path);
     runPsqlScript(
       args.container,
       copyFromStdinScript(
-        `TRUNCATE TABLE sedatu_financiamientos_raw_2025;`,
+        `TRUNCATE TABLE ${rel.raw};`,
         copyCmd,
         csvBuf,
       ),
@@ -702,7 +980,7 @@ export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
     dockerExecStdin(
       args.container,
       ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
-      VIEWS_DDL_TRANSACTION,
+      viewsDdlTransaction(year, mvSourceYear),
     );
 
     // 6. Verify.
@@ -714,7 +992,7 @@ export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
       "postgres",
       "-tA",
       "-c",
-      POST_LOAD_VERIFY_SQL,
+      postLoadVerifySql(year, mvSourceYear),
     ]).trim();
     console.log(`[load-sedatu] done. ${stats}`);
   } finally {
@@ -726,9 +1004,12 @@ export async function loadSedatuFinanciamientos(args: Args): Promise<void> {
 const isMain =
   import.meta.url === `file://${process.argv[1] ?? ""}`.replace(/\\/g, "/");
 if (isMain) {
-  loadSedatuFinanciamientos(parseArgs()).catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[load-sedatu] ✗ ${msg}`);
-    process.exit(1);
-  });
+  // parseArgs throws on a bad --year; route it through the same handler.
+  Promise.resolve()
+    .then(() => loadSedatuFinanciamientos(parseArgs()))
+    .catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[load-sedatu] ✗ ${msg}`);
+      process.exit(1);
+    });
 }

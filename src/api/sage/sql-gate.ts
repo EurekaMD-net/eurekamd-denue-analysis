@@ -129,12 +129,14 @@ const FORBIDDEN_RELATIONS = [
   "cofepris_farmacias",
   "clues_raw",
   "cnbv_credito_raw_2025",
+  "cnbv_credito_raw_2026",
   "cnbv_panorama_estatal_raw",
   "cnbv_panorama_municipal_raw",
   "coneval_grs_ageb_raw",
   "coneval_irs_municipal_raw",
   "coneval_pobreza_municipal_raw",
   "sedatu_financiamientos_raw_2025",
+  "sedatu_financiamientos_raw_2026",
   "sict_estaciones_viales_raw_2024",
   "bienestar_padron_estatal_trimestral_raw",
   "aeropuertos_movements_raw",
@@ -143,6 +145,13 @@ const FORBIDDEN_RELATIONS = [
   "ent_polygons",
   "mun_polygons",
   "loc_polygons",
+];
+
+// Year-suffixed raw tables of the SNIIV loaders (load-sedatu-financiamientos.ts,
+// load-cnbv-credito.ts --year=<YYYY>): denied for every year, so a new year
+// needs no edit here. Matched against the lowercased identifier token.
+const FORBIDDEN_RELATION_PATTERNS = [
+  /^(sedatu_financiamientos|cnbv_credito)_raw_\d{4}$/,
 ];
 
 // Relations the EXPLAIN planner must never Seq-Scan. Strictly the
@@ -548,7 +557,10 @@ export function preCheckSql(sql: string): SqlGateError | null {
     const name = t.value;
 
     // Forbidden-relation scan, quoted or schema-qualified.
-    if (FORBIDDEN_RELATIONS.includes(name)) {
+    if (
+      FORBIDDEN_RELATIONS.includes(name) ||
+      FORBIDDEN_RELATION_PATTERNS.some((re) => re.test(name))
+    ) {
       return {
         code: "SQL_FORBIDDEN_TABLE",
         message: `table "${name}" not in Sage allowlist`,

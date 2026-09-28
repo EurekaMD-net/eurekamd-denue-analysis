@@ -33,7 +33,7 @@ function readScriptFile(name: string): string {
   return readFileSync(join(SCRIPTS_DIR, name), "utf-8");
 }
 
-function assertIdent(name: string): void {
+export function assertIdent(name: string): void {
   if (!IDENT_RE.test(name)) {
     throw new Error(`_psql-tx: unsafe relation name "${name}"`);
   }
@@ -92,12 +92,17 @@ export function copyFromStdinScript(
   if (!/^\\copy [^\n]* FROM STDIN\b[^\n]*$/.test(copyCmd)) {
     throw new Error("_psql-tx: copyCmd must be a one-line \\copy ... FROM STDIN");
   }
-  // The `\.` end-of-data marker must start its own line.
-  const sep = csv.length === 0 || csv[csv.length - 1] === 0x0a ? "" : "\n";
+  // The `\.` end-of-data marker must start its own line and end with the
+  // data's newline style: CSV COPY fixes the style from the first line, so
+  // after CRLF rows (the SNIIV CSVs) a bare `\.\n` fails with "unquoted
+  // newline found in data" and the load rolls back (2026-09-28).
+  const firstNl = csv.indexOf(0x0a);
+  const eol = firstNl > 0 && csv[firstNl - 1] === 0x0d ? "\r\n" : "\n";
+  const sep = csv.length === 0 || csv[csv.length - 1] === 0x0a ? "" : eol;
   return Buffer.concat([
     Buffer.from(`${prelude}\n${copyCmd}\n`, "utf-8"),
     csv,
-    Buffer.from(`${sep}\\.\n`, "utf-8"),
+    Buffer.from(`${sep}\\.${eol}`, "utf-8"),
   ]);
 }
 

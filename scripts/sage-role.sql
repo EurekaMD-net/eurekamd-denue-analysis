@@ -182,6 +182,25 @@ GRANT SELECT ON sedatu_financiamientos_2025    TO denue_sage;
 GRANT SELECT ON sedatu_financiamientos_estado_grain_2025 TO denue_sage;
 GRANT SELECT ON sict_estaciones_viales         TO denue_sage;
 GRANT SELECT ON sinba_morbidity_municipal      TO denue_sage;
+-- SNIIV years beyond 2025 (docs/SNIIV-2026-H1.md): created by
+-- load-sedatu-financiamientos.ts / load-cnbv-credito.ts --year=2026 and absent
+-- until then, so each GRANT is existence-guarded like osm_ageb_aggregates. The
+-- loaders re-apply these lines after every load (postLoadGrants reads them).
+DO $$
+BEGIN
+  IF to_regclass('public.sedatu_financiamientos_2026') IS NOT NULL THEN
+    GRANT SELECT ON sedatu_financiamientos_2026 TO denue_sage;
+  END IF;
+  IF to_regclass('public.sedatu_financiamientos_estado_grain_2026') IS NOT NULL THEN
+    GRANT SELECT ON sedatu_financiamientos_estado_grain_2026 TO denue_sage;
+  END IF;
+  IF to_regclass('public.cnbv_credito_2026') IS NOT NULL THEN
+    GRANT SELECT ON cnbv_credito_2026 TO denue_sage;
+  END IF;
+  IF to_regclass('public.cnbv_credito_estado_grain_2026') IS NOT NULL THEN
+    GRANT SELECT ON cnbv_credito_estado_grain_2026 TO denue_sage;
+  END IF;
+END$$;
 
 -- Lookup tables (small, safe).
 GRANT SELECT ON cnbv_intermediarios   TO denue_sage;
@@ -221,6 +240,15 @@ REVOKE ALL ON ageb_polygons                 FROM denue_sage;
 REVOKE ALL ON ent_polygons                  FROM denue_sage;
 REVOKE ALL ON mun_polygons                  FROM denue_sage;
 REVOKE ALL ON loc_polygons                  FROM denue_sage;
+DO $$
+BEGIN
+  IF to_regclass('public.cnbv_credito_raw_2026') IS NOT NULL THEN
+    REVOKE ALL ON cnbv_credito_raw_2026 FROM denue_sage;
+  END IF;
+  IF to_regclass('public.sedatu_financiamientos_raw_2026') IS NOT NULL THEN
+    REVOKE ALL ON sedatu_financiamientos_raw_2026 FROM denue_sage;
+  END IF;
+END$$;
 
 COMMIT;
 

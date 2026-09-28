@@ -66,6 +66,20 @@ describe("preCheckSql", () => {
     expect(err?.code).toBe("SQL_FORBIDDEN_TABLE");
   });
 
+  it("rejects every year of the SNIIV raw tables by pattern, quoted or qualified", () => {
+    for (const sql of [
+      "SELECT count(*) FROM sedatu_financiamientos_raw_2027",
+      'SELECT count(*) FROM public."CNBV_CREDITO_RAW_2027"',
+      "SELECT count(*) FROM CNBV_CREDITO_RAW_2031",
+    ]) {
+      expect(preCheckSql(sql)?.code, sql).toBe("SQL_FORBIDDEN_TABLE");
+    }
+    // The yearly views stay reachable.
+    expect(
+      preCheckSql("SELECT SUM(acciones) FROM sedatu_financiamientos_estado_grain_2027"),
+    ).toBeNull();
+  });
+
   it("accepts queries naming allowlisted MVs", () => {
     expect(
       preCheckSql("SELECT cve_mun FROM mv_delitos_municipal_yearly LIMIT 10"),
