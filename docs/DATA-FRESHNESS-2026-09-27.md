@@ -123,7 +123,10 @@ the OSM finding (section 3) was re-checked directly.
    2025.~~ Done 09-28: `--year` / `--mv-source-year`, MVs stay on the latest
    complete year (`docs/SNIIV-2026-H1.md`).
 4. EIC 2025 municipal layer (new loader; decide the 2,478→2,469 key bridge
-   together with the MG 2025 question).
+   together with the MG 2025 question). Recon done 09-28:
+   `docs/EIC-2025-RECON-2026-09-28.md` (sources curl-able, 9 new municipios +
+   parents, 4,950 DENUE rows already orphaned today; ruling pending on
+   option a/b/c, recommendation = b staged).
 5. DENUE 05/2026 loaded 2026-09-27 and stale rows cleaned 2026-09-28. After 2026-11-25: DENUE 11/2026 re-extract (~11 h of API paging);
    after ~Nov 2026: EDR 2025 definitive with `--append` + MV refresh.
 6. Aeropuertos: rule on March-only vs latest-month semantics, then reload.
