@@ -96,3 +96,9 @@
 ## 2026-09-28 — CLUES 2026-08 load
 - **Mistake:** the freshness doc (and my own handoff) labelled CLUES "operator browser download first"; a plain `curl` against the gobi.salud.gob.mx xlsx returned 200 in seconds → always try the fetch from the session before handing a download to the operator; only a login redirect or a challenge wall makes it operator-only.
 - **Avoid:** an ingest whose conversion step lives only in a doc snippet ("see status doc for the openpyxl script") — it was never checked in, so the refresh had no runnable recipe. Every ingest step is a script in `scripts/` or `ops/` that pins its contract (here: the 68-column header).
+
+## 2026-09-28 — COFEPRIS 2026-05 load (parser + loader change 145aa3b)
+- **Mistake:** the freshness plan said "no code change expected except the URL" for a PDF-scraped source → the new edition changed the table width (14→17) and the date format (`DD/MM/YYYY`→`d-mmm.-yy`); the old parser skipped every row, and without the date fix would have loaded 3,066 rows with every date blank. The check: run the parser on the new file and diff the header/first rows against the loader's `EXPECTED_HEADER` BEFORE planning a "re-run".
+- **Avoid:** silent-drop paths in parsers (unparseable date → '', non-matching width → skip) without a counted WARN and a threshold; a load that succeeds with blanked columns is worse than one that fails.
+- **Better:** check the header on EVERY page (PDF tables repeat it) and tie row width to that page's header; validate dates as calendar dates; canonicalize enum-like columns the views filter on (`estatus = 'Vigente'`) in the parser with a counted WARN; keep every superseded raw PDF under `raw/` because gob.mx 404s old attachments (the 2025-07 regression run was impossible).
+- **Better:** a repo-only Python test file is dead unless a vitest wrapper spawns it (`cofepris-pdf-to-csv.test.ts`); the ONE sanctioned full run is the pre-commit hook, so that is where it must be reachable.
