@@ -93,6 +93,13 @@ if their inputs are CRLF.
 
 ## Operator: load 2026 H1 (after merge; nothing else runs)
 
+**Executed 2026-09-28 20:4x UTC on main `5573867`.** Both loaders exited 0 with
+the expected `done.` lines (146537|146370|1653|2026..2026|1..6 and
+45048|45048|629|2026..2026|1..6); the post-load checks below returned
+2026/1..6 on both estado-grain views, `periodo = 2025` on all four MVs,
+`denue_sage` SELECT on the four `_2026` views and no restricted-role
+privilege on the two raw tables; `denue-analyzer` restarted 20:43 UTC.
+
 Run from the main checkout. Each loader is one short transaction per step,
 under a minute on the scratch copy.
 

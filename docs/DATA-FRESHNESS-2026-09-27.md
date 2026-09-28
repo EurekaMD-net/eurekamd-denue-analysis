@@ -14,8 +14,8 @@ the OSM finding (section 3) was re-checked directly.
 | P1 | SESNSP incidencia | through 2026-03 | enero–agosto 2026 (published 09-18, SharePoint) | Manual browser download, rename, re-run loader |
 | P1 | CLUES | 2026-04 | 2026-08 (26.5 MB xlsx, 09-23) | xlsx→csv, re-run loader |
 | P1 | COFEPRIS farmacias | PDF 1020177 (licences to 2025-07) | PDF 1079227 dated 2026-05-15 | PDF→csv, geocode, loader; fix URL in loader header |
-| P2 | SEDATU financiamientos | 2025 full year | `Financiamientos_2026.csv` ene–jun (9.9 MB) | Parametrise the year-locked loader, add 2026 alongside 2025 |
-| P2 | CNBV crédito vivienda | 2025 full year | `CNBV_2026.csv` ene–jun (3.4 MB) | Same as SEDATU (same `_2025` hardcoding) |
+| ~~P2~~ done 09-28 | SEDATU financiamientos | 2025 full year + 2026 ene–jun (`_2026` views, 146,537 rows; MVs still read 2025) | same | Loaded 2026-09-28 20:4x UTC via `--year=2026`; promote with `--mv-source-year=2026` once the full year is published (`docs/SNIIV-2026-H1.md`) |
+| ~~P2~~ done 09-28 | CNBV crédito vivienda | 2025 full year + 2026 ene–jun (`_2026` views, 45,048 rows; MVs still read 2025) | same | Loaded 2026-09-28 20:4x UTC via `--year=2026`; same promotion path as SEDATU |
 | P2 | Encuesta Intercensal 2025 | not loaded (new) | released 2026-09-22, state + municipio | New loader; 2,478 municipios vs 2,469 keys |
 | ~~P3~~ DONE 09-27 | DENUE | **05/2026 loaded 2026-09-27** (6,138,075; was 11/2025, 6,097,681) | **11/2026 due 2026-11-25** | `ops/denue-refresh.sh` (11 h). Stale cleanup done 2026-09-28 03:55 UTC: 1,146,694 re-keyed/departed CLEE rows removed, count = extraction (see `docs/DENUE-REFRESH.md`) |
 | P3 | Aeropuertos | March-of-year 2006–2026 | AFAC through July 2026 | Semantics decision first (March-only pivot) |
@@ -35,7 +35,7 @@ the OSM finding (section 3) was re-checked directly.
 ## 2. Data-quality findings surfaced by the recon (not fixed)
 
 - ~~`mv_mortalidad_municipal_yearly` contains `ano = 9999`~~ fixed
-  2026-09-28, branch `fix/recon-data-quality` (rebuild: `ops/rebuild-mortalidad-mv.sh`): the
+  2026-09-28 (merged `5573867`; `ops/rebuild-mortalidad-mv.sh` run 20:4x UTC → 0 of 5,697 rows): the
   EDR sentinel for "año no especificado" passes the `^[0-9]{4}$` filter
   (332 raw rows, 55 MV rows; no other out-of-range `anio_ocur`). The
   analytics handlers fence it (`ano <= current year`, BETWEEN 2010 AND
@@ -43,8 +43,8 @@ the OSM finding (section 3) was re-checked directly.
   '9999'` in `scripts/perf-matviews.sql`.
 - The same MV mixes occurrence years from one registration-year file:
   years before 2024 only hold late-registration tails.
-- ~~DENUE edition is not recorded anywhere~~ fixed 2026-09-28, branch
-  `fix/recon-data-quality` (apply = operator): `fecha_alta` is empty on all
+- ~~DENUE edition is not recorded anywhere~~ fixed 2026-09-28 (migration 026
+  applied 20:4x UTC, 20 seed rows): `fecha_alta` is empty on all
   rows (the API does not return it). **Dataset versions:** migration 026
   adds the `dataset_versions` ledger, seeded from section 1;
   `scripts/record-dataset-version.ts` records each new load.
@@ -119,8 +119,9 @@ the OSM finding (section 3) was re-checked directly.
 1. ~~OSM: diagnose + retry from local files (no download).~~ Done 09-28.
 2. SESNSP ene–ago 2026, CLUES 2026-08, COFEPRIS 2026-05: three loader
    re-runs with manual pre-steps; no code change except the COFEPRIS URL.
-3. Parametrise the SEDATU and CNBV loaders by year; load 2026 H1 next to
-   2025 (analytics views need a year dimension or a "latest" convention).
+3. ~~Parametrise the SEDATU and CNBV loaders by year; load 2026 H1 next to
+   2025.~~ Done 09-28: `--year` / `--mv-source-year`, MVs stay on the latest
+   complete year (`docs/SNIIV-2026-H1.md`).
 4. EIC 2025 municipal layer (new loader; decide the 2,478→2,469 key bridge
    together with the MG 2025 question).
 5. DENUE 05/2026 loaded 2026-09-27 and stale rows cleaned 2026-09-28. After 2026-11-25: DENUE 11/2026 re-extract (~11 h of API paging);
