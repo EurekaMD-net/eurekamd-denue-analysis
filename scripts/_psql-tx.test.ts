@@ -76,6 +76,17 @@ describe("copyFromStdinScript (audit #146)", () => {
     expect(out.endsWith("1,2\n\\.\n")).toBe(true);
   });
 
+  it("ends CRLF data with a CRLF \\. marker (a bare \\.\\n fails: unquoted newline found in data)", () => {
+    const out = copyFromStdinScript("", CMD, Buffer.from("a,b\r\n1,2\r\n")).toString(
+      "utf-8",
+    );
+    expect(out.endsWith("1,2\r\n\\.\r\n")).toBe(true);
+    const noTrail = copyFromStdinScript("", CMD, Buffer.from("a,b\r\n1,2")).toString(
+      "utf-8",
+    );
+    expect(noTrail.endsWith("1,2\r\n\\.\r\n")).toBe(true);
+  });
+
   it("keeps the CSV bytes verbatim (no re-encoding)", () => {
     const csv = Buffer.from([0x61, 0x0a, 0xf1, 0x0a]); // Latin-1 ñ stays one byte
     const out = copyFromStdinScript("", CMD, csv);

@@ -425,6 +425,9 @@ ce2024_municipal(cve_mun, cve_ent, sector, subsector, rama, subrama, clase, id_e
 sedatu_financing_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_organismo_code, top_organismo_nombre, pct_vivienda_nueva, pct_mejoramientos, pct_femenino, pct_credito_individual)
 cnbv_panorama_municipal(cve_mun, clave_municipio_num, nom_ent, nom_mun, rezago_social, poblacion_total, poblacion_adulta, sucursales_total, cajeros_total, tpv_total, cuentas_total, creditos_total, tx_tpv_total, remesas_mdd, periodo)
 cnbv_credito_by_municipio(cve_mun, cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_intermediario_code, top_intermediario_nombre, top_intermediario_share, pct_vivienda_nueva, pct_femenino, pct_indigena, pct_economica, pct_popular, pct_tradicional, pct_media, pct_residencial, pct_residencial_plus)
+sedatu_financiamientos_2026(cve_mun, cve_ent, entidad, ano, mes, organismo, modalidad, destino, tipo, sexo, edad_rango, ingresos_rango, vivienda_valor, acciones, monto)
+cnbv_credito_2026(cve_mun, cve_ent, entidad, ano, mes, modalidad, linea_credito, esquema, sexo, edad_rango, ingresos_rango, vivienda_valor, poblacion_indigena, zona, monto, acciones, intermediario_financiero)
+  -- 2026 is PARTIAL (enero–junio, mes 1..6) and row-level, not aggregated: SUM(acciones), SUM(monto) ... GROUP BY cve_mun. The *_by_municipio MVs above hold 2025 only (periodo '2025'); compare years like-for-like with mes <= 6.
 sict_traffic_by_municipio(cve_mun, cve_ent, station_count, tdpa_total, tdpa_max, tdpa_mean, pct_motos, pct_autos, pct_buses, pct_camiones, route_count)
 aeropuertos_by_municipio(cve_mun, cve_ent, num_airports_active_2026, mar_flights_recent_avg, mar_flights_2019_baseline, mar_flights_2026, pct_change_vs_2019)
 clues(clave_clues, institucion, institucion_nombre, entidad, cve_mun, cve_loc, municipio_nombre, localidad_nombre, tipologia, tipo_establecimiento, unidad_nombre, nivel_atencion_nombre, estatus, lat, lon)
@@ -442,6 +445,9 @@ bienestar_estatal_latest(cve_ent, nom_ent_bienestar, beneficiarios, intervencion
 cnbv_panorama_estatal(cve_ent, nom_ent, poblacion_total, poblacion_adulta, sucursales_total, cajeros_total, tpv_total, cuentas_total, creditos_total, tx_tpv_total, remesas_mdd, condusef_reclamaciones, periodo)
 cnbv_credito_estado_grain_2025(cve_ent, entidad, ano, mes, modalidad, linea_credito, sexo, edad_rango, vivienda_valor, poblacion_indigena, zona, monto, acciones, intermediario_financiero)
 sedatu_financiamientos_estado_grain_2025(cve_ent, entidad, ano, mes, organismo, modalidad, destino, tipo, sexo, edad_rango, vivienda_valor, acciones, monto)
+cnbv_credito_estado_grain_2026(cve_ent, entidad, ano, mes, modalidad, linea_credito, sexo, edad_rango, vivienda_valor, poblacion_indigena, zona, monto, acciones, intermediario_financiero)
+sedatu_financiamientos_estado_grain_2026(cve_ent, entidad, ano, mes, organismo, modalidad, destino, tipo, sexo, edad_rango, vivienda_valor, acciones, monto)
+  -- 2026 is PARTIAL (enero–junio, mes 1..6); the *_by_estado MVs below hold 2025 only (periodo '2025'). Compare years like-for-like with mes <= 6.
 sict_traffic_by_estado(cve_ent, station_count, tdpa_total, tdpa_max, tdpa_mean, pct_motos, pct_autos, pct_buses, pct_camiones, route_count)
 cnbv_credito_by_estado(cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_intermediario_code, top_intermediario_nombre, pct_vivienda_nueva, pct_femenino, pct_indigena)
 sedatu_financing_by_estado(cve_ent, periodo, acciones_total, monto_total, monto_per_accion_avg, top_organismo_code, top_organismo_nombre, pct_vivienda_nueva, pct_femenino, pct_credito_individual)

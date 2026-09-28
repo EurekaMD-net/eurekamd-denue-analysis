@@ -10,6 +10,7 @@
 - `stopAutoRefresh()` in auth-js also removes the visibility listener and nothing restarts it on re-login; pair it with `startAutoRefresh()` or don't call it.
 - The shared `supabase-db` is production load for EVERY caller, including a qa-auditor: worst-case / adversarial / heavy probes go to a throwaway (`docker run postgis`, `osgeo` under `prlimit`) or a scaled input, never the live instance; every DB brief carries `SET statement_timeout` + `SET work_mem`, "do not raise either", and "the first timeout IS the finding". `statement_timeout` does not bound memory (09-28 OOM-kill).
 - User-supplied input that reaches an expensive function gets bounds on THAT function's cost drivers (shape, self-intersection, spread — not just size), constants derived from the live worst case (`COUNT(*)` on the densest cell, not an average), a gate on the quantity actually feared (candidate rows), and — for anything that spawns a process or writes to disk on a miss — a queue cap, per-item size refusal and disk budget in the PLAN, not the audit.
+- A DDL change to a materialized view ships with its checked-in rebuild script: REFRESH keeps the stored definition, and DROP/CREATE loses the `denue_api` grant because `postLoadGrants` restores only `denue_sage` (re-run `scripts/api-role.sql` after any MV rebuild).
 
 ## 2026-09-27 — Multi-agent audit + refactor (DENUE_RECON)
 
@@ -75,3 +76,10 @@
 - **Avoid:** a full-table predicate (`WHERE geom IS NULL` over 6.1 M rows) in a 15 s verification line; it times out and proves nothing. Use `pg_stat_user_tables`, the script's own post-step counts, or an indexed predicate.
 - **Better:** for operator-driven long steps, a background `while kill -0 <pid>` watcher plus one long fallback wakeup (20–25 min) gave exact completion timing with zero polling; `PushNotification` reports "not sent" when the terminal is active — that is expected, not a failure.
 - **Better:** live proof after a restart = one request per guard class (200 normal, hot 200, the previously-502 case now 409); a grant is proven with `has_table_privilege`, not by the psql `GRANT` echo.
+
+## 2026-09-28 — Recon data-quality fixes + SNIIV loaders by year (two worktree branches)
+- **Mistake (pre-existing, found here):** the audit #146 inline-COPY change (`8b0acf2`) shipped a `\.`+LF end marker that PG15 rejects after CRLF data, so no SEDATU, CNBV or aeropuertos load could have succeeded since 09-27 → the check: run every loader whose copy path changed against a throwaway copy of the live image WITH its real raw file (`file raw/**/*.csv` first), not a synthetic LF fixture.
+- **Mistake:** the first item-1 hand-back put the MV rebuild recipe only in the agent's report; qa-auditor flagged that `REFRESH` would keep the 9999 rows → operator recipes live in `ops/`, never in chat.
+- **Better:** implementer on a worktree branch → fresh qa-auditor R1 (adversarial, with throwaway `supabase/postgres --network none -m 768m` proofs) → fold warnings in already-touched files → R2 fix-the-fix → commit by explicit path. Two branches, disjoint files on purpose, `git merge-tree --write-tree` proved a clean merge before hand-off.
+- **Better:** a year-parametrised loader needs a pre-flight that reads the CURRENT state (`pg_depend` on the MVs) and fails closed on psql failure; a default that silently re-points aggregates (bare `--force` after a promotion) is the bug class, not the flag.
+- **Avoid:** `git add -A` in a worktree with a symlinked `node_modules`; `.gitignore` does not catch the symlink.

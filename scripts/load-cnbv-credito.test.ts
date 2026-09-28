@@ -14,21 +14,37 @@ const { mockExists, mockMkdtemp, mockReadFile, mockRm, mockWriteFile } =
     mockRm: vi.fn(),
     mockWriteFile: vi.fn(),
   }));
-vi.mock("node:fs", () => ({
-  existsSync: mockExists,
-  mkdtempSync: mockMkdtemp,
-  readFileSync: mockReadFile,
-  rmSync: mockRm,
-  writeFileSync: mockWriteFile,
-}));
+// .sql / .sh reads go to the real files: _psql-tx's postLoadGrants reads
+// sage-role.sql for the denue_sage allowlist. CSV reads stay mocked.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    existsSync: mockExists,
+    mkdtempSync: mockMkdtemp,
+    readFileSync: (p: unknown, ...rest: unknown[]) =>
+      typeof p === "string" && /\.(sql|sh)$/.test(p)
+        ? actual.readFileSync(p, "utf-8")
+        : mockReadFile(p, ...rest),
+    rmSync: mockRm,
+    writeFileSync: mockWriteFile,
+  };
+});
 
 import {
+  checkMvSourcePairing,
+  MV_SOURCE_VIEWS_SQL,
   CREDITO_BY_ESTADO_DDL,
   CREDITO_BY_MUNI_DDL,
   CREDITO_ESTADO_VIEW_DDL,
   CREDITO_VIEW_DDL,
+  defaultCsvPath,
   INTERMEDIARIOS_SEED,
   loadCnbvCredito,
+  parseArgs,
+  postLoadVerifySql,
+  rawDdl,
+  viewsDdlTransaction,
+  yearRelations,
   LOOKUPS_DDL,
   MODALIDADES_SEED,
   NUMERIC_RAW_COLS,
@@ -46,6 +62,8 @@ const SAMPLE_CSV = Buffer.from(
   "utf-8",
 );
 
+const MV_SOURCE_2025 = "cnbv_credito_2025\ncnbv_credito_estado_grain_2025\n";
+
 beforeEach(() => {
   mockExec.mockReset();
   mockExists.mockReset();
@@ -61,6 +79,7 @@ afterEach(() => vi.restoreAllMocks());
 function stubHappyPath(): void {
   mockReadFile.mockReturnValueOnce(SAMPLE_CSV).mockReturnValueOnce(SAMPLE_CSV);
   mockExec
+    .mockReturnValueOnce(MV_SOURCE_2025) // pre-flight: MVs read 2025
     .mockReturnValueOnce("CREATE TABLE\nCREATE INDEX\n") // RAW_DDL
     .mockReturnValueOnce("0\n") // COUNT(*) — empty
     .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy (one tx)
@@ -94,7 +113,9 @@ describe("transcodeLatin1ToUtf8", () => {
 
 describe("loadCnbvCredito (orchestration)", () => {
   it("aborts when raw table is non-empty and --force not supplied", async () => {
+    mockReadFile.mockReturnValueOnce(SAMPLE_CSV); // input check runs first
     mockExec
+      .mockReturnValueOnce(MV_SOURCE_2025) // pre-flight: MVs read 2025
       .mockReturnValueOnce("CREATE TABLE\n")
       .mockReturnValueOnce("94763\n");
 
@@ -105,7 +126,7 @@ describe("loadCnbvCredito (orchestration)", () => {
         container: "supabase-db",
       }),
     ).rejects.toThrow(/has 94763 rows/);
-    expect(mockExec.mock.calls.length).toBe(2);
+    expect(mockExec.mock.calls.length).toBe(3);
   });
 
   it("happy path: applies schema, transcodes, copies, builds views atomically, verifies", async () => {
@@ -115,15 +136,15 @@ describe("loadCnbvCredito (orchestration)", () => {
       force: true,
       container: "supabase-db",
     });
-    expect(mockExec).toHaveBeenCalledTimes(5);
-    expect(mockExec.mock.calls[0]?.[2]).toMatchObject({ input: RAW_DDL });
+    expect(mockExec).toHaveBeenCalledTimes(6);
+    expect(mockExec.mock.calls[1]?.[2]).toMatchObject({ input: RAW_DDL });
     // Call 3: TRUNCATE + \copy FROM STDIN in ONE single-transaction psql
     // session (audit #146), CSV inline after the \copy line.
-    const txArgs = (mockExec.mock.calls[2]?.[1] ?? []) as string[];
+    const txArgs = (mockExec.mock.calls[3]?.[1] ?? []) as string[];
     expect(txArgs).toContain("--single-transaction");
     expect(txArgs).not.toContain("-c");
     const txInput = String(
-      (mockExec.mock.calls[2]?.[2] as { input: Buffer }).input,
+      (mockExec.mock.calls[3]?.[2] as { input: Buffer }).input,
     );
     expect(txInput.startsWith("TRUNCATE TABLE cnbv_credito_raw_2025;\n")).toBe(true);
     expect(txInput).toContain(
@@ -131,10 +152,10 @@ describe("loadCnbvCredito (orchestration)", () => {
     );
     expect(txInput.indexOf("TRUNCATE")).toBeLessThan(txInput.indexOf("\\copy"));
     expect(txInput.endsWith("\n\\.\n")).toBe(true);
-    expect(mockExec.mock.calls[3]?.[2]).toMatchObject({
+    expect(mockExec.mock.calls[4]?.[2]).toMatchObject({
       input: VIEWS_DDL_TRANSACTION,
     });
-    expect(mockExec.mock.calls[4]?.[1]?.join(" ")).toContain(
+    expect(mockExec.mock.calls[5]?.[1]?.join(" ")).toContain(
       POST_LOAD_VERIFY_SQL,
     );
   });
@@ -188,6 +209,7 @@ describe("loadCnbvCredito (orchestration)", () => {
       .mockReturnValueOnce(SAMPLE_CSV)
       .mockReturnValueOnce(SAMPLE_CSV);
     mockExec
+      .mockReturnValueOnce(MV_SOURCE_2025) // pre-flight: MVs read 2025
       .mockReturnValueOnce("CREATE TABLE\n") // RAW_DDL ok
       .mockReturnValueOnce("0\n") // COUNT 0 — proceed
       .mockImplementationOnce(() => {
@@ -203,7 +225,7 @@ describe("loadCnbvCredito (orchestration)", () => {
     ).rejects.toThrow(/extra data/);
     // No psql session ever ran the TRUNCATE outside the \copy transaction,
     // and nothing ran after the failure.
-    expect(mockExec).toHaveBeenCalledTimes(3);
+    expect(mockExec).toHaveBeenCalledTimes(4);
     const lone = mockExec.mock.calls.filter((c) => {
       const input = (c[2] as { input?: unknown } | undefined)?.input;
       return (
@@ -220,6 +242,7 @@ describe("loadCnbvCredito (orchestration)", () => {
       .mockReturnValueOnce(SAMPLE_CSV)
       .mockReturnValueOnce(SAMPLE_CSV);
     mockExec
+      .mockReturnValueOnce(MV_SOURCE_2025) // pre-flight: MVs read 2025
       .mockReturnValueOnce("CREATE TABLE\n")
       .mockReturnValueOnce("0\n")
       .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 1\n") // TRUNCATE + \copy ok
@@ -240,6 +263,7 @@ describe("loadCnbvCredito (orchestration)", () => {
   });
 
   it("rejects unsafe container name (anti docker-flag injection)", async () => {
+    mockReadFile.mockReturnValueOnce(SAMPLE_CSV); // input check runs first
     await expect(
       loadCnbvCredito({
         csv: "raw/cnbv/credito_2025.csv",
@@ -601,5 +625,304 @@ describe("Lookup-table seeds", () => {
       const block = LOOKUPS_DDL.split(`CREATE TABLE ${t}`)[1] ?? "";
       expect(block).toContain("code INTEGER PRIMARY KEY");
     }
+  });
+});
+
+describe("--year / --mv-source-year (2026 H1 beside 2025)", () => {
+  const SAMPLE_CSV_2026 = Buffer.from(
+    "año,mes,cve_ent,entidad,cve_mun,municipio,modalidad,linea_credito,esquema,intermediario_financiero,sexo,edad_rango,ingresos_rango,vivienda_valor,poblacion_indigena,zona,monto,acciones\r\n" +
+      "2026,1,01,Aguascalientes,001,Aguascalientes,1,2,7,040014,1,2,4,6,3,1,4644800.0,1\r\n" +
+      "2026,6,01,Aguascalientes,001,Aguascalientes,1,2,7,040072,1,2,1,5,3,1,1700000.0,1\r\n",
+    "utf-8",
+  );
+
+  it("parseArgs defaults both years to 2025 and the CSV to the 2025 file", () => {
+    const a = parseArgs([]);
+    expect(a.year).toBe("2025");
+    expect(a.mvSourceYear).toBeUndefined(); // default 2025 applied in load, explicit-ness kept
+    expect(a.csv).toBe("raw/cnbv/credito_2025.csv");
+  });
+
+  it("parseArgs --year=2026 derives the default CSV path and keeps the MV source at 2025", () => {
+    expect(parseArgs(["--year=2026"])).toMatchObject({
+      year: "2026",
+      csv: "raw/cnbv/credito_2026.csv",
+      force: false,
+    });
+    expect(defaultCsvPath("2026")).toBe("raw/cnbv/credito_2026.csv");
+    expect(parseArgs(["--year=2026", "--csv=/x/y.csv"]).csv).toBe("/x/y.csv");
+    expect(parseArgs(["--year=2026", "--mv-source-year=2026"]).mvSourceYear).toBe("2026");
+  });
+
+  it("rejects a malformed year before it reaches any identifier", async () => {
+    for (const bad of ["abc", "1999", "20266", "2026;DROP", "2026 ", ""]) {
+      expect(() => parseArgs([`--year=${bad}`])).toThrow(/--year must be a year/);
+      expect(() => parseArgs([`--mv-source-year=${bad}`])).toThrow(
+        /--mv-source-year must be a year/,
+      );
+      expect(() => yearRelations(bad)).toThrow(/--year must be a year/);
+    }
+    await expect(
+      loadCnbvCredito({
+        csv: "raw/cnbv/credito_2026.csv",
+        force: true,
+        container: "supabase-db",
+        mvSourceYear: "abc",
+      }),
+    ).rejects.toThrow(/--mv-source-year must be a year/);
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockReadFile).not.toHaveBeenCalled();
+  });
+
+  it("yearRelations suffixes the raw table, typed view and estado-grain view", () => {
+    expect(yearRelations("2026")).toEqual({
+      raw: "cnbv_credito_raw_2026",
+      view: "cnbv_credito_2026",
+      estadoView: "cnbv_credito_estado_grain_2026",
+    });
+  });
+
+  it("rawDdl gives 2026 its own index names; 2025 keeps the original ones", () => {
+    const ddl = rawDdl("2026");
+    expect(ddl).toContain("CREATE TABLE IF NOT EXISTS cnbv_credito_raw_2026 (");
+    expect(ddl).toContain("idx_cnbv_credito_raw_cve_ent_2026");
+    expect(ddl).toContain("idx_cnbv_credito_raw_intermediario_2026");
+    expect(ddl).not.toContain("_2025");
+    expect(RAW_DDL).toBe(rawDdl("2025"));
+    expect(RAW_DDL).toContain("CREATE INDEX IF NOT EXISTS idx_cnbv_credito_raw_cve_ent\n");
+  });
+
+  it("--year=2026 alone rebuilds only the 2026 views: no MV, no lookup table, nothing 2025", () => {
+    const tx = viewsDdlTransaction("2026", "2025");
+    expect(tx.startsWith("BEGIN;")).toBe(true);
+    expect(tx.endsWith("COMMIT;")).toBe(true);
+    expect(tx).toContain("CREATE VIEW cnbv_credito_2026 AS");
+    expect(tx).toContain("CREATE VIEW cnbv_credito_estado_grain_2026 AS");
+    expect(tx).toContain("FROM cnbv_credito_raw_2026");
+    expect(tx).not.toContain("MATERIALIZED VIEW");
+    expect(tx).not.toContain("cnbv_credito_by_");
+    expect(tx).not.toMatch(/DROP TABLE|CREATE TABLE/);
+    expect(tx).not.toContain("cnbv_intermediarios");
+    expect(tx).not.toContain("_2025");
+    expect(tx).toContain(
+      "REVOKE ALL ON cnbv_credito_raw_2026 FROM anon, authenticated, trustr_app;",
+    );
+    expect(tx).toContain("GRANT SELECT ON cnbv_credito_2026 TO denue_sage;");
+    expect(tx).toContain("GRANT SELECT ON cnbv_credito_estado_grain_2026 TO denue_sage;");
+    expect(tx).not.toContain("GRANT SELECT ON cnbv_credito_raw_2026");
+  });
+
+  it("--mv-source-year=2026 with --year=2026 rebuilds lookups + both MVs from the 2026 views", () => {
+    const tx = viewsDdlTransaction("2026", "2026");
+    expect(tx).toContain("CREATE MATERIALIZED VIEW cnbv_credito_by_municipio AS");
+    expect(tx).toContain("CREATE MATERIALIZED VIEW cnbv_credito_by_estado AS");
+    expect(tx).toContain(LOOKUPS_DDL);
+    expect(tx.match(/FROM cnbv_credito_2026\n/g)).toHaveLength(4);
+    expect(tx.match(/FROM cnbv_credito_estado_grain_2026\n/g)).toHaveLength(4);
+    expect(tx).not.toContain("_2025");
+    expect(tx).toContain("GRANT SELECT ON cnbv_credito_by_estado TO denue_sage;");
+  });
+
+  it("the default (2025/2025) transaction re-grants every relation it recreates", () => {
+    for (const r of [
+      "cnbv_credito_2025",
+      "cnbv_credito_estado_grain_2025",
+      "cnbv_intermediarios",
+      "cnbv_modalidades",
+      "cnbv_vivienda_tiers",
+      "cnbv_credito_by_municipio",
+      "cnbv_credito_by_estado",
+    ]) {
+      expect(VIEWS_DDL_TRANSACTION).toContain(`GRANT SELECT ON ${r} TO denue_sage;`);
+    }
+    expect(VIEWS_DDL_TRANSACTION).toContain(
+      "REVOKE ALL ON cnbv_credito_raw_2025 FROM anon, authenticated, trustr_app;",
+    );
+  });
+
+  it("load --year=2026 runs the 2026 raw + views path, leaves the MVs alone and says so", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockReadFile
+      .mockReturnValueOnce(SAMPLE_CSV_2026)
+      .mockReturnValueOnce(SAMPLE_CSV_2026);
+    mockExec
+      .mockReturnValueOnce(MV_SOURCE_2025) // pre-flight: MVs read 2025
+      .mockReturnValueOnce("CREATE TABLE\n")
+      .mockReturnValueOnce("0\n")
+      .mockReturnValueOnce("TRUNCATE TABLE\nCOPY 2\n")
+      .mockReturnValueOnce("CREATE VIEW\nCOMMIT\n")
+      .mockReturnValueOnce("2|2|1|2026..2026|1..6|2|6.34|2\n");
+    await loadCnbvCredito({
+      csv: "raw/cnbv/credito_2026.csv",
+      force: false,
+      container: "supabase-db",
+      year: "2026",
+    });
+    expect(mockExec).toHaveBeenCalledTimes(6);
+    expect(mockExec.mock.calls[1]?.[2]).toMatchObject({ input: rawDdl("2026") });
+    expect(mockExec.mock.calls[2]?.[1]?.join(" ")).toContain(
+      "SELECT COUNT(*) FROM cnbv_credito_raw_2026;",
+    );
+    const txInput = String((mockExec.mock.calls[3]?.[2] as { input: Buffer }).input);
+    expect(txInput.startsWith("TRUNCATE TABLE cnbv_credito_raw_2026;\n")).toBe(true);
+    expect(txInput).toContain("\\copy cnbv_credito_raw_2026 (");
+    expect(mockExec.mock.calls[4]?.[2]).toMatchObject({
+      input: viewsDdlTransaction("2026", "2025"),
+    });
+    expect(mockExec.mock.calls[5]?.[1]?.join(" ")).toContain(
+      postLoadVerifySql("2026", "2025"),
+    );
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /2 rows, ano=2026, mes 1\.\.6/.test(l))).toBe(true);
+    expect(lines.some((l) => /NOT rebuilt and still read 2025/.test(l))).toBe(true);
+  });
+
+  it("postLoadVerifySql for a non-MV year reads the year's views, never the MVs", () => {
+    const sql = postLoadVerifySql("2026", "2025");
+    expect(sql).toContain("FROM cnbv_credito_raw_2026");
+    expect(sql).toContain("mes_range");
+    expect(sql).not.toContain("cnbv_credito_by_");
+    expect(POST_LOAD_VERIFY_SQL).toBe(postLoadVerifySql("2025", "2025"));
+  });
+
+  it("refuses a CSV whose ano is not --year before touching the DB", async () => {
+    mockReadFile.mockReturnValueOnce(SAMPLE_CSV); // a 2025 row
+    await expect(
+      loadCnbvCredito({
+        csv: "raw/cnbv/credito_2026.csv",
+        force: true,
+        container: "supabase-db",
+        year: "2026",
+      }),
+    ).rejects.toThrow(/1 of 1 rows have ano != 2026/);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("refuses a CSV whose header differs from RAW_HEADER_COLS and reports the diff", async () => {
+    // SEDATU's acciones-before-monto order in a CNBV file.
+    mockReadFile.mockReturnValueOnce(
+      Buffer.from(
+        "año,mes,cve_ent,entidad,cve_mun,municipio,modalidad,linea_credito,esquema,intermediario_financiero,sexo,edad_rango,ingresos_rango,vivienda_valor,poblacion_indigena,zona,acciones,monto\n" +
+          "2026,1,01,Aguascalientes,001,Aguascalientes,1,2,7,040014,1,2,4,6,3,1,1,4644800.0\n",
+        "utf-8",
+      ),
+    );
+    await expect(
+      loadCnbvCredito({
+        csv: "raw/cnbv/credito_2026.csv",
+        force: true,
+        container: "supabase-db",
+        year: "2026",
+      }),
+    ).rejects.toThrow(/first difference at column 17: got "acciones", expected "monto"/);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("W1: rawDdl commits a new year's raw table only together with its REVOKE", () => {
+    const ddl = rawDdl("2027");
+    expect(ddl.startsWith("BEGIN;")).toBe(true);
+    expect(ddl.endsWith("COMMIT;")).toBe(true);
+    const revoke = "REVOKE ALL ON cnbv_credito_raw_2027 FROM anon, authenticated, trustr_app;";
+    expect(ddl).toContain(revoke);
+    expect(ddl.indexOf("CREATE TABLE")).toBeLessThan(ddl.indexOf(revoke));
+    expect(ddl).not.toMatch(/GRANT SELECT ON cnbv_credito_raw_2027 TO denue_sage/);
+  });
+
+  it("W3: rejects the space form and a bare --year / --mv-source-year", () => {
+    expect(() => parseArgs(["--year", "2026"])).toThrow(/--year needs the = form/);
+    expect(() => parseArgs(["--year"])).toThrow(/--year needs the = form/);
+    expect(() => parseArgs(["--mv-source-year"])).toThrow(/--mv-source-year needs the = form/);
+    expect(() => parseArgs(["--mv-source-year", "2026"])).toThrow(/needs the = form/);
+    expect(() => parseArgs(["--yearly=2026"])).toThrow(/needs the = form/);
+  });
+
+  it("W2: MV_SOURCE_VIEWS_SQL resolves the MVs' views from pg_depend, read-only", () => {
+    expect(MV_SOURCE_VIEWS_SQL).toContain("FROM pg_depend");
+    expect(MV_SOURCE_VIEWS_SQL).toContain("'cnbv_credito_by_municipio'");
+    expect(MV_SOURCE_VIEWS_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE)\b/);
+  });
+
+  describe("W2: checkMvSourcePairing (fake pg_depend output)", () => {
+    const MV_2026 = "cnbv_credito_2026\ncnbv_credito_estado_grain_2026\n";
+    it("allows anything on a fresh DB (no MVs yet)", () => {
+      expect(checkMvSourcePairing("", "2026", "2025", false)).toBeNull();
+      expect(checkMvSourcePairing("\n", "2026", "2026", false)).toBeNull();
+    });
+    it("allows the default reload and the 2026 views-only load while MVs read 2025", () => {
+      expect(checkMvSourcePairing(MV_SOURCE_2025, "2025", "2025", false)).toBe("2025");
+      expect(checkMvSourcePairing(MV_SOURCE_2025, "2026", "2025", false)).toBe("2025");
+    });
+    it("refuses a silent MV revert: default --force reload after 2026 was promoted", () => {
+      expect(() => checkMvSourcePairing(MV_2026, "2025", "2025", false)).toThrow(
+        /MVs read 2026.*default --mv-source-year=2025.*--mv-source-year=2026 to keep 2026/,
+      );
+    });
+    it("allows switching the MVs when --mv-source-year is explicit (promote and revert)", () => {
+      expect(checkMvSourcePairing(MV_SOURCE_2025, "2026", "2026", true)).toBe("2025");
+      expect(checkMvSourcePairing(MV_2026, "2025", "2025", true)).toBe("2026");
+    });
+    it("refuses a promotion that relied on the default being the target", () => {
+      expect(() => checkMvSourcePairing(MV_SOURCE_2025, "2026", "2026", false)).toThrow(
+        /MVs read 2025/,
+      );
+    });
+    it("refuses a views-only load of the year the MVs read (its DROP VIEW would fail after the COPY)", () => {
+      expect(() => checkMvSourcePairing(MV_2026, "2026", "2025", false)).toThrow(
+        /MVs read the 2026 views.*would drop views they depend on.*--mv-source-year=2026/,
+      );
+    });
+    it("refuses a views-only load whose --mv-source-year is not what the MVs read", () => {
+      expect(() => checkMvSourcePairing(MV_2026, "2027", "2025", true)).toThrow(
+        /MVs read 2026, not --mv-source-year=2025/,
+      );
+    });
+    it("refuses mixed-year MVs and unknown view names", () => {
+      expect(() =>
+        checkMvSourcePairing("cnbv_credito_2025\ncnbv_credito_estado_grain_2026\n", "2025", "2025", true),
+      ).toThrow(/different years \(2025, 2026\)/);
+      expect(() => checkMvSourcePairing("something_else\n", "2025", "2025", false)).toThrow(
+        /unexpected MV source view "something_else"/,
+      );
+    });
+  });
+
+  it("W2: the load refuses before any write when the pairing is wrong", async () => {
+    mockReadFile.mockReturnValueOnce(SAMPLE_CSV);
+    mockExec.mockReturnValueOnce("cnbv_credito_2026\ncnbv_credito_estado_grain_2026\n");
+    await expect(
+      loadCnbvCredito({
+        csv: "x.csv",
+        force: true,
+        container: "supabase-db",
+      }),
+    ).rejects.toThrow(/MVs read 2026/);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    expect(mockExec.mock.calls[0]?.[1]?.join(" ")).toContain(MV_SOURCE_VIEWS_SQL);
+    expect(mockExec.mock.calls[0]?.[2]?.input).toBeUndefined();
+  });
+
+  it("R2: rejects any argument that is not a known form", () => {
+    for (const bad of ["--mv_source_year=2026", "--Year=2026", "--forced", "--container=x", "2026", "-f"]) {
+      expect(() => parseArgs([bad])).toThrow(new RegExp(`unknown argument "${bad}"`));
+    }
+    expect(() => parseArgs(["--year=2026", "--mv_source_year=2026"])).toThrow(/unknown argument/);
+  });
+
+  it("R2: a failing pre-flight read stops the load before any other exec", async () => {
+    mockReadFile.mockReturnValueOnce(SAMPLE_CSV);
+    mockExec.mockImplementationOnce(() => {
+      throw new Error("psql: connection refused");
+    });
+    await expect(
+      loadCnbvCredito({
+        csv: "x.csv",
+        force: true,
+        container: "supabase-db",
+      }),
+    ).rejects.toThrow(/connection refused/);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    expect(mockExec.mock.calls[0]?.[1]?.join(" ")).toContain(MV_SOURCE_VIEWS_SQL);
+    expect(mockWriteFile).not.toHaveBeenCalled();
+    expect(mockMkdtemp).not.toHaveBeenCalled();
   });
 });
