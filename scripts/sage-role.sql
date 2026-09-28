@@ -157,6 +157,10 @@ BEGIN
   IF to_regclass('public.osm_ageb_aggregates') IS NOT NULL THEN
     GRANT SELECT ON osm_ageb_aggregates TO denue_sage;
   END IF;
+  -- Loaded-edition ledger (migration 026), absent until that migration runs.
+  IF to_regclass('public.dataset_versions') IS NOT NULL THEN
+    GRANT SELECT ON dataset_versions TO denue_sage;
+  END IF;
 END$$;
 
 -- Analytical views (no expensive base joins).

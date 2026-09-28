@@ -451,6 +451,9 @@ mv_national_treemap(entidad, establecimientos, modal_irs_grado, pobreza_pct_prom
 mv_sector_grade_matrix(scian, irs_grado, count)
 mv_coverage(entidad, loaded, first_loaded_at, last_updated_at, with_geom, with_telefono, with_correo_e)
 
+# Loaded editions (one row per dataset + edition; latest = MAX(loaded_at) per dataset)
+dataset_versions(dataset, edition, source, row_count, loaded_at, note)
+
 # Joining
 #   cve_mun = LEFT(cvegeo, 5) for AGEB → muni rollups.
 #   cve_ent = LEFT(cve_mun, 2).

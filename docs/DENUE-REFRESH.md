@@ -232,6 +232,17 @@ zcat data/state/denue-stale-2026-09.rows.csv.gz \
 Then move the ledger away, because its guard would refuse with a negative shortfall:
 `mv data/state/denue-stale-2026-09.cleanup.json{,.rolled-back-$(date +%s)}`. Finally, run `bash scripts/refresh-matviews.sh`.
 
+## Record the edition
+
+After the load and the stale cleanup, record the edition and the final row count in
+`dataset_versions` (migration 026). Without `--apply` the CLI only prints the SQL.
+
+```bash
+cd /root/claude/projects/data-intelligence/denue-data-analysis
+npx tsx scripts/record-dataset-version.ts --dataset=denue --edition=<MM/YYYY> \
+  --source="INEGI DENUE API" --rows=<count(*) after cleanup> --apply
+```
+
 ## Known limitations
 
 - **Stale detection uses the raw files, not `updated_at`.** `trg_estab_updated_at` (migration
@@ -245,8 +256,9 @@ Then move the ledger away, because its guard would refuse with a negative shortf
   made with `ops/denue-stale-cleanup.sh` (see [Stale-row cleanup](#stale-row-cleanup)).
 - **Moved establishments keep their old `ageb`.** The geometry step corrects `geom`, but
   `backfill-ageb` fills only NULL values.
-- **The edition exists only in the baseline json** (`"edition": "05/2026"`). The API returns an
-  empty `fecha_alta`, so no row records which edition it came from.
+- **No row records its edition.** The API returns an empty `fecha_alta`. The loaded edition is
+  in the baseline json (`"edition": "05/2026"`) and in `dataset_versions` once it is recorded
+  (see [Record the edition](#record-the-edition)).
 - **Every upserted row is rewritten.** `ON CONFLICT DO UPDATE` always writes a new tuple
   version, whether or not the record changed. The trigger's `WHEN` clause controls only
   `updated_at`. So all 6.1M rows get a new version, and all 12 indexes (including the trigram GIN)

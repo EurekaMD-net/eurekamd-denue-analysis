@@ -3,8 +3,8 @@
  * join against the `ageb_polygons` table.
  *
  * Prereq: `ageb_polygons` table must exist (loaded once via ogr2ogr from
- * INEGI Marco Geoestadístico 2020 — see docs/loading-marco-geoestadistico.md
- * if added). Relevant columns: `cvegeo` (13-char national-unique key,
+ * INEGI Marco Geoestadístico 2020; no loader script, the recipe below is
+ * the only record). Relevant columns: `cvegeo` (13-char national-unique key,
  * ENT(2)+MUN(3)+LOC(4)+AGEB(4)) + `geom` (Polygon, SRID 4326, GIST-indexed).
  *
  * Polygon (re)load recipe (ageb/mun/ent/loc_polygons):

@@ -220,6 +220,7 @@ WHERE ent_resid IN ('01','02','03','04','05','06','07','08','09','10',
   AND mun_resid IS NOT NULL AND mun_resid != '999'
   AND NULLIF(anio_ocur, '') IS NOT NULL
   AND anio_ocur ~ '^[0-9]{4}$'
+  AND anio_ocur <> '9999'  -- EDR sentinel "año no especificado" (recon 2026-09-27)
 GROUP BY ent_resid || mun_resid, NULLIF(anio_ocur, '')::int;
 -- Sage SQL reads this MV; DROP above loses the ACL, so re-grant it.
 GRANT SELECT ON mv_mortalidad_municipal_yearly TO denue_sage;

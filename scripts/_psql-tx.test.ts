@@ -216,6 +216,8 @@ describe("perfMatviewSql", () => {
     const sql = perfMatviewSql("mv_mortalidad_municipal_yearly");
     expect(sql).toMatch(/CREATE MATERIALIZED VIEW mv_mortalidad_municipal_yearly/);
     expect(sql).toMatch(/idx_mv_mmy_unique/);
+    // EDR sentinel 9999 = "año no especificado" (recon 2026-09-27).
+    expect(sql).toContain("AND anio_ocur <> '9999'");
   });
 
   it("throws for an MV the file does not define", () => {

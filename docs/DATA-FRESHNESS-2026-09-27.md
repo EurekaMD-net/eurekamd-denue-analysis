@@ -34,20 +34,27 @@ the OSM finding (section 3) was re-checked directly.
 
 ## 2. Data-quality findings surfaced by the recon (not fixed)
 
-- `mv_mortalidad_municipal_yearly` contains `ano = 9999`: the EDR sentinel
-  for "año no especificado" passes the `^[0-9]{4}$` filter (332 raw rows,
-  55 MV rows). The analytics handlers fence it (`ano <= current year`,
-  BETWEEN 2010 AND 2039), but Sage SQL over the MV can pick it up.
-  Fix: `AND anio_ocur <> '9999'` in `scripts/perf-matviews.sql`.
+- ~~`mv_mortalidad_municipal_yearly` contains `ano = 9999`~~ fixed
+  2026-09-28, branch `fix/recon-data-quality` (rebuild: `ops/rebuild-mortalidad-mv.sh`): the
+  EDR sentinel for "año no especificado" passes the `^[0-9]{4}$` filter
+  (332 raw rows, 55 MV rows; no other out-of-range `anio_ocur`). The
+  analytics handlers fence it (`ano <= current year`, BETWEEN 2010 AND
+  2039), but Sage SQL over the MV can pick it up. Fix: `AND anio_ocur <>
+  '9999'` in `scripts/perf-matviews.sql`.
 - The same MV mixes occurrence years from one registration-year file:
   years before 2024 only hold late-registration tails.
-- DENUE edition is not recorded anywhere: `fecha_alta` is empty on all rows
-  (the API does not return it). Vintage can only be inferred from
-  `created_at`. Consider a `dataset_versions` ledger table.
-- `docs/v0.2-status.md:99` says CLUES is the "ENERO 2026" cut; the data
-  carries movements to 2026-04-21.
-- `scripts/backfill-ageb.ts` points to `docs/loading-marco-geoestadistico.md`,
-  which does not exist; the polygons have no loader script.
+- ~~DENUE edition is not recorded anywhere~~ fixed 2026-09-28, branch
+  `fix/recon-data-quality` (apply = operator): `fecha_alta` is empty on all
+  rows (the API does not return it). **Dataset versions:** migration 026
+  adds the `dataset_versions` ledger, seeded from section 1;
+  `scripts/record-dataset-version.ts` records each new load.
+- ~~`docs/v0.2-status.md:99` says CLUES is the "ENERO 2026" cut~~ fixed
+  2026-09-28, branch `fix/recon-data-quality`: the data carries movements
+  to 2026-04-21 (2026-04 cut).
+- ~~`scripts/backfill-ageb.ts` points to `docs/loading-marco-geoestadistico.md`~~
+  fixed 2026-09-28, branch `fix/recon-data-quality`: that doc does not
+  exist; the header now names its own recipe as the only load record (the
+  polygons still have no loader script).
 - Link rot: coneval.org.mx GRS zip serves HTML; gob.mx attachments and
   SICT repodatos refuse curl; INEGI open-data URLs return a 2,263-byte
   decoy with HTTP 200 for missing files (check Content-Length, not status).
