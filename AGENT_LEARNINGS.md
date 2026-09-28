@@ -92,3 +92,7 @@
 - **Avoid:** trusting a source's format to be stable across editions — a new publisher channel (SharePoint) means a new export path; verify bytes against every assumption the loader hardcodes (encoding, sentinels, header, line endings).
 - **Better:** derive data cutoffs from the canonical file name the loader already enforces, assert the assumption in SQL inside the load transaction (DO block, rollback on violation), and pin SQL predicates with tests that evaluate them — substring tests left `IF n = 0` → `IF false` alive (auditor mutation check).
 - **Better:** anonymous SharePoint share links redirect to a Microsoft login; do not retry with UAs — record the link in the doc and hand it to the operator.
+
+## 2026-09-28 — CLUES 2026-08 load
+- **Mistake:** the freshness doc (and my own handoff) labelled CLUES "operator browser download first"; a plain `curl` against the gobi.salud.gob.mx xlsx returned 200 in seconds → always try the fetch from the session before handing a download to the operator; only a login redirect or a challenge wall makes it operator-only.
+- **Avoid:** an ingest whose conversion step lives only in a doc snippet ("see status doc for the openpyxl script") — it was never checked in, so the refresh had no runnable recipe. Every ingest step is a script in `scripts/` or `ops/` that pins its contract (here: the 68-column header).

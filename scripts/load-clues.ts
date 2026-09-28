@@ -12,7 +12,7 @@
  * The XLSX has three sheets: CLUES_YYYYMM (canonical), SUBCLUES_YYYYMM,
  * HORARIOS_YYYYMM. Only the first sheet is loaded here. The 68 columns are
  * normalized to snake_case ASCII headers in the CSV pre-pass (see
- * docs/v0.2-status.md for the openpyxl conversion script).
+ * scripts/clues-xlsx-to-csv.py, which pins the 68-column contract).
  *
  * Behavior (ONE psql transaction, audit #145 — a failure leaves the DB
  * untouched and readers see the old data until COMMIT):
