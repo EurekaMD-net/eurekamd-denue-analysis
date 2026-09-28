@@ -14,14 +14,22 @@
  *
  * Inputs: 4 ZIPs in raw/sesnsp/ (canonical names — match the CSV name inside
  * each ZIP):
- *   - RNID-Delitos_Estatal-YYYY-mes.zip
- *   - RNID-Delitos_Municipal-YYYY-mes.zip
- *   - RNID-Victimas_Estatal-YYYY-mes.zip
- *   - RNID-Victimas_Municipal-YYYY-mes.zip
+ *   - RNID-Delitos_Estatal-YYYY-<mes>YYYY.zip
+ *   - RNID-Delitos_Municipal-YYYY-<mes>YYYY.zip
+ *   - RNID-Victimas_Estatal-YYYY-<mes>YYYY.zip
+ *   - RNID-Victimas_Municipal-YYYY-<mes>YYYY.zip
+ *   (<mes> ∈ ene feb mar abr may jun jul ago sep oct nov dic, lowercase)
  *
- * Each CSV is WINDOWS-1252 with Spanish accents in headers AND values
- * (`Año`, `Bien jurídico afectado`, etc.). Loader iconv's to UTF-8 + rewrites
- * the header to snake_case ASCII identifiers before \copy.
+ * The encoding is detected per input: files up to mar2026 and the
+ * historical CSV are WINDOWS-1252, the SharePoint-era ago2026 file is UTF-8
+ * with BOM. Spanish accents appear in headers AND values (`Año`, `Bien
+ * jurídico afectado`, etc.). Loader iconv's WINDOWS-1252 inputs to UTF-8 +
+ * rewrites the header to snake_case ASCII identifiers before \copy.
+ *
+ * Month cutoff: the ZIP name's `<mes>YYYY` is the last published month.
+ * Later months may ship as `0` (ago2026) instead of empty (mar2026); the
+ * reload asserts they carry no data and blanks them so the long MV never
+ * gets fake zero-crime months.
  *
  * Schema (all 4 raw tables share the same wide-month layout; only the keys
  * differ — Estatal lacks cve_municipio/municipio):
@@ -44,8 +52,9 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
+  assertIdent,
   assertRelationsExist,
   perfMatviewSql,
   postLoadGrants,
@@ -59,6 +68,15 @@ function getArg(name: string): string | undefined {
   const prefix = `--${name}=`;
   const arg = process.argv.find((a) => a.startsWith(prefix));
   return arg?.slice(prefix.length);
+}
+
+/** Reject anything but `--rnid-dir=<dir>` (incl. the `--rnid-dir <dir>` space form). */
+export function assertCliArgs(args: readonly string[]): void {
+  for (const a of args) {
+    if (!a.startsWith("--rnid-dir=")) {
+      throw new Error(`unknown argument "${a}"; expected --rnid-dir=<dir>`);
+    }
+  }
 }
 
 function assertSafePath(label: string, p: string): void {
@@ -216,6 +234,102 @@ CREATE INDEX idx_${v.longView}_subtipo ON ${v.longView} (subtipo_delito);
 `;
 }
 
+const MONTHS = [
+  "enero",
+  "febrero",
+  "marzo",
+  "abril",
+  "mayo",
+  "junio",
+  "julio",
+  "agosto",
+  "septiembre",
+  "octubre",
+  "noviembre",
+  "diciembre",
+] as const;
+
+const ZIP_NAME_RE =
+  /^[A-Za-z0-9_-]+-(\d{4})-(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)\1\.zip$/;
+
+/**
+ * Last published month from a canonical `RNID-<Metric>_<Level>-YYYY-<mes>YYYY.zip`
+ * name, or null for a non-ZIP input (the historical CSV). Throws for a ZIP
+ * that doesn't match: a misnamed file must not load without its cutoff.
+ */
+export function throughFromZipName(
+  name: string,
+): { ano: number; mes: number } | null {
+  if (!name.endsWith(".zip")) return null;
+  const m = ZIP_NAME_RE.exec(name);
+  if (!m) {
+    throw new Error(
+      `loadSesnsp: ${name} does not match RNID-<Metric>_<Level>-YYYY-<mes>YYYY.zip; rename it so the month cutoff is known.`,
+    );
+  }
+  const abbrs = MONTHS.map((mo) => mo.slice(0, 3));
+  return { ano: Number(m[1]), mes: abbrs.indexOf(m[2] as string) + 1 };
+}
+
+export interface ZipCutoff {
+  label: string;
+  ano: number;
+  mes: number;
+}
+
+/**
+ * True for a month cell that carries data: anything but NULL (an empty CSV
+ * cell under COPY), '' or '0'.
+ */
+export function monthHasDataSql(col: string): string {
+  return `COALESCE(${col}, '') NOT IN ('', '0')`;
+}
+
+/**
+ * SQL that enforces a ZIP's month cutoff on `table` (rows of year `ano`):
+ * the assert fails the transaction when the year is absent or any month
+ * after `mes` carries data (monthHasDataSql); the update blanks those
+ * months (NULL, same as an empty CSV cell under COPY) so the long MV skips
+ * them, touching only rows that still hold a non-NULL value. For `mes` 12
+ * only the year-present check remains and `updateSql` is null.
+ */
+export function cutoffSql(
+  table: string,
+  label: string,
+  ano: number,
+  mes: number,
+): { assertSql: string; updateSql: string | null } {
+  assertIdent(table);
+  if (!/^[A-Za-z0-9_.-]+$/.test(label)) {
+    throw new Error(`loadSesnsp: unsafe cutoff label "${label}"`);
+  }
+  const after = MONTHS.slice(mes);
+  const through = `${ano}-${String(mes).padStart(2, "0")}`;
+  const afterCheck =
+    after.length === 0
+      ? ""
+      : `
+  SELECT count(*) INTO n FROM ${table} WHERE ano = '${ano}' AND (
+    ${after.map(monthHasDataSql).join("\n    OR ")}
+  );
+  IF n > 0 THEN
+    RAISE EXCEPTION 'loadSesnsp: ${label} carries data after ${through} (% rows); rename the file or check the source', n;
+  END IF;`;
+  const assertSql = `DO $$
+DECLARE n bigint;
+BEGIN
+  SELECT count(*) INTO n FROM ${table} WHERE ano = '${ano}';
+  IF n = 0 THEN
+    RAISE EXCEPTION 'loadSesnsp: ${label} has no rows with ano = ${ano}; wrong file?';
+  END IF;${afterCheck}
+END $$;`;
+  const updateSql =
+    after.length === 0
+      ? null
+      : `UPDATE ${table} SET ${after.map((c) => `${c} = NULL`).join(", ")} WHERE ano = '${ano}' AND (${after.map((c) => `${c} IS NOT NULL`).join(" OR ")});`;
+  return { assertSql, updateSql };
+}
+
 /**
  * Only Municipal Delitos is currently used by the analyzer. The Estatal
  * variant is redundant (we can re-aggregate from municipal at query time);
@@ -246,13 +360,15 @@ export const LONG_VIEW_DEPENDENTS: Readonly<Record<string, readonly string[]>> =
 
 /**
  * The single-transaction reload script for one variant: \copy every staged
- * input into `<raw>_staging`, drop the long MV + its dependents explicitly
+ * input into `<raw>_staging`, enforce each ZIP's month cutoff on staging,
+ * drop the long MV + its dependents explicitly
  * (an unknown dependent makes DROP TABLE fail → whole load rolls back),
  * swap staging in, rebuild long MV + dependents, re-apply grants.
  */
 export function buildVariantReloadSql(
   v: RnidVariant,
   containerPaths: readonly string[],
+  cutoffs: readonly ZipCutoff[] = [],
 ): string {
   const staging = `${v.rawTable}_staging`;
   const dependents = LONG_VIEW_DEPENDENTS[v.longView] ?? [];
@@ -261,6 +377,10 @@ export function buildVariantReloadSql(
     ...containerPaths.map(
       (p) => `\\copy ${staging} FROM '${p}' WITH (FORMAT csv, HEADER true)`,
     ),
+    ...cutoffs.flatMap((c) => {
+      const sql = cutoffSql(staging, c.label, c.ano, c.mes);
+      return sql.updateSql ? [sql.assertSql, sql.updateSql] : [sql.assertSql];
+    }),
     ...dependents.map((d) => `DROP MATERIALIZED VIEW IF EXISTS ${d};`),
     `DROP MATERIALIZED VIEW IF EXISTS ${v.longView};`,
     `DROP TABLE IF EXISTS ${v.rawTable};`,
@@ -319,7 +439,55 @@ export type RnidInput =
   | { kind: "csv"; csvPath: string };
 
 /**
- * Extract a CSV from a ZIP, iconv WINDOWS-1252 → UTF-8, rewrite header to
+ * UTF-8 or WINDOWS-1252 for one input: the first 4 MB (minus its last,
+ * possibly cut, line — a split multi-byte char would fail iconv) must pass
+ * `iconv -f UTF-8`. The source runs as `{ … || true; }` so the SIGPIPE it
+ * gets when `head -c` stops reading can't fail the pipefail pipeline; that
+ * also hides a missing/corrupt input, so an empty sample (which iconv would
+ * accept as UTF-8) throws instead. The sample is written to `sampleDir`.
+ */
+export function detectEncoding(
+  sourceCmd: string,
+  sourceEnv: NodeJS.ProcessEnv,
+  label: string,
+  sampleDir: string,
+): "utf-8" | "windows-1252" {
+  const out = execFileSync(
+    "/bin/bash",
+    [
+      "-o",
+      "pipefail",
+      "-c",
+      `set -e
+{ ${sourceCmd} 2>/dev/null || true; } | head -c 4194304 | head -n -1 > "$SAMPLE"
+if [ ! -s "$SAMPLE" ]; then v=empty; elif iconv -f UTF-8 -t UTF-8 < "$SAMPLE" >/dev/null 2>&1; then v=utf-8; else v=windows-1252; fi
+rm -f "$SAMPLE"
+echo "$v"`,
+    ],
+    {
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        ...sourceEnv,
+        SAMPLE: join(sampleDir, "encoding-probe.sample"),
+      },
+      timeout: 60_000,
+    },
+  ).trim();
+  if (out === "empty") {
+    throw new Error(
+      `loadSesnsp: ${label}: empty or unreadable sample (missing/corrupt input?)`,
+    );
+  }
+  if (out !== "utf-8" && out !== "windows-1252") {
+    throw new Error(`loadSesnsp: unexpected encoding probe output "${out}"`);
+  }
+  return out;
+}
+
+/**
+ * Extract a CSV from a ZIP, iconv WINDOWS-1252 → UTF-8 (UTF-8 inputs pass
+ * through), rewrite header to
  * snake_case ASCII identifiers, and write the result to a temp file. Returns
  * the temp path. Caller is responsible for deletion.
  *
@@ -329,7 +497,7 @@ export type RnidInput =
  * is read in a separate small `head -1` invocation so we still get the
  * snake_case rewrite.
  */
-function preparePreparedCsv(input: RnidInput, outDir: string): string {
+export function preparePreparedCsv(input: RnidInput, outDir: string): string {
   const sourceLabel =
     input.kind === "zip"
       ? `${input.zipPath}!${input.csvInside}`
@@ -346,11 +514,16 @@ function preparePreparedCsv(input: RnidInput, outDir: string): string {
       ? { ZIP: input.zipPath, INNER: input.csvInside }
       : { CSV: input.csvPath };
 
+  const encoding = detectEncoding(sourceCmd, sourceEnv, sourceLabel, outDir);
+  console.log(`[load-sesnsp] ${sourceLabel}: encoding=${encoding}`);
+  const decode =
+    encoding === "utf-8" ? "" : " | iconv -f WINDOWS-1252 -t UTF-8";
+
   // Step 1: read just the first line. iconv ensures any accented header
   // characters land in the same encoding the body will be in.
   const headerOut = execFileSync(
     "/bin/sh",
-    ["-c", `${sourceCmd} | iconv -f WINDOWS-1252 -t UTF-8 | head -1`],
+    ["-c", `${sourceCmd}${decode} | head -1`],
     {
       encoding: "utf-8",
       env: { ...process.env, ...sourceEnv },
@@ -361,6 +534,8 @@ function preparePreparedCsv(input: RnidInput, outDir: string): string {
   if (headerLine.length === 0) {
     throw new Error(`loadSesnsp: ${sourceLabel} has empty header`);
   }
+  // Load-bearing guard against a wrong encoding verdict: a mis-decoded `Año`
+  // (e.g. `AÃ±o`) is not in HEADER_MAP, so normalizeHeader throws.
   const headers = headerLine.split(",").map((h) => normalizeHeader(h));
   const rewrittenHeader = headers.join(",");
 
@@ -386,7 +561,7 @@ function preparePreparedCsv(input: RnidInput, outDir: string): string {
       "-o",
       "pipefail",
       "-c",
-      `{ printf '%s\\n' "$HEADER"; ${sourceCmd} | iconv -f WINDOWS-1252 -t UTF-8 | tail -n +2 | tr -d '\\r'; } > "$OUT"`,
+      `{ printf '%s\\n' "$HEADER"; ${sourceCmd}${decode} | tail -n +2 | tr -d '\\r'; } > "$OUT"`,
     ],
     {
       stdio: ["ignore", "ignore", "pipe"],
@@ -448,6 +623,18 @@ export async function loadSesnsp(
           `loadSesnsp: no input file in ${config.rnidDir} matches "${variant.basename}".`,
         );
       }
+      // Month cutoffs up front, so a misnamed ZIP fails before any prep.
+      const cutoffs = inputs.flatMap<ZipCutoff>((input) => {
+        if (input.kind !== "zip") return [];
+        const label = basename(input.zipPath);
+        const through = throughFromZipName(label);
+        return through ? [{ label, ...through }] : [];
+      });
+      for (const c of cutoffs) {
+        console.log(
+          `[load-sesnsp] ${c.label}: through=${c.ano}-${String(c.mes).padStart(2, "0")}, later months must be empty/0 and are blanked`,
+        );
+      }
 
       // Step 1: prepare + stage every input inside the container.
       const containerPaths: string[] = [];
@@ -461,11 +648,14 @@ export async function loadSesnsp(
 
         // Step 2: ONE transaction — \copy into staging, swap, rebuild the
         // long-format MV and the analytics MVs that read it.
-        runPsqlScript(
+        const psqlOut = runPsqlScript(
           config.dbContainer,
-          buildVariantReloadSql(variant, containerPaths),
+          buildVariantReloadSql(variant, containerPaths, cutoffs),
           (inputs.length + 1) * 30 * 60_000,
         );
+        for (const line of psqlOut.match(/^UPDATE \d+$/gm) ?? []) {
+          console.log(`[load-sesnsp] ${variant.basename} cutoff: ${line}`);
+        }
       } finally {
         for (const containerPath of containerPaths) {
           try {
@@ -540,8 +730,8 @@ export function listFirstCsvInZip(zipPath: string): string {
  * for the historical-plus-current case (RNID-Delitos_Municipal-2026-mar2026.zip
  * + RNID-Delitos_Municipal-Historical-2015-2025.csv → loader unions them
  * into one raw table). Inputs are sorted alphabetically so the load order
- * is deterministic and the historical file lands before the current one
- * (lexically "Historical" < "20XX-mar20XX").
+ * is deterministic; the historical file lands after the current one
+ * (lexically "20XX-mar20XX" < "Historical", '2' < 'H').
  *
  * Inner-CSV name for ZIPs is resolved via `listFirstCsvInZip` to handle the
  * Víctimas zips' accented inner filename (`RNID-Víctimas_…csv` inside a zip
@@ -588,6 +778,12 @@ const isMain =
   import.meta.url === `file://${process.argv[1] ?? ""}`.replace(/\\/g, "/");
 
 if (isMain) {
+  try {
+    assertCliArgs(process.argv.slice(2));
+  } catch (err: unknown) {
+    console.error(`[load-sesnsp] ✗ ${(err as Error).message}`);
+    process.exit(1);
+  }
   const rnidDir = getArg("rnid-dir") ?? "raw/sesnsp";
   const dbContainer = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
   console.log(

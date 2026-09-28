@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const { mockExec } = vi.hoisted(() => ({ mockExec: vi.fn() }));
 vi.mock("node:child_process", () => ({
@@ -14,6 +17,12 @@ import {
   findVariantInputs,
   buildVariantReloadSql,
   loadSesnsp,
+  throughFromZipName,
+  cutoffSql,
+  monthHasDataSql,
+  detectEncoding,
+  preparePreparedCsv,
+  assertCliArgs,
 } from "./load-sesnsp.js";
 
 beforeEach(() => mockExec.mockReset());
@@ -260,6 +269,186 @@ describe("buildVariantReloadSql (audit #144)", () => {
   });
 });
 
+describe("throughFromZipName", () => {
+  it("parses the last published month from a canonical ZIP name", () => {
+    expect(throughFromZipName("RNID-Delitos_Municipal-2026-ago2026.zip")).toEqual({ ano: 2026, mes: 8 });
+    expect(throughFromZipName("RNID-Delitos_Municipal-2026-mar2026.zip")).toEqual({ ano: 2026, mes: 3 });
+  });
+
+  it("throws for a ZIP whose name does not carry a lowercase <mes>YYYY matching the year", () => {
+    for (const name of [
+      "RNID-Delitos_Municipal-2026-Ago2026.zip",
+      "RNID-Delitos_Municipal-2026-ago2025.zip",
+      "RNID-Delitos_Municipal-2026.zip",
+    ]) {
+      expect(() => throughFromZipName(name)).toThrow(/does not match/);
+    }
+  });
+
+  it("returns null for the historical CSV input", () => {
+    expect(throughFromZipName("RNID-Delitos_Municipal-Historical-2015-2025.csv")).toBeNull();
+  });
+});
+
+describe("cutoffSql", () => {
+  const ALL = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  const setCols = (u: string): string[] =>
+    [...u.matchAll(/(\w+) = NULL/g)].map((m) => m[1] as string);
+  const assertCols = (a: string): string[] =>
+    ALL.filter((c) => new RegExp(`\\b${c}\\b`).test(a));
+
+  it("mes=8 blanks and asserts exactly septiembre..diciembre for that year", () => {
+    const sql = cutoffSql("t_staging", "RNID-Delitos_Municipal-2026-ago2026.zip", 2026, 8);
+    const after = ["septiembre", "octubre", "noviembre", "diciembre"];
+    expect(setCols(sql.updateSql!)).toEqual(after);
+    // Only rows that still hold a value: a mar2026-style file → UPDATE 0.
+    expect(sql.updateSql).toBe(
+      "UPDATE t_staging SET septiembre = NULL, octubre = NULL, noviembre = NULL, diciembre = NULL WHERE ano = '2026' AND (septiembre IS NOT NULL OR octubre IS NOT NULL OR noviembre IS NOT NULL OR diciembre IS NOT NULL);",
+    );
+    expect(assertCols(sql.assertSql)).toEqual(after);
+    expect(sql.assertSql).toContain("carries data after 2026-08 (% rows)");
+    expect(sql.assertSql).toContain("has no rows with ano = 2026");
+    expect(sql.assertSql).toMatch(/^DO \$\$[\s\S]*END \$\$;$/);
+  });
+
+  it("pins the assert semantics: year-present check and the ''/'0' allow-list per later month", () => {
+    const sql = cutoffSql("t_staging", "x-2026-ago2026.zip", 2026, 8).assertSql;
+    expect(sql).toMatch(/SELECT count\(\*\) INTO n FROM t_staging WHERE ano = '2026';\n  IF n = 0 THEN\n    RAISE EXCEPTION/);
+    expect(sql).toMatch(/IF n > 0 THEN\n    RAISE EXCEPTION 'loadSesnsp: x-2026-ago2026.zip carries data/);
+    for (const c of ["septiembre", "octubre", "noviembre", "diciembre"]) {
+      expect(sql).toContain(monthHasDataSql(c));
+    }
+    expect(monthHasDataSql("septiembre")).toBe("COALESCE(septiembre, '') NOT IN ('', '0')");
+  });
+
+  it("monthHasDataSql flags '5' but not NULL, '' or '0' (predicate evaluated from its string)", () => {
+    for (const c of ALL) {
+      const m = /^COALESCE\((\w+), '(.*?)'\) NOT IN \(((?:'[^']*'(?:, )?)+)\)$/.exec(monthHasDataSql(c));
+      expect(m?.[1]).toBe(c);
+      const nullAs = m![2]!;
+      const allowed = [...m![3]!.matchAll(/'([^']*)'/g)].map((x) => x[1]);
+      const hasData = (v: string | null): boolean => !allowed.includes(v ?? nullAs);
+      expect([null, "", "0", "5"].map(hasData)).toEqual([false, false, false, true]);
+    }
+  });
+
+  it("mes=3 covers abril..diciembre (9 columns)", () => {
+    const sql = cutoffSql("t_staging", "x-2026-mar2026.zip", 2026, 3);
+    expect(setCols(sql.updateSql!)).toEqual(ALL.slice(3));
+    expect(assertCols(sql.assertSql)).toEqual(ALL.slice(3));
+  });
+
+  it("mes=12 keeps only the year-present check, no UPDATE", () => {
+    const sql = cutoffSql("t_staging", "x-2026-dic2026.zip", 2026, 12);
+    expect(sql.updateSql).toBeNull();
+    expect(sql.assertSql).toMatch(/IF n = 0 THEN\n    RAISE EXCEPTION 'loadSesnsp: x-2026-dic2026.zip has no rows with ano = 2026/);
+    expect(sql.assertSql).not.toContain("carries data after");
+    expect(assertCols(sql.assertSql)).toEqual([]);
+    expect(sql.assertSql).toMatch(/^DO \$\$[\s\S]*END \$\$;$/);
+  });
+
+  it("refuses a label that could break out of the SQL literal", () => {
+    expect(() => cutoffSql("t_staging", "x'; DROP TABLE y;--.zip", 2026, 8)).toThrow(/unsafe cutoff label/);
+  });
+});
+
+describe("buildVariantReloadSql with a ZIP cutoff", () => {
+  const variant = RNID_VARIANTS[0]!;
+  const sql = buildVariantReloadSql(variant, ["/tmp/a_0.csv", "/tmp/a_1.csv"], [
+    { label: "RNID-Delitos_Municipal-2026-ago2026.zip", ano: 2026, mes: 8 },
+  ]);
+
+  it("asserts then blanks on STAGING after every \\copy and before anything live is dropped", () => {
+    const lastCopy = sql.indexOf("\\copy sesnsp_delitos_municipal_raw_staging FROM '/tmp/a_1.csv'");
+    const assertAt = sql.indexOf("carries data after 2026-08");
+    const updateAt = sql.indexOf("UPDATE sesnsp_delitos_municipal_raw_staging SET septiembre = NULL");
+    const firstDrop = sql.indexOf("DROP MATERIALIZED VIEW IF EXISTS mv_delitos_municipal_yearly;");
+    expect(lastCopy).toBeGreaterThan(-1);
+    expect(lastCopy).toBeLessThan(assertAt);
+    expect(assertAt).toBeLessThan(updateAt);
+    expect(updateAt).toBeLessThan(firstDrop);
+  });
+
+  it("emits the year-present check but no UPDATE for a dic ZIP", () => {
+    const dic = buildVariantReloadSql(variant, ["/tmp/a_0.csv"], [
+      { label: "RNID-Delitos_Municipal-2026-dic2026.zip", ano: 2026, mes: 12 },
+    ]);
+    expect(dic).toContain("has no rows with ano = 2026");
+    expect(dic).not.toContain("UPDATE ");
+  });
+
+  it("emits no cutoff SQL without cutoffs", () => {
+    expect(buildVariantReloadSql(variant, ["/tmp/a_0.csv"])).not.toContain("UPDATE ");
+  });
+});
+
+describe("assertCliArgs", () => {
+  it("accepts --rnid-dir=<dir> and nothing", () => {
+    expect(() => assertCliArgs([])).not.toThrow();
+    expect(() => assertCliArgs(["--rnid-dir=raw/x"])).not.toThrow();
+  });
+
+  it("rejects the space form and unknown flags", () => {
+    expect(() => assertCliArgs(["--rnid-dir", "raw/x"])).toThrow(/unknown argument "--rnid-dir"/);
+    expect(() => assertCliArgs(["--rnid_dir=raw/x"])).toThrow(/unknown argument/);
+  });
+});
+
+describe("encoding detection + prep on real files (no mocks)", () => {
+  const HEADER =
+    "Año,Clave_Ent,Entidad,Cve. Municipio,Municipio,Bien jurídico afectado,Tipo de delito,Subtipo de delito,Modalidad,Enero,Febrero,Marzo,Abril,Mayo,Junio,Julio,Agosto,Septiembre,Octubre,Noviembre,Diciembre";
+  const ROW = (m: string): string =>
+    `2026,20,Oaxaca,${m},Santa María Peñoles,La vida y la Integridad corporal,Homicidio,Homicidio doloso,Con arma blanca,0,1,1,1,2,0,0,2,0,0,0,0`;
+  const TEXT = [HEADER, ROW("20001"), ROW("20002"), ROW("20003")].join("\r\n") + "\r\n";
+  let dir: string;
+
+  beforeEach(async () => {
+    const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    mockExec.mockImplementation(real.execFileSync as never);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    dir = mkdtempSync(join(tmpdir(), "sesnsp-enc-test-"));
+    writeFileSync(join(dir, "utf8.csv"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(TEXT, "utf-8")]));
+    writeFileSync(join(dir, "cp1252.csv"), Buffer.from(TEXT, "latin1"));
+  });
+  afterEach(() => {
+    // The top-level beforeEach returns mockExec, which vitest then calls as
+    // a teardown; don't let that run the real execFileSync with no args.
+    mockExec.mockReset();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects UTF-8 (with BOM) vs WINDOWS-1252 (raw 0xF1)", () => {
+    expect(readFileSync(join(dir, "cp1252.csv")).includes(0xf1)).toBe(true);
+    expect(detectEncoding('cat "$CSV"', { CSV: join(dir, "utf8.csv") }, "utf8.csv", dir)).toBe("utf-8");
+    expect(detectEncoding('cat "$CSV"', { CSV: join(dir, "cp1252.csv") }, "cp1252.csv", dir)).toBe("windows-1252");
+  });
+
+  it("throws on an empty or unreadable sample instead of answering utf-8", () => {
+    writeFileSync(join(dir, "empty.csv"), "");
+    expect(() =>
+      preparePreparedCsv({ kind: "csv", csvPath: join(dir, "empty.csv") }, dir),
+    ).toThrow(/empty\.csv: empty or unreadable sample \(missing\/corrupt input\?\)/);
+    expect(() =>
+      detectEncoding('cat "$CSV"', { CSV: join(dir, "missing.csv") }, "missing.csv", dir),
+    ).toThrow("loadSesnsp: missing.csv: empty or unreadable sample (missing/corrupt input?)");
+  });
+
+  it("prepares both into valid UTF-8 with the snake_case header and ñ/í intact", () => {
+    for (const name of ["utf8.csv", "cp1252.csv"]) {
+      const out = preparePreparedCsv({ kind: "csv", csvPath: join(dir, name) }, dir);
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(out));
+      const lines = text.split("\n");
+      expect(lines[0]).toBe(
+        "ano,cve_ent,entidad,cve_municipio,municipio,bien_juridico,tipo_delito,subtipo_delito,modalidad,enero,febrero,marzo,abril,mayo,junio,julio,agosto,septiembre,octubre,noviembre,diciembre",
+      );
+      expect(lines[1]).toBe(ROW("20001"));
+      expect(text).not.toContain("\r");
+      expect(text).not.toContain("\ufeff");
+      expect(lines).toHaveLength(5); // header + 3 rows + trailing ""
+    }
+  });
+});
+
 describe("loadSesnsp orchestration (audit #144)", () => {
   const HEADER =
     "Año,Clave_Ent,Entidad,Cve. Municipio,Municipio,Bien jurídico afectado,Tipo de delito,Subtipo de delito,Modalidad,Enero,Febrero,Marzo,Abril,Mayo,Junio,Julio,Agosto,Septiembre,Octubre,Noviembre,Diciembre";
@@ -268,6 +457,7 @@ describe("loadSesnsp orchestration (audit #144)", () => {
     mockExec.mockImplementation((cmd: string, args: string[] = []) => {
       const joined = args.join(" ");
       if (cmd === "/bin/bash" && joined.includes('wc -l < "$OUT"')) return preparedLines;
+      if (cmd === "/bin/bash" && joined.includes("iconv -f UTF-8 -t UTF-8")) return "windows-1252\n";
       if (cmd === "/bin/sh" && joined.includes("ls *.zip")) {
         return "RNID-Delitos_Municipal-Historical-2015-2025.csv\n";
       }
@@ -323,6 +513,46 @@ describe("loadSesnsp orchestration (audit #144)", () => {
       ((c[1] as string[]) ?? []).includes("--single-transaction"),
     );
     expect(tx).toHaveLength(0);
+  });
+
+  function withZip(zipName: string): void {
+    stubAll();
+    const base = mockExec.getMockImplementation()!;
+    mockExec.mockImplementation((cmd: string, args: string[] = []) => {
+      if (cmd === "/bin/sh" && args.join(" ").includes("ls *.zip")) {
+        return `${zipName}\nRNID-Delitos_Municipal-Historical-2015-2025.csv\n`;
+      }
+      if (cmd === "unzip" && args[0] === "-l") {
+        return `   100  2026-09-05 13:17   ${zipName.replace(/\.zip$/, ".csv")}\n`;
+      }
+      return base(cmd, args);
+    });
+  }
+
+  it("passes the ZIP's month cutoff into the single transaction", async () => {
+    withZip("RNID-Delitos_Municipal-2026-ago2026.zip");
+    await loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" });
+    const tx = mockExec.mock.calls.find((c) =>
+      ((c[1] as string[]) ?? []).includes("--single-transaction"),
+    );
+    expect((tx?.[2] as { input: string }).input).toBe(
+      buildVariantReloadSql(
+        RNID_VARIANTS[0]!,
+        ["/tmp/sesnsp_delitos_municipal_raw_0.csv", "/tmp/sesnsp_delitos_municipal_raw_1.csv"],
+        [{ label: "RNID-Delitos_Municipal-2026-ago2026.zip", ano: 2026, mes: 8 }],
+      ),
+    );
+  });
+
+  it("refuses a misnamed ZIP before any prep or psql session", async () => {
+    withZip("RNID-Delitos_Municipal-2026-Ago2026.zip");
+    await expect(
+      loadSesnsp({ rnidDir: "raw/sesnsp", dbContainer: "supabase-db" }),
+    ).rejects.toThrow(/does not match/);
+    for (const c of mockExec.mock.calls) {
+      expect(c[0]).not.toBe("/bin/bash");
+      expect((c[1] as string[]) ?? []).not.toContain("--single-transaction");
+    }
   });
 
   it("fails loud when an analytics MV is missing after the load", async () => {
