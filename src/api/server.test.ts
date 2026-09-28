@@ -131,6 +131,50 @@ describe("createServer — edge limits", () => {
     expect(res.status).toBe(503);
   });
 
+  it("POST /analytics/corridor-density requires auth (401)", async () => {
+    const app = createServer(TEST_CONFIG);
+    const res = await app.request("/analytics/corridor-density", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /analytics/corridor-density rejects a >1 MiB body with 413", async () => {
+    const app = createServer(TEST_CONFIG);
+    const res = await app.request("/analytics/corridor-density", {
+      method: "POST",
+      headers: { "X-Api-Key": "test-key", "Content-Type": "application/json" },
+      body: JSON.stringify({ pad: "x".repeat(1024 * 1024 + 1) }),
+    });
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("payload_too_large");
+  });
+
+  it("/analytics/corridor-density is limited to 20/min per principal+IP", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const app = createServer({ ...TEST_CONFIG, supabaseJwtSecret: JWT_SECRET });
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${memberJwt()}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    };
+    // `{}` has no geometry → 400 from the handler without touching the DB.
+    // The route's own 20/min limiter (CORRIDOR_RATE_LIMIT) trips well
+    // before the /analytics/* 120/min one.
+    for (let i = 0; i < 20; i++) {
+      const res = await app.request("/analytics/corridor-density", init);
+      expect(res.status).toBe(400);
+    }
+    const limited = await app.request("/analytics/corridor-density", init);
+    expect(limited.status).toBe(429);
+  });
+
   it("/analytics/ageb-detail is limited to 20/min per principal+IP", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const app = createServer({ ...TEST_CONFIG, supabaseJwtSecret: JWT_SECRET });

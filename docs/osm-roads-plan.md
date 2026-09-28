@@ -2,6 +2,8 @@
 
 First satellite / external-spatial layer in the warehouse.
 
+> Named-street geometry and corridor density (no roads table; on-demand per-municipio extracts from the same PBF) live in [`CORRIDOR-DENSITY-PLAN-2026-09-28.md`](CORRIDOR-DENSITY-PLAN-2026-09-28.md).
+
 ## Why
 
 The warehouse already joins 7+ datasets on `cvegeo` (13-char AGEB) and `cve_mun` (5-char municipio): DENUE, Censo 2020, CONEVAL, CLUES, CE 2024, EDR, SESNSP, ENIGH, ENOE, SINBA. Missing: an accessibility signal. OSM road density is the cheapest, highest-ROI proxy — captures whether an AGEB is on a thoroughfare or stranded, whether it has highway-grade connectivity, and whether commercial logistics are physically reachable.

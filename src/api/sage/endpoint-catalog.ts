@@ -10,6 +10,11 @@
  * LLM should compose answers itself), /establishment/:clee (single-row,
  * usually a follow-up). The full exclusion list, with reasons, is in
  * dispatcher.test.ts; that test fails when a new route is in neither.
+ *
+ * POST /analytics/corridor-density is NOT here: the dispatcher only issues
+ * GETs with scalar query params, and the corridor needs a GeoJSON body.
+ * Sage also only keeps digests between turns, so it could not carry a
+ * street-geometry match's coordinates into a follow-up corridor call.
  */
 
 import type { EndpointSpec } from "./providers/provider.js";
@@ -361,6 +366,26 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
         cve_ent: { type: "string", description: "Clave 2-digit de entidad." },
       },
       required: ["cve_ent"],
+    },
+  },
+  {
+    name: "street-geometry",
+    description:
+      "Calles con nombre en un municipio (OSM local): por cada calle cuyo nombre contiene q, longitud en metros, tipos de vía (highway) y número de segmentos. La primera consulta de un municipio sin caché responde status 'extracting' (tarda ~1–2 min); repetir después. Errores de guarda: 404 municipio.not_found (cve_mun inexistente), 409 osm.bbox_too_large (municipio demasiado extenso para extraer en línea), 429 osm.queue_full / osm.busy (reintentar más tarde), 429 osm.cold_limit (máximo 10 extracciones de municipios nuevos por hora; los municipios ya en caché no cuentan), 502 osm.extract_failed (la extracción falló; la siguiente consulta la reintenta), 503 osm.cache_budget / osm.source_missing (no disponible). No calcula densidad de establecimientos a lo largo de la calle (eso es el endpoint POST corridor-density, no disponible para Sage).",
+    params_schema: {
+      type: "object",
+      properties: {
+        cve_mun: {
+          type: "string",
+          description: "Clave 5-digit de municipio (p.ej. '09015').",
+        },
+        q: {
+          type: "string",
+          description:
+            "Nombre o fragmento del nombre de la calle, 4–80 caracteres (p.ej. 'reforma'). No distingue acentos ni mayúsculas.",
+        },
+      },
+      required: ["cve_mun", "q"],
     },
   },
 ];

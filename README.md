@@ -340,6 +340,10 @@ Endpoints disponibles:
 | `GET`  | `/entidades`              | ✓    | ✗          | Dropdown source para el frontend: 32 estados con `loaded` + `inegi_total` + `status` (`Cache-Control: 60s`)     |
 | `GET`  | `/sectors`                | ✓    | ✗          | Dropdown source para el frontend: 23+ SCIAN de 2 dígitos con `national_count` (ordenado DESC)                   |
 | `GET`  | `/tiles/:z/:x/:y.mvt`     | ✓    | 5 req/s/IP | Vector tile MVT (PostGIS `ST_AsMVT`): `?entidad=&sector=`, `Cache-Control: 1h`, cap 50k features/tile           |
+| `GET`  | `/analytics/street-geometry` | ✓ | 120/min | Calles con nombre de un municipio desde OSM local: `?cve_mun=NNNNN&q=` (`q` 4–80) → `matches[]` (MultiLineString, `length_m`, `highway`); `202` + `Retry-After` mientras extrae el municipio (~1–2 min en frío); máx. 10 extracciones en frío por hora por principal+IP (`429 osm.cold_limit`, sin exención) |
+| `POST` | `/analytics/corridor-density` | ✓ | 20/min por principal+IP (X-Api-Key exenta) | Establecimientos a ≤ `buffer_m` (10–1000, def. 100) de un LineString/MultiLineString GeoJSON, opcional `clase_prefix` SCIAN → `total`, `per_km`, `by_clase`, `buffer_geojson` (MultiPolygon de celdas, solo visual); body ≤ 1 MiB; > 40 000 candidatos → `400 validation.geometry.area` |
+
+No hay tabla de vialidades: la geometría de calles se extrae bajo demanda del PBF local (`raw/osm/mexico-latest.osm.pbf`) y se cachea por municipio en `data/osm-cache/mun/` (ver [`docs/CORRIDOR-DENSITY-PLAN-2026-09-28.md`](docs/CORRIDOR-DENSITY-PLAN-2026-09-28.md)).
 
 Autenticación: header `X-Api-Key: <API_KEY>` en todas las rutas excepto `/health`. Sin la clave o con clave incorrecta el servidor responde `401`.
 

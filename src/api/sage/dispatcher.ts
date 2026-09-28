@@ -64,6 +64,7 @@ export const ENDPOINT_PATHS: Record<string, string> = {
   "locality-detail": "/analytics/locality-detail",
   "municipio-detail": "/analytics/municipio-detail",
   "entidad-detail": "/analytics/entidad-detail",
+  "street-geometry": "/analytics/street-geometry",
 };
 
 // Endpoints that return ONE record (nested layer objects, sometimes with

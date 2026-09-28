@@ -5,7 +5,7 @@
  * directly with a Request object, no live server. scripts/serve.ts wraps
  * with @hono/node-server for production.
  *
- * Routes (42):
+ * Routes (44):
  *   GET /health                                — liveness check (unauthenticated)
  *   GET /search?q=&entidad=&from=&radius_km=&page=&limit=
  *   GET /establishment/:clee
@@ -25,6 +25,10 @@
  *       licensed-pharmacies-by-ageb, airports-by-municipio,
  *       localities-by-municipio, locality-detail, municipio-detail,
  *       entidad-detail, layers/values
+ *   GET /analytics/street-geometry?cve_mun=&q= — named-street MultiLineString
+ *       from the per-municipio OSM road cache (202 while extracting)
+ *   POST /analytics/corridor-density           — establishments within N m of a
+ *       LineString/MultiLineString, total + per km (1 MiB body cap)
  *   GET /resolve/ageb                          — point-in-polygon AGEB lookup
  *   GET /sage/health                           — Sage status (unauthenticated)
  *   POST /sage/query                           — Sage LLM gateway
@@ -39,8 +43,9 @@
  * Rate limits (middleware/rate-limit.ts), all registered after auth:
  *   /sage/query       6/min per principal (+16 KiB body cap); applies to
  *                     the X-Api-Key too (LLM budget guard vs a leaked key)
- *   /analytics/*      120/min per principal+IP; ageb-detail and
- *                     agebs-by-municipio 20/min
+ *   /analytics/*      120/min per principal+IP (every method, so the
+ *                     corridor-density POST too); ageb-detail,
+ *                     agebs-by-municipio and corridor-density 20/min
  *   /tiles/*          60/s per IP (sized for MapLibre's viewport burst)
  * The shared X-Api-Key is machine-only (Jarvis) and the priority tier: it
  * is exempt from the /analytics/* and /tiles/* limits, and its DB queries
@@ -66,6 +71,11 @@ import { entidadesHandler } from "./handlers/entidades.js";
 import { sectorsHandler } from "./handlers/sectors.js";
 import { tilesHandler } from "./handlers/tiles.js";
 import { layersValuesHandler } from "./handlers/layers-values.js";
+import {
+  corridorDensityHandler,
+  CORRIDOR_RATE_LIMIT,
+} from "./handlers/corridor.js";
+import { streetGeometryHandler } from "./handlers/street-geometry.js";
 import {
   makeSageQueryHandler,
   makeGetThreadHandler,
@@ -201,6 +211,28 @@ export function createServer(config: ApiServerConfig): Hono {
       exempt: isPriorityRequest,
     }),
   );
+  // corridor-density fans out ST_DWithin over a cell cover of the line:
+  // 20/min per principal+IP like the other heavy analytics routes, Jarvis
+  // exempt. Registered before bodyLimit, matching /sage/query.
+  app.use(
+    "/analytics/corridor-density",
+    makeRateLimitMiddleware({
+      ...CORRIDOR_RATE_LIMIT,
+      keyBy: "principal+ip",
+      exempt: isPriorityRequest,
+    }),
+  );
+  // corridor-density takes a GeoJSON line (≤5000 vertices); cap the body
+  // before it is buffered, as /sage/query does. The handler re-checks the
+  // same 1 MiB bound itself.
+  app.use(
+    "/analytics/corridor-density",
+    bodyLimit({
+      maxSize: 1024 * 1024,
+      onError: (c) =>
+        c.json({ error: "Payload too large", code: "payload_too_large" }, 413),
+    }),
+  );
 
   // /tiles also gets a per-IP rate limit on top of auth. Sized for
   // MapLibre's burst pattern: a single viewport at zoom 5 covering
@@ -294,6 +326,12 @@ export function createServer(config: ApiServerConfig): Hono {
   );
   app.get("/analytics/entidad-detail", (c) => entidadDetailHandler(c, config));
   app.get("/analytics/layers/values", (c) => layersValuesHandler(c, config));
+  app.get("/analytics/street-geometry", (c) =>
+    streetGeometryHandler(c, config),
+  );
+  app.post("/analytics/corridor-density", (c) =>
+    corridorDensityHandler(c, config),
+  );
   app.get("/resolve/ageb", (c) => resolveAgebHandler(c, config));
 
   // Sage (LLM gateway). The handlers self-check for config.sageProvider

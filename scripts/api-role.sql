@@ -8,7 +8,8 @@
 -- Allowlist principles:
 --   * SELECT on exactly the relations the runner's callers read
 --     (src/api/handlers/{analytics,layers-values,search,sectors,
---     summary-sector,tiles}.ts and src/analysis/cluster-by-sector.ts).
+--     summary-sector,tiles}.ts, src/analysis/cluster-by-sector.ts and
+--     src/osm/osmium.ts, the municipio bbox for street-geometry.ts).
 --     Handlers that go through PostgREST (entidades, establishment,
 --     summary-entidad, coverage-report) use service_role, not this role.
 --   * SELECT/INSERT/UPDATE/DELETE on the two Sage thread tables only.
@@ -55,6 +56,7 @@ BEGIN
     -- base tables
     'establecimientos',
     'ageb_polygons',
+    'mun_polygons',
     'censo_iter',
     'inegi_edr_defunciones_raw',
     'calibrators_enigh_state',

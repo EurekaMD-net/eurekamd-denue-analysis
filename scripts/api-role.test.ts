@@ -18,6 +18,7 @@ const RUNNER_CALLERS = [
   "src/api/handlers/summary-sector.ts",
   "src/api/handlers/tiles.ts",
   "src/analysis/cluster-by-sector.ts",
+  "src/osm/osmium.ts",
 ];
 
 const SAGE_TABLES = ["sage_threads", "sage_turns_audit"];

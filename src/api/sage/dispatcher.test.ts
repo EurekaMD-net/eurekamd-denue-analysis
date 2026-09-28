@@ -306,6 +306,7 @@ describe("catalog ↔ server routes (audit #77)", () => {
     cvegeo: "090150001123A",
     cve_loc: "090150001",
     target_scian: "46",
+    q: "reforma",
   };
   // GET routes Sage deliberately cannot call.
   const EXCLUDED_ROUTES = new Set([
