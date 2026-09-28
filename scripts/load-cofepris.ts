@@ -1,12 +1,12 @@
 /**
  * CLI: Load COFEPRIS Padrón de Licencias Sanitarias de Farmacias, Droguerías y Boticas.
  *
- * Source URL (verified 2026-05-05):
- *   https://www.gob.mx/cms/uploads/attachment/file/1020177/
- *     BASE_DE_DATOS_DE_LICENCIAS_SANITARIAS_DE_FARMACIAS___DROGUERIAS_Y_BOTICAS__EMITIDAS_POR_COFEPRIS.pdf
+ * Source URL (verified 2026-09-28; edition "Fecha de actualización: 15/05/2026"):
+ *   https://www.gob.mx/cms/uploads/attachment/file/1079227/BASE_DE_DATOS_DE_LICENCIAS_SANITARIAS_DE_FARMACIAS___DROGUER_AS_Y_BOTICAS_EMITIDAS_POR_COFEPRIS.pdf
  *
  * Pipeline:
- *   1. Python `cofepris-pdf-to-csv.py` extracts 14 cols + 6 line-class flags from PDF (pdfplumber).
+ *   1. Python `cofepris-pdf-to-csv.py` extracts 14 cols + 6 line-class flags from PDF (pdfplumber),
+ *      then the 3 constancia cols the 2026-05 edition appends (empty when `No aplica`).
  *   2. Python `cofepris-geocode.py` matches each row to DENUE establecimientos via (cve_ent, cp,
  *      colonia) — first exact CP+colonia, then modal AGEB within CP. Produces cve_mun + cvegeo_ageb
  *      + geocode_method per row. Probe 2026-05-05 yielded 92.3% combined hit (74.7% precise +
@@ -21,10 +21,15 @@
  * licensure floor for site-selection of higher-margin pharma networks.
  *
  * Usage (one-time, manual; PDF doesn't have a stable download API):
- *   curl -L '<URL above>' -o /tmp/cofepris/farmacias.pdf
- *   python3 scripts/cofepris-pdf-to-csv.py /tmp/cofepris/farmacias.pdf /tmp/cofepris/farmacias.csv
- *   python3 scripts/cofepris-geocode.py  # reads /tmp/cofepris/farmacias.csv → farmacias_geocoded.csv
- *   npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=/tmp/cofepris/farmacias_geocoded.csv [--force]
+ *   curl -L '<URL above>' -o raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf
+ *   python3 scripts/cofepris-pdf-to-csv.py raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf raw/cofepris/cofepris_1079227_2026-05.csv
+ *   python3 scripts/cofepris-geocode.py raw/cofepris/cofepris_1079227_2026-05.csv raw/cofepris/cofepris_1079227_2026-05_geocoded.csv
+ *   npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=raw/cofepris/cofepris_1079227_2026-05_geocoded.csv [--force]
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *
+ * The last step is required after every load: the reload drops and recreates
+ * both views, and postLoadGrants restores only denue_sage's SELECT, so the
+ * API role (denue_api) loses access to them until api-role.sql is re-run.
  */
 
 import { execFileSync } from "node:child_process";
@@ -43,7 +48,7 @@ const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
 const TMP_CSV_PATH = "/tmp/cofepris_farmacias.csv";
 
 const EXPECTED_HEADER =
-  "consec,nombre,giro,calle,colonia,colonia_norm,cp,localidad,localidad_norm,entidad,cve_ent,licencia,fecha_expedicion,lineas_autorizadas,estatus_licencia,estatus_establecimiento,observaciones,has_estupefacientes,has_psicotropicos,has_vacunas,has_toxoides,has_sueros_antitoxinas,has_hemoderivados,cve_mun,cvegeo_ageb,geocode_method";
+  "consec,nombre,giro,calle,colonia,colonia_norm,cp,localidad,localidad_norm,entidad,cve_ent,licencia,fecha_expedicion,lineas_autorizadas,estatus_licencia,estatus_establecimiento,observaciones,has_estupefacientes,has_psicotropicos,has_vacunas,has_toxoides,has_sueros_antitoxinas,has_hemoderivados,modificacion_administrativa,fecha_constancia,folio_constancia,cve_mun,cvegeo_ageb,geocode_method";
 
 function readFirstLine(path: string): string {
   const fd = openSync(path, "r");
@@ -109,9 +114,12 @@ export interface LoadCofeprisResult {
 }
 
 /**
- * Schema is fixed at v0.2.8. New COFEPRIS columns would require a migration
- * — unlike SINBA's wide age-band table this dataset has a stable shape
- * (the form was designed by COFEPRIS, not exported from a normalized DB).
+ * The schema is explicit, not inferred: new COFEPRIS columns need a change
+ * here (this DDL + EXPECTED_HEADER) and in the parser. The shape is stable
+ * (the form was designed by COFEPRIS, not exported from a normalized DB);
+ * the one change so far is the 2026-05 edition's 3 appended constancia
+ * columns, placed after the class flags and before the geocoder's columns
+ * (\copy maps by position).
  *
  * Builds `cofepris_farmacias_staging`; the reload swaps it in (audit #145).
  */
@@ -142,6 +150,9 @@ CREATE TABLE cofepris_farmacias_staging (
   has_toxoides              BOOLEAN NOT NULL DEFAULT false,
   has_sueros_antitoxinas    BOOLEAN NOT NULL DEFAULT false,
   has_hemoderivados         BOOLEAN NOT NULL DEFAULT false,
+  modificacion_administrativa TEXT,
+  fecha_constancia          DATE,
+  folio_constancia          TEXT,
   cve_mun                   TEXT,
   cvegeo_ageb               TEXT,
   geocode_method            TEXT,
@@ -255,8 +266,11 @@ export async function loadCofepris(
 
   const headerLine = readFirstLine(config.csvPath);
   if (headerLine !== EXPECTED_HEADER) {
+    const hint = headerLine.includes("fecha_constancia")
+      ? ""
+      : "\n(no constancia columns: re-run scripts/cofepris-pdf-to-csv.py + cofepris-geocode.py from the 2026-05 parser)";
     throw new Error(
-      `loadCofepris: CSV header mismatch.\nexpected: ${EXPECTED_HEADER}\ngot:      ${headerLine.slice(0, 400)}`,
+      `loadCofepris: CSV header mismatch.\nexpected: ${EXPECTED_HEADER}\ngot:      ${headerLine.slice(0, 400)}${hint}`,
     );
   }
 
@@ -392,10 +406,11 @@ if (import.meta.url === `file://${process.argv[1]}` /* run directly */) {
         "Usage: load-cofepris --csv-path=/path/to/farmacias_geocoded.csv [--force]",
         "",
         "Pipeline (one-time):",
-        "  curl -L '<COFEPRIS PDF URL>' -o /tmp/cofepris/farmacias.pdf",
-        "  python3 scripts/cofepris-pdf-to-csv.py /tmp/cofepris/farmacias.pdf /tmp/cofepris/farmacias.csv",
-        "  python3 scripts/cofepris-geocode.py",
-        "  npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=/tmp/cofepris/farmacias_geocoded.csv",
+        "  curl -L '<COFEPRIS PDF URL>' -o raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf",
+        "  python3 scripts/cofepris-pdf-to-csv.py raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf raw/cofepris/cofepris_1079227_2026-05.csv",
+        "  python3 scripts/cofepris-geocode.py raw/cofepris/cofepris_1079227_2026-05.csv raw/cofepris/cofepris_1079227_2026-05_geocoded.csv",
+        "  npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=raw/cofepris/cofepris_1079227_2026-05_geocoded.csv",
+        "  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views",
       ].join("\n") + "\n",
     );
     process.exit(2);

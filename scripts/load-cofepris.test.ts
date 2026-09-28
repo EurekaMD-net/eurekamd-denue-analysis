@@ -29,6 +29,9 @@ import {
 } from "./load-cofepris.js";
 
 const HEADER =
+  "consec,nombre,giro,calle,colonia,colonia_norm,cp,localidad,localidad_norm,entidad,cve_ent,licencia,fecha_expedicion,lineas_autorizadas,estatus_licencia,estatus_establecimiento,observaciones,has_estupefacientes,has_psicotropicos,has_vacunas,has_toxoides,has_sueros_antitoxinas,has_hemoderivados,modificacion_administrativa,fecha_constancia,folio_constancia,cve_mun,cvegeo_ageb,geocode_method";
+/** Pre-2026-05 parser output: no constancia columns. */
+const HEADER_14COL =
   "consec,nombre,giro,calle,colonia,colonia_norm,cp,localidad,localidad_norm,entidad,cve_ent,licencia,fecha_expedicion,lineas_autorizadas,estatus_licencia,estatus_establecimiento,observaciones,has_estupefacientes,has_psicotropicos,has_vacunas,has_toxoides,has_sueros_antitoxinas,has_hemoderivados,cve_mun,cvegeo_ageb,geocode_method";
 
 beforeEach(() => {
@@ -69,7 +72,7 @@ function mockSniffWindowFs(line: string, latin1Byte = false): void {
 }
 
 describe("CREATE_TABLE_SQL", () => {
-  it("declares all 26 columns with correct types", () => {
+  it("declares all 29 columns with correct types", () => {
     expect(CREATE_TABLE_SQL).toContain(
       "DROP TABLE IF EXISTS cofepris_farmacias",
     );
@@ -98,6 +101,16 @@ describe("CREATE_TABLE_SQL", () => {
     expect(CREATE_TABLE_SQL).toContain("cve_mun                   TEXT");
     expect(CREATE_TABLE_SQL).toContain("cvegeo_ageb               TEXT");
     expect(CREATE_TABLE_SQL).toContain("geocode_method            TEXT");
+    expect(CREATE_TABLE_SQL).toMatch(/modificacion_administrativa\s+TEXT,/);
+    expect(CREATE_TABLE_SQL).toMatch(/fecha_constancia\s+DATE,/);
+    expect(CREATE_TABLE_SQL).toMatch(/folio_constancia\s+TEXT,/);
+  });
+
+  it("orders the columns exactly as the CSV header (\\copy maps by position)", () => {
+    const cols = [...CREATE_TABLE_SQL.matchAll(/^ {2}([a-z_]+)\s+(?:TEXT|DATE|BOOLEAN)/gm)].map(
+      (m) => m[1],
+    );
+    expect(cols.join(",")).toBe(HEADER);
   });
 });
 
@@ -226,6 +239,17 @@ describe("loadCofepris — input validation", () => {
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/header mismatch/);
+  });
+
+  it("rejects the pre-2026-05 header without the constancia columns", async () => {
+    mockHeaderFs(HEADER_14COL);
+    await expect(
+      loadCofepris({
+        csvPath: "/tmp/cofepris/farmacias_geocoded.csv",
+        dbContainer: "supabase-db",
+      }),
+    ).rejects.toThrow(/header mismatch[\s\S]*no constancia columns: re-run/);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it("rejects suspiciously small CSV", async () => {
