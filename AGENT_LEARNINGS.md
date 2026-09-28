@@ -8,6 +8,8 @@
 - A flag name must carry one meaning across routes (`truncated` meant "capped" on the SQL path and "table shorter than total" on the endpoint path; the client could only honour one).
 - A destructive automated step (`git reset --hard`, `git clean`) will be denied by the permission layer: script `git revert` instead, and assert the resulting SHA — an agent saying "done" is a claim.
 - `stopAutoRefresh()` in auth-js also removes the visibility listener and nothing restarts it on re-login; pair it with `startAutoRefresh()` or don't call it.
+- The shared `supabase-db` is production load for EVERY caller, including a qa-auditor: worst-case / adversarial / heavy probes go to a throwaway (`docker run postgis`, `osgeo` under `prlimit`) or a scaled input, never the live instance; every DB brief carries `SET statement_timeout` + `SET work_mem`, "do not raise either", and "the first timeout IS the finding". `statement_timeout` does not bound memory (09-28 OOM-kill).
+- User-supplied input that reaches an expensive function gets bounds on THAT function's cost drivers (shape, self-intersection, spread — not just size), constants derived from the live worst case (`COUNT(*)` on the densest cell, not an average), a gate on the quantity actually feared (candidate rows), and — for anything that spawns a process or writes to disk on a miss — a queue cap, per-item size refusal and disk budget in the PLAN, not the audit.
 
 ## 2026-09-27 — Multi-agent audit + refactor (DENUE_RECON)
 
@@ -58,10 +60,18 @@
 ## 2026-09-28 — Corridor density + street geometry (ship-it)
 
 - **Mistake (INCIDENT 01:27 UTC):** a qa-auditor probe ran `ST_Buffer` on a 5,000-vertex self-crossing line with `statement_timeout='60s'` (the brief said 15 s) against the LIVE supabase-db; the backend grew to 12.4 GB, the kernel OOM-killed it and every Postgres connection on the box dropped for ~0.5 s. The check that would have caught it: worst-case geometry probes go to a scratch database or a `docker run postgis` throwaway, never the shared instance; and brief a hard `SET statement_timeout` + `work_mem` for every probe, with "do not raise it" spelled out.
-- **Mistake (plan/P1 brief):** I bounded vertices (5,000) and length (50 km) but not SHAPE — self-intersection, per-segment minimum, bbox diagonal, MultiLineString gaps. `ST_Buffer(geography)` cost is driven by self-crossing and spread, not by length. The check: for any user-supplied geometry that reaches a GEOS function, enumerate the cost drivers of THAT function (PostGIS docs) and bound each one; prefer `ST_DWithin` on the indexed side over buffering the input.
-- **Mistake (plan/P2 brief):** a "cold path triggers a 13 s / 1.9 GB extraction" endpoint shipped with no cap on distinct pending municipios, no bbox-area refusal and no disk budget — 2,469 municipios reachable by one authenticated caller. The check: any endpoint that spawns a process or writes to disk on a cache miss gets a queue cap, a per-item size refusal and a disk budget in the PLAN, not in the audit.
+- **Mistake (plan/P1 brief):** bounded vertices + length, not SHAPE (self-crossing, per-segment min, diagonal, part gaps) → promoted to Standing rules.
+- **Mistake (plan/P2 brief):** a process-spawning cold path shipped with no queue cap, bbox refusal or disk budget → promoted to Standing rules.
 - **Avoid:** two entry points (CLI + API) to the same on-disk cache without a lock — temp names collided and a `.done` marker could vouch for a truncated file.
 - **Better:** the parallel P1/P2/P3 split against fixed contracts worked (three builds + wiring in ~90 min, 0 merge conflicts because no package touched `server.ts`); keep "nobody edits the wiring file" as the rule for parallel packages.
 - **Better:** the web builder measured deck.gl at +211 kB gz for one line + one polygon and used MapLibre layers instead — a bundle-size number in the report beats a plan default.
 - **Better (R2 audit):** GEOS cost can be measured OFF the database — host python `osgeo.ogr` links the same GEOS (3.12.1) as PostGIS 3.3.7; run it under `prlimit --as=3G timeout 30`. Round 2 found the remaining 2 s / 300 MB scribble cost this way with zero risk to supabase-db. Brief this as the default for any spatial-cost question.
-- **Mistake (plan/P1):** the area cap (15 km²) was sized from a 2,300 rows/km² assumption; Centro Histórico is ~10,300 rows/km². The check: derive a cap's constant from a live `COUNT(*)` on the densest known cell, not from a corridor average — then gate on the thing you actually fear (candidate rows), with the geometric cap as the cheap first filter.
+- **Mistake (plan/P1):** area cap sized from a 2,300 rows/km² average; Centro is ~10,300 → promoted to Standing rules (constants from the live worst case; gate on candidate rows).
+
+## 2026-09-28 — Session wrap: cleanup apply, prewarm, live proof
+
+- **Mistake:** I handed the operator four lines in ONE fenced block (`report`, `backup`, `tmux new`, `apply`); they pasted it as one `!` command, so it ran headless: report + backup fine, `tmux` failed (no tty), `apply` refused on its `[[ -t 0 ]]` check. Harmless only because the script fails closed. The check: one fence per operator step when a step needs a terminal or a prompt, and say which line must be typed by hand.
+- **Better:** keep a tty check as the FIRST line of every destructive operator script — it is what turned a mis-paste into a no-op.
+- **Avoid:** a full-table predicate (`WHERE geom IS NULL` over 6.1 M rows) in a 15 s verification line; it times out and proves nothing. Use `pg_stat_user_tables`, the script's own post-step counts, or an indexed predicate.
+- **Better:** for operator-driven long steps, a background `while kill -0 <pid>` watcher plus one long fallback wakeup (20–25 min) gave exact completion timing with zero polling; `PushNotification` reports "not sent" when the terminal is active — that is expected, not a failure.
+- **Better:** live proof after a restart = one request per guard class (200 normal, hot 200, the previously-502 case now 409); a grant is proven with `has_table_privilege`, not by the psql `GRANT` echo.
