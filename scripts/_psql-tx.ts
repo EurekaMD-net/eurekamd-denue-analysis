@@ -264,15 +264,22 @@ function sageAllowlist(): Set<string> {
 /**
  * Grants for relations the load (re)created: a recreated relation inherits
  * the schema's default privileges, so strip them (P02 hygiene) and restore
- * the denue_sage SELECT when sage-role.sql allowlists the relation.
+ * the denue_sage SELECT when sage-role.sql allowlists the relation. With
+ * `schema`, every statement names `schema.relation` (allowlist match stays on
+ * the bare name).
  */
-export function postLoadGrants(relations: readonly string[]): string {
+export function postLoadGrants(
+  relations: readonly string[],
+  schema?: string,
+): string {
   const sage = sageAllowlist();
+  if (schema !== undefined) assertIdent(schema);
   return relations
     .map((r) => {
       assertIdent(r);
-      const lines = [`REVOKE ALL ON ${r} FROM anon, authenticated, trustr_app;`];
-      if (sage.has(r)) lines.push(`GRANT SELECT ON ${r} TO denue_sage;`);
+      const q = schema === undefined ? r : `${schema}.${r}`;
+      const lines = [`REVOKE ALL ON ${q} FROM anon, authenticated, trustr_app;`];
+      if (sage.has(r)) lines.push(`GRANT SELECT ON ${q} TO denue_sage;`);
       return lines.join("\n");
     })
     .join("\n");

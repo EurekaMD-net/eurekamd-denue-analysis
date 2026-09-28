@@ -10,7 +10,7 @@ the OSM finding (section 3) was re-checked directly.
 
 | Priority | Dataset | Loaded | Available now | Action |
 | --- | --- | --- | --- | --- |
-| P0 | OSM road aggregates | **table absent** (README says shipped 05-24) | Geofabrik 2026-09-27 (646 MB) | Investigate the failed May load; retry from the local May PBF first (no download) |
+| ~~P0~~ DONE 09-28 | OSM road aggregates | **reloaded 2026-09-28 from the local May 24 extract** (81,451 AGEBs; the table had been absent) | Geofabrik 2026-09-27 (646 MB) | The May load had succeeded; most likely the May 24 integration test dropped it 8 min later (unqualified `DROP` under a scratch `search_path`, see section 3; fixed 09-28). A fresh Geofabrik pull still needs operator approval |
 | P1 | SESNSP incidencia | through 2026-03 | enero–agosto 2026 (published 09-18, SharePoint) | Manual browser download, rename, re-run loader |
 | P1 | CLUES | 2026-04 | 2026-08 (26.5 MB xlsx, 09-23) | xlsx→csv, re-run loader |
 | P1 | COFEPRIS farmacias | PDF 1020177 (licences to 2025-07) | PDF 1079227 dated 2026-05-15 | PDF→csv, geocode, loader; fix URL in loader header |
@@ -56,25 +56,60 @@ the OSM finding (section 3) was re-checked directly.
   (tipo 2 = financiamientos, 7 = CNBV; fmt 1 = csv). Removes the manual
   node-id hunt.
 
-## 3. OSM layer: absent in production
+## 3. OSM layer: absent in production (reloaded 2026-09-28)
 
-- No relation matching `%osm%` exists in `postgres`. No API handler reads
-  road metrics; only the loader and migration 002 (grants, "optional")
-  reference `osm_ageb_aggregates`. The README (line 41) and the project
-  memory both say it shipped 2026-05-24 with a weekly refresh; no
-  `osm-refresh.timer` is installed.
-- `raw/osm/` still holds the May 24 intermediates (`mexico-latest.osm.pbf`
-  626 MB, `mexico-roads.osm.pbf` 364 MB, `mexico-roads.geojsonseq` 1.8 GB),
-  which the pipeline deletes only after a successful load. The load most
-  likely failed after the export step.
-- Retry path without any download: run `scripts/load-osm-ageb.ts` against
-  the existing `raw/osm/mexico-roads.geojsonseq`; find out why the May load
-  failed first. A fresh Geofabrik pull (646 MB) needs operator approval
-  under the bulk-transfer rule.
+- On 09-27 no relation matching `%osm%` existed in `postgres`. No API handler
+  reads road metrics; only the loader and migration 002 (grants, "optional")
+  reference `osm_ageb_aggregates`. No `osm-refresh.timer` is installed
+  (`ops/osm-refresh.{service,timer}` exist in the repo only;
+  `systemctl is-enabled` reports `not-found` for both).
+- The May 24 load did NOT fail. Commit `983fd97` (05-24 19:06 UTC) records
+  "81,451 AGEBs loaded in 461s", and mcp_readonly SELECT was verified that
+  day. The intermediates stayed in `raw/osm/` because the delete-after-success
+  step (audit #151) was only added on 09-27 in `77ecf23`; the May code never
+  deleted them. The table was dropped afterwards; the 09-26 audit already
+  found it missing.
+- Most likely cause: the integration test committed in `d6b46c0` (05-24
+  19:14 UTC, 8 min after `983fd97`). Its step 2 ran
+  `SET search_path = <scratch>, public;` followed by
+  `CREATE_AGGREGATE_TABLE_SQL`, whose first statement was an unqualified
+  `DROP TABLE IF EXISTS osm_ageb_aggregates`. The scratch schema was still
+  empty, so name resolution fell through to `public` and dropped the live
+  table; the rest of the test then built its fixture table in the scratch
+  schema and passed. Git history and SQL semantics identify the mechanism;
+  logs cannot confirm it (the container's logs start at 09-27 02:44,
+  `logging_collector` is off, `pg_stat_statements` is not installed). The
+  database was not restored (relation OIDs are continuous; `establecimientos`
+  is still OID 46926).
+- Fixed 09-28: `buildAggregateSql(path, schema = "public")` qualifies every
+  relation it reads, creates, drops or renames (and the post-load grants)
+  with an explicit schema; the integration test passes its scratch schema
+  instead of setting `search_path`, and the `CREATE_AGGREGATE_TABLE_SQL`
+  export is gone.
+- 2026-09-28: reloaded from the local May 24 GeoJSONSeq with the new
+  `--reuse-export` flag (no download), as transient unit `osm-load-2026-09`,
+  493.6 s. The flag now reloads only from an export that finished: osmium
+  export writes `mexico-roads.geojsonseq.done` (the PBF's size + mtime) after
+  it returns, and `--reuse-export` dies unless that marker matches the current
+  PBF. Tonight's reused export predates the marker (the reload ran on the
+  earlier mtime-only check; the successful load proves that export was
+  complete) and the loader deleted it afterwards, so the next run re-exports
+  from the PBF. The aggregate session now sets `max_parallel_workers_per_gather = 0`
+  and `max_parallel_maintenance_workers = 0` because the container's
+  `/dev/shm` is 64 MB (the DENUE runner hit "could not resize shared memory
+  segment" on 09-27). Result: 81,451 rows (= every `ageb_polygons` row;
+  63,982 urban 13-char + 17,469 rural 9-char cvegeo), 5,342 AGEBs with no
+  road midpoint (road_length_m = 0, same count as May), 0 NULL
+  `dist_to_major_road_m`, SELECT granted to `mcp_readonly` and `denue_sage`.
+  Data vintage is still the May 24 Geofabrik extract; `mexico-latest.osm.pbf`
+  (626 MB) remains in `raw/osm/`, the filtered PBF and GeoJSONSeq were
+  deleted by the loader.
+- A fresh Geofabrik pull (646 MB) needs operator approval under the
+  bulk-transfer rule.
 
 ## 4. Suggested order
 
-1. OSM: diagnose + retry from local files (no download).
+1. ~~OSM: diagnose + retry from local files (no download).~~ Done 09-28.
 2. SESNSP ene–ago 2026, CLUES 2026-08, COFEPRIS 2026-05: three loader
    re-runs with manual pre-steps; no code change except the COFEPRIS URL.
 3. Parametrise the SEDATU and CNBV loaders by year; load 2026 H1 next to

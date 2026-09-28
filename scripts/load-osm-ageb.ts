@@ -30,7 +30,9 @@
  * Idempotent: rerun freely. osm_ageb_aggregates is rebuilt on every run —
  * into osm_ageb_aggregates_staging, swapped in inside the aggregate's own
  * transaction (audit #145), so a failed run leaves the live table intact.
- * The GeoJSONSeq is rebuilt from the PBF every time.
+ * The GeoJSONSeq is rebuilt from the PBF every time, unless `--reuse-export`
+ * loads the one already in workDir — allowed only when its completion marker
+ * (`<geojsonseq>.done`, written after osmium export returns) matches the PBF.
  *
  * Stays inside the project's existing TS + psql + osmium toolchain — no
  * Python, no GDAL beyond what PostGIS already provides, no QGIS.
@@ -39,12 +41,30 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { postLoadGrants } from "./_psql-tx.js";
 
 // Matches load-clues.ts:32 — strict allowlist for docker container names
 // to neutralize any flag-injection via env override.
 const CONTAINER_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/;
+
+// Schema that holds ageb_polygons and receives osm_ageb_aggregates. Every
+// relation the SQL reads, creates, drops or renames is qualified with it, so
+// a caller's search_path (the integration test's scratch schema) can never
+// redirect the DROP of the live table.
+const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
+
+function assertSchema(schema: string): void {
+  if (!SCHEMA_RE.test(schema)) {
+    throw new Error(`loadOsmAgeb: schema inválido "${schema}".`);
+  }
+}
 
 // Major road classes whose nearest-distance we surface as
 // dist_to_major_road_m: motorway/trunk/primary. Hardcoded in
@@ -77,7 +97,9 @@ function assertSafePath(label: string, p: string): void {
  * derivatives and a downstream divide-by-zero on density should error not
  * silently produce ±Infinity.
  */
-function aggregateTableDdl(table: string): string {
+export function aggregateTableDdl(schema: string, name: string): string {
+  assertSchema(schema);
+  const table = `${schema}.${name}`;
   return `
 DROP TABLE IF EXISTS ${table};
 CREATE TABLE ${table} (
@@ -114,8 +136,6 @@ END $$;
 `;
 }
 
-export const CREATE_AGGREGATE_TABLE_SQL = aggregateTableDdl("osm_ageb_aggregates");
-
 /**
  * Build the aggregate SQL block. Runs inside a single psql session against a
  * TEMPORARY staging table (so the raw road geometry never lands persistently).
@@ -141,7 +161,11 @@ export const CREATE_AGGREGATE_TABLE_SQL = aggregateTableDdl("osm_ageb_aggregates
  * 5km threshold for has_major_road_within_5km: an arbitrary "this AGEB has
  * highway-grade access" boundary; tune later if it doesn't carry signal.
  */
-export function buildAggregateSql(containerGeojsonPath: string): string {
+export function buildAggregateSql(
+  containerGeojsonPath: string,
+  schema = "public",
+): string {
+  assertSchema(schema);
   // Single-quote escape just in case the path ever picks up an apostrophe
   // (defense in depth — assertSafePath already rejects unsafe shapes).
   const escapedPath = containerGeojsonPath.replace(/'/g, "''");
@@ -155,8 +179,13 @@ export function buildAggregateSql(containerGeojsonPath: string): string {
   return `
 \\set ON_ERROR_STOP on
 SET statement_timeout = '25min';
+-- The container's /dev/shm is 64 MB: any parallel query or parallel index
+-- build allocates dynamic shared memory there and dies with "could not
+-- resize shared memory segment". Serial plans spill to disk instead.
+SET max_parallel_workers_per_gather = 0;
+SET max_parallel_maintenance_workers = 0;
 BEGIN;
-${aggregateTableDdl("osm_ageb_aggregates_staging")}
+${aggregateTableDdl(schema, "osm_ageb_aggregates_staging")}
 
 CREATE TEMPORARY TABLE osm_roads_loader (
   feat JSONB
@@ -195,7 +224,7 @@ CREATE INDEX ON osm_roads_staging USING GIST (geom)
 ANALYZE osm_roads_staging;
 ANALYZE osm_roads_centroids;
 
-INSERT INTO osm_ageb_aggregates_staging (
+INSERT INTO ${schema}.osm_ageb_aggregates_staging (
   cvegeo,
   road_length_m,
   road_density_km_per_km2,
@@ -218,7 +247,7 @@ WITH ageb_rollup AS (
     COALESCE(SUM(rc.road_len_m), 0)           AS total_len_m,
     jsonb_object_agg(rc.highway, hw_count)
       FILTER (WHERE rc.highway IS NOT NULL)   AS class_counts
-  FROM ageb_polygons a
+  FROM ${schema}.ageb_polygons a
   LEFT JOIN LATERAL (
     SELECT highway, COUNT(*) AS hw_count, SUM(road_len_m) AS road_len_m
     FROM osm_roads_centroids rc
@@ -231,7 +260,7 @@ nearest_major AS (
   SELECT
     a.cvegeo,
     MIN(ST_Distance(a.geom::geography, r.geom::geography))     AS dist_major_m
-  FROM ageb_polygons a
+  FROM ${schema}.ageb_polygons a
   CROSS JOIN LATERAL (
     -- geom on both sides is already SRID 4326 (set at staging insert).
     -- ST_SetSRID wraps would defeat the GIST KNN index — keep unwrapped.
@@ -257,10 +286,10 @@ SELECT
 FROM ageb_rollup ar
 LEFT JOIN nearest_major nm USING (cvegeo);
 
-DROP TABLE IF EXISTS osm_ageb_aggregates;
-ALTER TABLE osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;
-ALTER INDEX osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;
-${postLoadGrants(["osm_ageb_aggregates"])}
+DROP TABLE IF EXISTS ${schema}.osm_ageb_aggregates;
+ALTER TABLE ${schema}.osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;
+ALTER INDEX ${schema}.osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;
+${postLoadGrants(["osm_ageb_aggregates"], schema)}
 
 COMMIT;
 `;
@@ -279,6 +308,13 @@ export interface LoadOsmAgebConfig {
   dbContainer: string;
   /** `osmium` binary path; default just "osmium" (looked up via $PATH). */
   osmiumBin?: string;
+  /**
+   * Skip the osmium tags-filter + export and load the GeoJSONSeq already in
+   * workDir (CLI `--reuse-export`). Requires the export's completion marker
+   * `<geojsonseq>.done` to match the PBF's size + mtime; fails loud
+   * otherwise. Default false: rebuild from the PBF.
+   */
+  reuseExport?: boolean;
 }
 
 export interface LoadOsmAgebResult {
@@ -287,6 +323,12 @@ export interface LoadOsmAgebResult {
   geojson_bytes: number;
   ageb_rows_loaded: number;
   duration_ms: number;
+}
+
+/** PBF identity recorded in the export marker: size + whole-ms mtime. */
+function pbfFingerprint(pbfPath: string): string {
+  const st = statSync(pbfPath);
+  return `size=${st.size} mtimeMs=${Math.trunc(st.mtimeMs)}`;
 }
 
 export async function loadOsmAgeb(
@@ -306,41 +348,62 @@ export async function loadOsmAgeb(
   const filteredPbf = `${config.workDir}/mexico-roads.osm.pbf`;
   const geojsonPath = `${config.workDir}/mexico-roads.geojsonseq`;
   const containerGeojsonPath = "/tmp/osm_roads.geojsonseq";
+  // Written only after osmium export returns, so a partial export can never
+  // be mistaken for a finished one by --reuse-export.
+  const exportMarker = `${geojsonPath}.done`;
 
-  // 1. osmium tags-filter — keep only highway ways. -O = overwrite.
-  execFileSync(
-    osmiumBin,
-    [
-      "tags-filter",
-      "--overwrite",
-      "--output",
-      filteredPbf,
-      config.pbfPath,
-      "w/highway",
-    ],
-    { encoding: "utf-8", timeout: 10 * 60_000 },
-  );
+  if (config.reuseExport) {
+    const want = pbfFingerprint(config.pbfPath);
+    const have = existsSync(exportMarker)
+      ? readFileSync(exportMarker, "utf-8").trim()
+      : null;
+    if (have !== want || !existsSync(geojsonPath)) {
+      throw new Error(
+        `loadOsmAgeb: --reuse-export requiere ${exportMarker} con "${want}" y ${geojsonPath}; ` +
+          `marcador=${have === null ? "ausente" : `"${have}"`}. Corre sin --reuse-export para re-exportar.`,
+      );
+    }
+  } else {
+    // A stale marker must not vouch for the export this run is about to redo.
+    rmSync(exportMarker, { force: true });
 
-  // 2. osmium export — emit GeoJSONSeq. osmium follows RFC 8142 strictly,
-  //    so every record is prefixed with ASCII RS (0x1E). PG's `\copy CSV`
-  //    cannot ingest that prefix as part of a JSON value — see step 2b.
-  execFileSync(
-    osmiumBin,
-    [
-      "export",
-      "--overwrite",
-      "--output-format=geojsonseq",
-      "--geometry-types=linestring",
-      "--output",
-      geojsonPath,
-      filteredPbf,
-    ],
-    { encoding: "utf-8", timeout: 15 * 60_000 },
-  );
+    // 1. osmium tags-filter — keep only highway ways. -O = overwrite.
+    execFileSync(
+      osmiumBin,
+      [
+        "tags-filter",
+        "--overwrite",
+        "--output",
+        filteredPbf,
+        config.pbfPath,
+        "w/highway",
+      ],
+      { encoding: "utf-8", timeout: 10 * 60_000 },
+    );
+
+    // 2. osmium export — emit GeoJSONSeq. osmium follows RFC 8142 strictly,
+    //    so every record is prefixed with ASCII RS (0x1E). PG's `\copy CSV`
+    //    cannot ingest that prefix as part of a JSON value — see step 2b.
+    execFileSync(
+      osmiumBin,
+      [
+        "export",
+        "--overwrite",
+        "--output-format=geojsonseq",
+        "--geometry-types=linestring",
+        "--output",
+        geojsonPath,
+        filteredPbf,
+      ],
+      { encoding: "utf-8", timeout: 15 * 60_000 },
+    );
+    writeFileSync(exportMarker, `${pbfFingerprint(config.pbfPath)}\n`);
+  }
 
   // 2b. Strip the RFC 8142 RS prefix (0x1E) in place. After this step the
   //     file is pure newline-delimited JSON — each line a single feature
-  //     object that PG can ingest as one JSONB value via \copy.
+  //     object that PG can ingest as one JSONB value via \copy. Idempotent,
+  //     so it also runs on a reused export.
   execFileSync("sed", ["-i", "s/\\x1e//g", geojsonPath], {
     encoding: "utf-8",
     timeout: 5 * 60_000,
@@ -427,7 +490,9 @@ export async function loadOsmAgeb(
     }
     return n;
   };
-  const ageb_rows_loaded = cnt("SELECT COUNT(*) FROM osm_ageb_aggregates;");
+  const ageb_rows_loaded = cnt(
+    "SELECT COUNT(*) FROM public.osm_ageb_aggregates;",
+  );
 
   const result = {
     pbf_bytes: statSync(config.pbfPath).size,
@@ -438,10 +503,12 @@ export async function loadOsmAgeb(
     ageb_rows_loaded,
     duration_ms: Date.now() - started,
   };
-  // 7. Drop the host-side intermediates (~2.2 GB) now the load landed
-  //    (audit #151). Both are rebuilt from the PBF on every run.
+  // 7. Drop the host-side intermediates (~2.2 GB) and the export marker now
+  //    the load landed (audit #151). The next run re-exports from the PBF;
+  //    --reuse-export only applies to an export a failed run left behind.
   rmSync(filteredPbf, { force: true });
   rmSync(geojsonPath, { force: true });
+  rmSync(exportMarker, { force: true });
   return result;
 }
 
@@ -456,10 +523,11 @@ if (isMain) {
   const pbfPath = getArg("pbf") ?? "./raw/osm/mexico-latest.osm.pbf";
   const workDir = getArg("workdir") ?? "./raw/osm";
   const dbContainer = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
+  const reuseExport = process.argv.includes("--reuse-export");
   console.log(
-    `[load-osm-ageb] pbf=${pbfPath}  workdir=${workDir}  container=${dbContainer}`,
+    `[load-osm-ageb] pbf=${pbfPath}  workdir=${workDir}  container=${dbContainer}${reuseExport ? "  reuse-export" : ""}`,
   );
-  loadOsmAgeb({ pbfPath, workDir, dbContainer })
+  loadOsmAgeb({ pbfPath, workDir, dbContainer, reuseExport })
     .then((r) => {
       const mb = (n: number) => (n / 1_048_576).toFixed(1);
       console.log(

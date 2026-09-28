@@ -3,9 +3,10 @@
  * Integration test for scripts/load-osm-ageb.ts — runs against real PostGIS.
  *
  * Spins up a unique throwaway schema, fixtures 2 AGEB polygons + 3 road
- * features, applies the actual CREATE_AGGREGATE_TABLE_SQL +
- * buildAggregateSql, then SELECTs and asserts. Drops the schema in
- * finally regardless of pass/fail. NEVER touches the production
+ * features, applies the actual buildAggregateSql with that schema (every
+ * relation it creates, drops or renames is qualified with it — no reliance
+ * on search_path), then SELECTs and asserts. Drops the schema in finally
+ * regardless of pass/fail. NEVER touches the production
  * public.osm_ageb_aggregates table.
  *
  * Why standalone (not vitest):
@@ -39,10 +40,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  CREATE_AGGREGATE_TABLE_SQL,
-  buildAggregateSql,
-} from "./load-osm-ageb.js";
+import { buildAggregateSql } from "./load-osm-ageb.js";
 
 const CONTAINER = process.env["SUPABASE_DB_CONTAINER"] ?? "supabase-db";
 const RUN_ID = `${process.pid}_${Date.now()}`;
@@ -116,18 +114,17 @@ function cleanup(): void {
 
 const FIXTURE_SCHEMA_SQL = `
 CREATE SCHEMA ${SCHEMA};
-SET search_path = ${SCHEMA}, public;
 
-CREATE TABLE ageb_polygons (
+CREATE TABLE ${SCHEMA}.ageb_polygons (
   ogc_fid serial PRIMARY KEY,
   cvegeo TEXT NOT NULL,
   geom geometry(MultiPolygon, 4326)
 );
-INSERT INTO ageb_polygons (cvegeo, geom) VALUES
+INSERT INTO ${SCHEMA}.ageb_polygons (cvegeo, geom) VALUES
   ('AGEB-A', ST_Multi(ST_MakeEnvelope(0.000, 0.000, 0.010, 0.010, 4326))),
   ('AGEB-B', ST_Multi(ST_MakeEnvelope(0.020, 0.000, 0.030, 0.010, 4326)));
-CREATE INDEX ON ageb_polygons USING GIST (geom);
-ANALYZE ageb_polygons;
+CREATE INDEX ON ${SCHEMA}.ageb_polygons USING GIST (geom);
+ANALYZE ${SCHEMA}.ageb_polygons;
 `;
 
 const FIXTURE_ROADS = [
@@ -220,13 +217,7 @@ async function main(): Promise<void> {
   // 1. Test schema + fixture AGEBs
   dockerPsql(FIXTURE_SCHEMA_SQL);
 
-  // 2. CREATE_AGGREGATE_TABLE_SQL applied in the test schema. Each docker
-  //    exec is a new psql session — prepend SET search_path every time.
-  dockerPsql(
-    `SET search_path = ${SCHEMA}, public;\n${CREATE_AGGREGATE_TABLE_SQL}`,
-  );
-
-  // 3. Fixture geojsonseq → container.
+  // 2. Fixture geojsonseq → container.
   writeFixtureGeojsonseq();
   execFileSync(
     "docker",
@@ -234,14 +225,12 @@ async function main(): Promise<void> {
     { timeout: 30_000 },
   );
 
-  // 4. The aggregate SQL — exact production code path, piped via stdin.
-  dockerPsql(
-    `SET search_path = ${SCHEMA}, public;\n${buildAggregateSql(CONTAINER_GEOJSON)}`,
-  );
+  // 3. The aggregate SQL — exact production code path, piped via stdin,
+  //    with every persistent relation qualified by the scratch schema.
+  dockerPsql(buildAggregateSql(CONTAINER_GEOJSON, SCHEMA));
 
-  // 5. Assertions.
+  // 4. Assertions.
   const rowsOut = dockerPsql(`
-    SET search_path = ${SCHEMA}, public;
     SELECT
       cvegeo,
       COALESCE(road_length_m, 0)::int                AS len_m,
@@ -249,7 +238,7 @@ async function main(): Promise<void> {
       COALESCE(dist_to_major_road_m, -1)::int        AS dist_m,
       has_major_road_within_5km                      AS major_near,
       COALESCE(road_class_counts, '{}'::jsonb)::text AS classes
-    FROM osm_ageb_aggregates
+    FROM ${SCHEMA}.osm_ageb_aggregates
     ORDER BY cvegeo;
   `);
   console.log("[osm-int] aggregate output:");
@@ -297,8 +286,7 @@ async function main(): Promise<void> {
   // dist_to_major_road_m must be 0 for AGEB-A (motorway centroid INSIDE A);
   // > 0 for AGEB-B (nearest major sits ~2km away in A).
   const distOut = dockerPsql(`
-    SET search_path = ${SCHEMA}, public;
-    SELECT cvegeo, dist_to_major_road_m::int FROM osm_ageb_aggregates ORDER BY cvegeo;
+    SELECT cvegeo, dist_to_major_road_m::int FROM ${SCHEMA}.osm_ageb_aggregates ORDER BY cvegeo;
   `);
   console.log("[osm-int] dist_to_major:");
   console.log(distOut);

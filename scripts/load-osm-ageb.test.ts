@@ -5,30 +5,52 @@ vi.mock("node:child_process", () => ({
   execFileSync: mockExec,
   execSync: vi.fn(),
 }));
-const { mockExists, mockStat, mockRm } = vi.hoisted(() => ({
-  mockExists: vi.fn(),
-  mockStat: vi.fn(),
-  mockRm: vi.fn(),
-}));
+const { mockExists, mockStat, mockRm, mockWrite, mockMarker } = vi.hoisted(
+  () => ({
+    mockExists: vi.fn(),
+    mockStat: vi.fn(),
+    mockRm: vi.fn(),
+    mockWrite: vi.fn(),
+    // Contents of `<geojsonseq>.done`; every other read stays real.
+    mockMarker: { value: "" },
+  }),
+);
 // Keep the real readFileSync: _psql-tx reads sage-role.sql for the grants.
-vi.mock("node:fs", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs")>()),
-  existsSync: mockExists,
-  statSync: mockStat,
-  rmSync: mockRm,
-}));
+vi.mock("node:fs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...real,
+    existsSync: mockExists,
+    statSync: mockStat,
+    rmSync: mockRm,
+    writeFileSync: mockWrite,
+    readFileSync: ((p: string, ...rest: unknown[]) =>
+      String(p).endsWith(".done")
+        ? mockMarker.value
+        : (real.readFileSync as (...a: unknown[]) => unknown)(
+            p,
+            ...rest,
+          )) as typeof real.readFileSync,
+  };
+});
 
 import {
   loadOsmAgeb,
-  CREATE_AGGREGATE_TABLE_SQL,
+  aggregateTableDdl,
   buildAggregateSql,
 } from "./load-osm-ageb.js";
+
+// The May 24 PBF's real identity: 625,715,444 B, mtime 2026-05-24 18:20:56.272 UTC.
+const PBF_STAT = { size: 625715444, mtimeMs: 1779646856272.0781 };
+const PBF_MARKER = "size=625715444 mtimeMs=1779646856272";
 
 beforeEach(() => {
   mockExec.mockReset();
   mockExists.mockReset();
   mockStat.mockReset();
   mockRm.mockReset();
+  mockWrite.mockReset();
+  mockMarker.value = "";
   mockExists.mockReturnValue(true);
   mockStat.mockReturnValue({ size: 123 });
 });
@@ -38,23 +60,27 @@ afterEach(() => vi.restoreAllMocks());
 // Static SQL assertions — guard the shape future loaders must keep.
 // ---------------------------------------------------------------------------
 
-describe("CREATE_AGGREGATE_TABLE_SQL", () => {
-  it("is idempotent (DROP+CREATE)", () => {
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
-      "DROP TABLE IF EXISTS osm_ageb_aggregates",
-    );
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
-      "CREATE TABLE osm_ageb_aggregates",
+describe("aggregateTableDdl", () => {
+  const liveDdl = aggregateTableDdl("public", "osm_ageb_aggregates");
+
+  it("is exactly the staging DDL buildAggregateSql embeds", () => {
+    expect(buildAggregateSql("/tmp/x.geojsonseq")).toContain(
+      aggregateTableDdl("public", "osm_ageb_aggregates_staging"),
     );
   });
 
+  it("is idempotent (DROP+CREATE)", () => {
+    expect(liveDdl).toContain(
+      "DROP TABLE IF EXISTS public.osm_ageb_aggregates",
+    );
+    expect(liveDdl).toContain("CREATE TABLE public.osm_ageb_aggregates");
+  });
+
   it("declares cvegeo as PK (no FK; ageb_polygons has PK on ogc_fid, not cvegeo)", () => {
-    expect(CREATE_AGGREGATE_TABLE_SQL).toMatch(/cvegeo\s+TEXT PRIMARY KEY/);
+    expect(liveDdl).toMatch(/cvegeo\s+TEXT PRIMARY KEY/);
     // Explicit non-FK: every other *_ageb consumer joins on cvegeo without
     // a formal FK, matching the warehouse convention.
-    expect(CREATE_AGGREGATE_TABLE_SQL).not.toContain(
-      "REFERENCES ageb_polygons",
-    );
+    expect(liveDdl).not.toContain("REFERENCES ageb_polygons");
   });
 
   it("declares all 5 metric columns + loaded_at", () => {
@@ -66,30 +92,30 @@ describe("CREATE_AGGREGATE_TABLE_SQL", () => {
       "road_class_counts",
       "loaded_at",
     ]) {
-      expect(CREATE_AGGREGATE_TABLE_SQL).toContain(col);
+      expect(liveDdl).toContain(col);
     }
   });
 
   it("road_class_counts uses JSONB, not TEXT", () => {
-    expect(CREATE_AGGREGATE_TABLE_SQL).toMatch(/road_class_counts\s+JSONB/);
+    expect(liveDdl).toMatch(/road_class_counts\s+JSONB/);
   });
 
   it("grants SELECT to mcp_readonly + denue_sage (idempotent, role-guarded)", () => {
     // Loader runs as 'postgres' which is outside Supabase's default-ACL
     // auto-grant. Without explicit GRANTs Jarvis (mcp_readonly) and Sage
     // (denue_sage) cannot SELECT from the new table.
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
-      "GRANT SELECT ON osm_ageb_aggregates TO mcp_readonly",
+    expect(liveDdl).toContain(
+      "GRANT SELECT ON public.osm_ageb_aggregates TO mcp_readonly",
     );
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
-      "GRANT SELECT ON osm_ageb_aggregates TO denue_sage",
+    expect(liveDdl).toContain(
+      "GRANT SELECT ON public.osm_ageb_aggregates TO denue_sage",
     );
     // Each GRANT must be role-existence-guarded so the loader works on a
     // dev box that doesn't have these roles provisioned.
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+    expect(liveDdl).toContain(
       "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp_readonly')",
     );
-    expect(CREATE_AGGREGATE_TABLE_SQL).toContain(
+    expect(liveDdl).toContain(
       "EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'denue_sage')",
     );
   });
@@ -105,17 +131,21 @@ describe("buildAggregateSql", () => {
 
   it("builds into a staging table and swaps it in before COMMIT (audit #145)", () => {
     const begin = sql.indexOf("BEGIN;");
-    const createStaging = sql.indexOf("CREATE TABLE osm_ageb_aggregates_staging (");
-    const insert = sql.indexOf("INSERT INTO osm_ageb_aggregates_staging (");
-    const dropLive = sql.indexOf("DROP TABLE IF EXISTS osm_ageb_aggregates;");
+    const createStaging = sql.indexOf("CREATE TABLE public.osm_ageb_aggregates_staging (");
+    const insert = sql.indexOf(
+      "INSERT INTO public.osm_ageb_aggregates_staging (",
+    );
+    const dropLive = sql.indexOf(
+      "DROP TABLE IF EXISTS public.osm_ageb_aggregates;",
+    );
     const rename = sql.indexOf(
-      "ALTER TABLE osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;",
+      "ALTER TABLE public.osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;",
     );
     const pkey = sql.indexOf(
-      "ALTER INDEX osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;",
+      "ALTER INDEX public.osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;",
     );
     const grants = sql.indexOf(
-      "REVOKE ALL ON osm_ageb_aggregates FROM anon, authenticated, trustr_app;",
+      "REVOKE ALL ON public.osm_ageb_aggregates FROM anon, authenticated, trustr_app;",
     );
     const commit = sql.lastIndexOf("COMMIT;");
     expect(begin).toBeGreaterThan(-1);
@@ -127,13 +157,46 @@ describe("buildAggregateSql", () => {
     expect(pkey).toBeLessThan(grants);
     expect(grants).toBeLessThan(commit);
     // The live table is never emptied before the new rows exist.
-    expect(sql).not.toMatch(/INSERT INTO osm_ageb_aggregates \(/);
+    expect(sql).not.toMatch(/INSERT INTO (public\.)?osm_ageb_aggregates \(/);
     // Staging carries the same role-guarded consumer grants (they follow the
     // table through the RENAME).
     expect(sql).toContain(
-      "GRANT SELECT ON osm_ageb_aggregates_staging TO mcp_readonly",
+      "GRANT SELECT ON public.osm_ageb_aggregates_staging TO mcp_readonly",
     );
-    expect(sql).toContain("GRANT SELECT ON osm_ageb_aggregates TO denue_sage;");
+    expect(sql).toContain(
+      "GRANT SELECT ON public.osm_ageb_aggregates TO denue_sage;",
+    );
+  });
+
+  it("qualifies every persistent relation with the given schema (search_path cannot redirect a DROP)", () => {
+    const scratch = buildAggregateSql("/tmp/x.geojsonseq", "osm_int_1");
+    // Every DROP / CREATE TABLE / ALTER / INSERT / GRANT / REVOKE / COMMENT
+    // and every FROM ageb_polygons names the scratch schema explicitly.
+    const stmts = scratch.match(
+      /^\s*(DROP TABLE|CREATE TABLE|ALTER TABLE|ALTER INDEX|INSERT INTO|REVOKE ALL ON|GRANT SELECT ON|COMMENT ON TABLE|COMMENT ON COLUMN)\s+(IF EXISTS\s+)?\S+/gm,
+    )!;
+    expect(stmts.length).toBeGreaterThanOrEqual(10);
+    for (const st of stmts) expect(st).toMatch(/\sosm_int_1\./);
+    expect(scratch).toContain(
+      "DROP TABLE IF EXISTS osm_int_1.osm_ageb_aggregates;",
+    );
+    expect(scratch).toContain(
+      "ALTER TABLE osm_int_1.osm_ageb_aggregates_staging RENAME TO osm_ageb_aggregates;",
+    );
+    expect(scratch).toContain(
+      "ALTER INDEX osm_int_1.osm_ageb_aggregates_staging_pkey RENAME TO osm_ageb_aggregates_pkey;",
+    );
+    expect(scratch).not.toContain("public.");
+    expect(scratch).not.toMatch(/FROM ageb_polygons/);
+    // The only unqualified CREATEs are session-scoped TEMPORARY tables.
+    expect(scratch.match(/CREATE (TEMPORARY )?TABLE \w+ /g) ?? []).toEqual([
+      "CREATE TEMPORARY TABLE osm_roads_loader ",
+      "CREATE TEMPORARY TABLE osm_roads_staging ",
+      "CREATE TEMPORARY TABLE osm_roads_centroids ",
+    ]);
+    expect(() => buildAggregateSql("/tmp/x", "public; DROP")).toThrow(
+      /schema inválido/,
+    );
   });
 
   it("sets ON_ERROR_STOP so a mid-pipeline failure aborts the txn", () => {
@@ -144,6 +207,22 @@ describe("buildAggregateSql", () => {
     // Audit W6: 25min < 30min systemd TimeoutStartSec, so PG kills the
     // statement before systemd kills the wrapper.
     expect(sql).toContain("SET statement_timeout = '25min'");
+  });
+
+  it("disables parallel query + parallel index builds before BEGIN (64 MB /dev/shm)", () => {
+    const begin = sql.indexOf("BEGIN;");
+    expect(
+      sql.indexOf("SET max_parallel_workers_per_gather = 0;"),
+    ).toBeGreaterThan(-1);
+    expect(
+      sql.indexOf("SET max_parallel_workers_per_gather = 0;"),
+    ).toBeLessThan(begin);
+    expect(
+      sql.indexOf("SET max_parallel_maintenance_workers = 0;"),
+    ).toBeGreaterThan(-1);
+    expect(
+      sql.indexOf("SET max_parallel_maintenance_workers = 0;"),
+    ).toBeLessThan(begin);
   });
 
   it("uses TEMPORARY tables (so raw OSM never lands persistently)", () => {
@@ -182,7 +261,7 @@ describe("buildAggregateSql", () => {
     // GIST must come before the INSERT that joins on ST_Intersects, or the
     // 80k × 6M cross product runs sequential. Position is load-bearing.
     expect(sql.indexOf("USING GIST")).toBeLessThan(
-      sql.indexOf("INSERT INTO osm_ageb_aggregates"),
+      sql.indexOf("INSERT INTO public.osm_ageb_aggregates"),
     );
   });
 
@@ -336,15 +415,63 @@ describe("loadOsmAgeb (orchestration)", () => {
     expect(mockExec.mock.calls[5]![1]).toContain("rm");
     // Step 6: docker exec psql -t -A -c COUNT
     expect(mockExec.mock.calls[6]![1]?.join(" ")).toContain(
-      "SELECT COUNT(*) FROM osm_ageb_aggregates",
+      "SELECT COUNT(*) FROM public.osm_ageb_aggregates;",
     );
     expect(r.ageb_rows_loaded).toBe(80000);
     // Audit #151: sizes are measured first, then the ~2.2 GB of host-side
     // intermediates are deleted after the successful load.
     expect(r.geojson_bytes).toBe(123);
+    // Marker: a stale one is dropped before the export, a fresh one written
+    // after it; the successful load then removes it with the intermediates.
     expect(mockRm.mock.calls.map((c) => c[0])).toEqual([
+      "/w/mexico-roads.geojsonseq.done",
       "/w/mexico-roads.osm.pbf",
       "/w/mexico-roads.geojsonseq",
+      "/w/mexico-roads.geojsonseq.done",
+    ]);
+  });
+
+  it("writes the export marker with the PBF identity only after osmium export returns", async () => {
+    mockStat.mockReturnValue(PBF_STAT);
+    const order: string[] = [];
+    mockExec.mockImplementation((bin: string, args: string[]) => {
+      order.push(`${bin} ${args[0]}`);
+      return "80000\n";
+    });
+    mockWrite.mockImplementation((p: string) => order.push(`write ${p}`));
+    await loadOsmAgeb({
+      pbfPath: "/p.pbf",
+      workDir: "/w",
+      dbContainer: "supabase-db",
+    });
+    expect(mockWrite).toHaveBeenCalledWith(
+      "/w/mexico-roads.geojsonseq.done",
+      `${PBF_MARKER}\n`,
+    );
+    expect(order.slice(0, 4)).toEqual([
+      "osmium tags-filter",
+      "osmium export",
+      "write /w/mexico-roads.geojsonseq.done",
+      "sed -i",
+    ]);
+  });
+
+  it("leaves no marker when osmium export fails", async () => {
+    mockExec
+      .mockReturnValueOnce("") // tags-filter
+      .mockImplementationOnce(() => {
+        throw new Error("osmium export: killed");
+      });
+    await expect(
+      loadOsmAgeb({
+        pbfPath: "/p.pbf",
+        workDir: "/w",
+        dbContainer: "supabase-db",
+      }),
+    ).rejects.toThrow(/killed/);
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(mockRm.mock.calls.map((c) => c[0])).toEqual([
+      "/w/mexico-roads.geojsonseq.done",
     ]);
   });
 
@@ -384,8 +511,11 @@ describe("loadOsmAgeb (orchestration)", () => {
         dbContainer: "supabase-db",
       }),
     ).rejects.toThrow(/aggregate failed/);
-    // A failed load keeps the host intermediates for debugging.
-    expect(mockRm).not.toHaveBeenCalled();
+    // A failed load keeps the host intermediates (and the fresh export
+    // marker) for debugging; only the pre-export stale-marker drop ran.
+    expect(mockRm.mock.calls.map((c) => c[0])).toEqual([
+      "/w/mexico-roads.geojsonseq.done",
+    ]);
     // Final call must be the cleanup rm -f.
     const last = mockExec.mock.calls[mockExec.mock.calls.length - 1]!;
     expect(last[0]).toBe("docker");
@@ -423,6 +553,71 @@ describe("loadOsmAgeb (orchestration)", () => {
     const last = mockExec.mock.calls[mockExec.mock.calls.length - 1]!;
     expect(last[0]).toBe("docker");
     expect(last[1]).toContain("rm");
+  });
+
+  it("--reuse-export skips osmium and loads the existing GeoJSONSeq when the marker matches the PBF", async () => {
+    mockStat.mockReturnValue(PBF_STAT);
+    mockMarker.value = `${PBF_MARKER}\n`;
+    mockExec.mockReturnValue("80000\n");
+    const r = await loadOsmAgeb({
+      pbfPath: "/p.pbf",
+      workDir: "/w",
+      dbContainer: "supabase-db",
+      reuseExport: true,
+    });
+    expect(mockExec.mock.calls.some((c) => c[0] === "osmium")).toBe(false);
+    expect(mockWrite).not.toHaveBeenCalled();
+    // sed strip still runs first (idempotent), then docker cp of the reused file.
+    expect(mockExec.mock.calls[0]![0]).toBe("sed");
+    expect(mockExec.mock.calls[0]![1]).toContain("/w/mexico-roads.geojsonseq");
+    expect(mockExec.mock.calls[1]![1]).toContain("cp");
+    expect(mockExec.mock.calls[1]![1]).toContain("/w/mexico-roads.geojsonseq");
+    expect(r.ageb_rows_loaded).toBe(80000);
+  });
+
+  it("--reuse-export dies naming the marker when it is absent", async () => {
+    mockStat.mockReturnValue(PBF_STAT);
+    mockExists.mockImplementation((p: string) => !p.endsWith(".done"));
+    await expect(
+      loadOsmAgeb({
+        pbfPath: "/p.pbf",
+        workDir: "/w",
+        dbContainer: "supabase-db",
+        reuseExport: true,
+      }),
+    ).rejects.toThrow(/mexico-roads\.geojsonseq\.done.*marcador=ausente/);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("--reuse-export dies naming the marker when it records a different PBF", async () => {
+    mockStat.mockReturnValue(PBF_STAT);
+    mockMarker.value = "size=625715444 mtimeMs=1779646856000\n";
+    await expect(
+      loadOsmAgeb({
+        pbfPath: "/p.pbf",
+        workDir: "/w",
+        dbContainer: "supabase-db",
+        reuseExport: true,
+      }),
+    ).rejects.toThrow(
+      /mexico-roads\.geojsonseq\.done.*marcador="size=625715444 mtimeMs=1779646856000"/,
+    );
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("--reuse-export dies when the marker matches but the GeoJSONSeq is gone", async () => {
+    mockStat.mockReturnValue(PBF_STAT);
+    mockMarker.value = PBF_MARKER;
+    mockExists.mockImplementation((p: string) => p.endsWith(".done"));
+    await expect(
+      loadOsmAgeb({
+        pbfPath: "/p.pbf",
+        workDir: "/w",
+        dbContainer: "supabase-db",
+        reuseExport: true,
+      }),
+    ).rejects.toThrow(/--reuse-export requiere/);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it("honors a custom osmium binary path", async () => {

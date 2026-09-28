@@ -84,7 +84,7 @@ Each ships as its own `load-osm-<layer>.ts` + `osm_ageb_<layer>` table — keeps
 
 ## Integration test
 
-`scripts/load-osm-ageb.integration.ts` (`npm run test:integration:osm`) — runs against the live PostGIS in a throwaway schema. Fixtures 2 AGEB rectangles + 3 LineString roads, applies the actual `CREATE_AGGREGATE_TABLE_SQL` + `buildAggregateSql`, asserts row count, class attribution by centroid, grant propagation, and major-road distance semantics. Schema is dropped in `finally` regardless of pass/fail; the production `public.osm_ageb_aggregates` is never touched.
+`scripts/load-osm-ageb.integration.ts` (`npm run test:integration:osm`) — runs against the live PostGIS in a throwaway schema. Fixtures 2 AGEB rectangles + 3 LineString roads, applies the actual `buildAggregateSql` with the scratch schema as its `schema` argument (every relation it creates, drops or renames is schema-qualified; no reliance on `search_path`), asserts row count, class attribution by centroid, grant propagation, and major-road distance semantics. Schema is dropped in `finally` regardless of pass/fail. The 2026-05-24 version did touch production: it ran an unqualified `DROP TABLE IF EXISTS osm_ageb_aggregates` under `SET search_path = <scratch>, public` before the scratch table existed, which most likely dropped `public.osm_ageb_aggregates` minutes after its first load (fixed 2026-09-28).
 
 Exit codes: `0` pass, `1` assertion fail, `77` SKIP (DB container not reachable — CI-safe). Total runtime ~3s on a real PG.
 
