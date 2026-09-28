@@ -5,7 +5,8 @@
 -- scripts/load-censo.ts re-runs this file inside its reload transaction
 -- (audit #144), so keep it free of BEGIN/COMMIT and psql meta-commands.
 --
--- Idempotent: CREATE OR REPLACE for both views. No data movement.
+-- Idempotent: CREATE OR REPLACE for every view. The only data written is
+-- the 11-row municipio_bridge_2025 seed (upsert), see municipios_2025 below.
 -- censo_iter raw has 287 cols; v0.2.x exposed 14 in censo_municipios. This
 -- migration extends censo_municipios to ~50 cols (religion / language /
 -- migration / assets / education detail / civil status / disability) and
@@ -345,6 +346,106 @@ SELECT
 FROM censo_iter
 WHERE mun = '000' AND loc = '0000' AND entidad <> '00';
 
+-- =============================================================================
+-- municipios_2025 — canonical municipio universe on 2025 keys (2,478)
+-- =============================================================================
+-- DENUE 05/2026, CLUES, SESNSP and CE 2024 already key rows by the 2025
+-- municipio catalog: the 2,469 Censo 2020 keys plus 9 municipios created
+-- 2019–2024 (docs/EIC-2025-RECON-2026-09-28.md §2–§3). Handlers that drive
+-- from censo_municipios drop those 9 (4,950 DENUE rows on 2026-09-28).
+--
+-- municipio_bridge_2025: one row per (2025 child, 2020 parent) pair. 02007
+-- San Felipe and 25020 Juan José Ríos have two parents each, so 11 rows for
+-- 9 children. Parent names are censo_municipios' spellings; child names are
+-- the EIC 2025 NOM_MUN with the footnote '*' stripped.
+--
+-- municipios_2025: every censo_municipios row plus the 9 children.
+-- is_new_2025 marks the 9; parent_cve_mun_2020 lists their 2020 parent
+-- keys (empty for the 2,469). A child's census columns are NULL: the
+-- parent's 2020 values describe the pre-split territory, and copying them
+-- would double-count the population the parent still reports. They stay
+-- NULL until EIC 2025 is loaded (recon §5 step 2). nom_ent comes from
+-- censo_entidades by the key's entidad prefix.
+--
+-- Identity columns first, then the same census columns as censo_municipios; add
+-- new columns only at the END (CREATE OR REPLACE VIEW can only append).
+--
+-- scripts/migrations/027-municipio-bridge-2025.sql carries a verbatim copy
+-- of this section (psql piped over stdin cannot include this file);
+-- scripts/migrations/027-municipio-bridge-2025.test.ts fails on any drift.
+-- >>> municipios_2025 section
+-- NOTE: the seed below is upsert-only; re-parenting a child later needs an explicit DELETE of the old pair.
+CREATE TABLE IF NOT EXISTS municipio_bridge_2025 (
+  cve_mun_2025        TEXT NOT NULL CHECK (cve_mun_2025 ~ '^[0-9]{5}$'),
+  nom_mun_2025        TEXT NOT NULL,
+  cve_mun_2020_parent TEXT NOT NULL CHECK (cve_mun_2020_parent ~ '^[0-9]{5}$'),
+  nom_mun_2020_parent TEXT NOT NULL,
+  decreto             DATE,
+  PRIMARY KEY (cve_mun_2025, cve_mun_2020_parent),
+  CHECK (cve_mun_2025 <> cve_mun_2020_parent),
+  CHECK (left(cve_mun_2025, 2) = left(cve_mun_2020_parent, 2))
+);
+
+INSERT INTO municipio_bridge_2025
+  (cve_mun_2025, nom_mun_2025, cve_mun_2020_parent, nom_mun_2020_parent, decreto)
+VALUES
+  ('02007', 'San Felipe',            '02001', 'Ensenada',             '2021-07-01'),
+  ('02007', 'San Felipe',            '02002', 'Mexicali',             '2021-07-01'),
+  ('04013', 'Dzitbalché',            '04001', 'Calkiní',              '2019-04-26'),
+  ('12082', 'Las Vigas',             '12053', 'San Marcos',           '2021-09-28'),
+  ('12083', 'Ñuu Savi',              '12012', 'Ayutla de los Libres', '2021-09-28'),
+  ('12084', 'Santa Cruz del Rincón', '12041', 'Malinaltepec',         '2021-09-28'),
+  ('12085', 'San Nicolás',           '12023', 'Cuajinicuilapa',       '2021-09-28'),
+  ('24059', 'Villa de Pozos',        '24028', 'San Luis Potosí',      '2024-07-22'),
+  ('25019', 'Eldorado',              '25006', 'Culiacán',             '2021-03-22'),
+  ('25020', 'Juan José Ríos',        '25011', 'Guasave',              '2023-04-28'),
+  ('25020', 'Juan José Ríos',        '25001', 'Ahome',                '2023-04-28')
+ON CONFLICT (cve_mun_2025, cve_mun_2020_parent) DO UPDATE SET
+  nom_mun_2025        = EXCLUDED.nom_mun_2025,
+  nom_mun_2020_parent = EXCLUDED.nom_mun_2020_parent,
+  decreto             = EXCLUDED.decreto;
+
+CREATE OR REPLACE VIEW municipios_2025 AS
+SELECT
+  cve_mun, entidad, mun, nom_mun, nom_ent,
+  false AS is_new_2025,
+  '{}'::text[] AS parent_cve_mun_2020,
+  pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas, p_12ymas,
+  pea, pocupada, graproes, tvivhab, tvivpar, vph_inter, vph_autom,
+  pcatolica, pro_crieva, potras_rel, psin_relig,
+  p3ym_hli, p3hlinhe, p3hli_he, phog_ind, pob_afro,
+  pnacent, pnacoe, pres2015, presoe15,
+  p15ym_an, p15ym_se, p15pri_in, p15pri_co, p15sec_in, p15sec_co, p18ym_pb,
+  p12ym_solt, p12ym_casa, p12ym_sepa,
+  pcon_disc, pcon_limi, psind_lim,
+  psinder, pder_ss, pder_imss, pder_iste, pder_segp, pder_imssb, pafil_ipriv,
+  vph_refri, vph_lavad, vph_hmicro, vph_moto, vph_bici, vph_radio, vph_tv,
+  vph_pc, vph_telef, vph_cel, vph_stvp, vph_spmvpi, vph_cvj, vph_snbien
+FROM censo_municipios
+UNION ALL
+SELECT
+  b.cve_mun_2025, left(b.cve_mun_2025, 2), right(b.cve_mun_2025, 3),
+  b.nom_mun_2025, ce.nom_ent,
+  true,
+  array_agg(b.cve_mun_2020_parent ORDER BY b.cve_mun_2020_parent),
+  -- Census columns: NULL, never the parent's (see header). Same order as
+  -- the first branch; each NULL takes that branch's type.
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL,
+  NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL
+FROM municipio_bridge_2025 b
+LEFT JOIN censo_entidades ce ON ce.cve_ent = left(b.cve_mun_2025, 2)
+GROUP BY b.cve_mun_2025, b.nom_mun_2025, ce.nom_ent;
+-- <<< municipios_2025 section
+
 -- Smoke-tests (manual; run after applying):
 --   SELECT cve_mun, pobtot, pcatolica, vph_inter FROM censo_municipios WHERE cve_mun='09015';
 --   SELECT count(*) FROM censo_localidades;
@@ -355,3 +456,5 @@ WHERE mun = '000' AND loc = '0000' AND entidad <> '00';
 --   SELECT count(*), MIN(pobtot), MAX(pobtot) FROM censo_entidades;
 --   SELECT cve_ent, nom_ent, pobtot, pcatolica, vph_inter FROM censo_entidades
 --     WHERE cve_ent='09';  -- CDMX
+--   SELECT count(*), count(DISTINCT cve_mun), count(*) FILTER (WHERE is_new_2025)
+--     FROM municipios_2025;  -- 2478 | 2478 | 9

@@ -161,6 +161,15 @@ BEGIN
   IF to_regclass('public.dataset_versions') IS NOT NULL THEN
     GRANT SELECT ON dataset_versions TO denue_sage;
   END IF;
+  -- 2020 -> 2025 municipio key bridge (11 rows) and the canonical 2,478-key
+  -- universe over it (migration 027 / migrate-censo-views.sql), absent until
+  -- that migration runs.
+  IF to_regclass('public.municipio_bridge_2025') IS NOT NULL THEN
+    GRANT SELECT ON municipio_bridge_2025 TO denue_sage;
+  END IF;
+  IF to_regclass('public.municipios_2025') IS NOT NULL THEN
+    GRANT SELECT ON municipios_2025 TO denue_sage;
+  END IF;
 END$$;
 
 -- Analytical views (no expensive base joins).

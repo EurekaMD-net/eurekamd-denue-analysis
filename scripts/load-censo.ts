@@ -9,16 +9,25 @@
  *   #   https://www.inegi.org.mx/contenidos/programas/ccpv/2020/datosabiertos/iter/iter_00_cpv2020_csv.zip
  *   # Extract conjunto_de_datos_iter_00CSV20.csv somewhere, then:
  *   npx tsx --env-file=.env scripts/load-censo.ts --csv=/opt/data/iter/.../conjunto_de_datos_iter_00CSV20.csv
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *
+ * The last step is required after every load: the reload drops and recreates
+ * the censo views and municipios_2025, and postLoadGrants restores only
+ * denue_sage's SELECT, so the API role (denue_api) loses access to them
+ * (/analytics/municipio-detail, locust-muni, ... answer 502) until
+ * api-role.sql is re-run.
  *
  * Behavior (ONE psql transaction — a failure leaves the DB untouched):
  *  1. Reads CSV header → CREATE TABLE censo_iter_staging (col1 TEXT, ...)
  *     with 286 TEXT columns. Verbatim — no row filtering, no value casting.
  *  2. \copy ... NULL '*' so INEGI's null marker becomes SQL NULL.
- *  3. Drops censo_localidades / censo_entidades / censo_municipios
- *     explicitly (no CASCADE, audit #144) and swaps staging in as censo_iter.
+ *  3. Drops municipios_2025 / censo_localidades / censo_entidades /
+ *     censo_municipios explicitly (no CASCADE, audit #144) and swaps staging
+ *     in as censo_iter.
  *  4. Adds generated column cve_mun (entidad||mun) for joins.
  *  5. Creates a partial btree index on cve_mun (loc='0000') for hot path.
- *  6. Recreates all three censo views from scripts/migrate-censo-views.sql
+ *  6. Recreates the censo views + municipios_2025 (and the
+ *     municipio_bridge_2025 seed) from scripts/migrate-censo-views.sql
  *     + re-applies grants.
  *
  * Idempotent: replaces censo_iter on each run.
@@ -138,6 +147,9 @@ export function buildCensoReloadSql(csvHeaderLine: string): string {
   return [
     buildCensoCreateTable(csvHeaderLine, "censo_iter_staging"),
     `\\copy censo_iter_staging FROM '/tmp/iter.csv' WITH (FORMAT csv, HEADER true, NULL '*')`,
+    // municipios_2025 selects from censo_municipios + censo_entidades, so it
+    // goes first or their DROPs fail.
+    "DROP VIEW IF EXISTS municipios_2025;",
     "DROP VIEW IF EXISTS censo_localidades;",
     "DROP VIEW IF EXISTS censo_entidades;",
     "DROP VIEW IF EXISTS censo_municipios;",
@@ -145,7 +157,7 @@ export function buildCensoReloadSql(csvHeaderLine: string): string {
     "ALTER TABLE censo_iter_staging RENAME TO censo_iter;",
     POST_LOAD_SQL,
     censoViewsSql(),
-    postLoadGrants(["censo_iter", ...CENSO_VIEWS]),
+    postLoadGrants(["censo_iter", "municipio_bridge_2025", ...CENSO_VIEWS]),
   ].join("\n");
 }
 
@@ -241,7 +253,10 @@ if (isMain) {
   const csvPath = getArg("csv");
   if (!csvPath) {
     console.error(
-      "Usage: npx tsx scripts/load-censo.ts --csv=/path/to/conjunto_de_datos_iter_00CSV20.csv",
+      [
+        "Usage: npx tsx scripts/load-censo.ts --csv=/path/to/conjunto_de_datos_iter_00CSV20.csv",
+        "Then:  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views",
+      ].join("\n"),
     );
     process.exit(1);
   }
@@ -253,6 +268,9 @@ if (isMain) {
     .then((r) => {
       console.log(
         `[load-censo] ✓ ${r.rows_loaded.toLocaleString()} ITER rows, ${r.municipios_count.toLocaleString()} municipios in ${(r.duration_ms / 1000).toFixed(1)}s`,
+      );
+      console.log(
+        "[load-censo] next: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views (postLoadGrants restores only denue_sage)",
       );
       process.exit(0);
     })

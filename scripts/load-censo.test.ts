@@ -226,6 +226,20 @@ describe("buildCensoReloadSql (audit #144)", () => {
     expect(sql).not.toMatch(/DROP (TABLE|VIEW)[^;]*CASCADE/);
   });
 
+  it("drops municipios_2025 before the censo views it reads, recreates it after them", () => {
+    const sql = buildCensoReloadSql(HEADER);
+    const drop = sql.indexOf("DROP VIEW IF EXISTS municipios_2025;");
+    expect(drop).toBeGreaterThan(-1);
+    expect(drop).toBeLessThan(sql.indexOf("DROP VIEW IF EXISTS censo_entidades;"));
+    expect(drop).toBeLessThan(sql.indexOf("DROP VIEW IF EXISTS censo_municipios;"));
+    const create = sql.indexOf("CREATE OR REPLACE VIEW municipios_2025 AS");
+    expect(create).toBeGreaterThan(sql.indexOf("CREATE OR REPLACE VIEW censo_municipios AS"));
+    expect(create).toBeGreaterThan(sql.indexOf("CREATE OR REPLACE VIEW censo_entidades AS"));
+    expect(create).toBeGreaterThan(sql.indexOf("CREATE TABLE IF NOT EXISTS municipio_bridge_2025"));
+    expect(sql).toContain("GRANT SELECT ON municipios_2025 TO denue_sage;");
+    expect(sql).toContain("GRANT SELECT ON municipio_bridge_2025 TO denue_sage;");
+  });
+
   it("recreates censo_localidades + censo_entidades (old POST_LOAD rebuilt only censo_municipios)", () => {
     const sql = buildCensoReloadSql(HEADER);
     const swap = sql.indexOf("RENAME TO censo_iter;");

@@ -420,6 +420,20 @@ describe("GET /analytics/municipios?entidad=", () => {
     expect(sql).not.toContain("4659");
   });
 
+  // EIC recon §3: DENUE keys 9 municipios Censo 2020 lacks; joining
+  // municipios_2025 gives them nom_mun (poblacion stays NULL). A revert to
+  // censo_municipios fails the exact-relation match.
+  it("joins municipios_2025 for nom_mun / pobtot, never censo_municipios", async () => {
+    mockExec.mockReturnValue("null");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipios?entidad=24", { headers: AUTH });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toContain("LEFT JOIN municipios_2025 cm ON cm.cve_mun = e.cve_mun");
+    expect(sql).toContain("FROM e_counts e");
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
+  });
+
   it("normalizes null DB columns to null in API response", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([
@@ -770,6 +784,10 @@ describe("GET /analytics/risk-summary", () => {
     expect(sql).toMatch(/ano = 2024/);
     expect(sql).toMatch(/ano = 2019/);
     expect(sql).toMatch(/mv_delitos_municipal_yearly/);
+    // Name + population join: municipios_2025 (2,478 keys) so the 9
+    // post-2020 keys carry nom_mun; a revert to censo_municipios fails.
+    expect(sql).toMatch(/LEFT JOIN municipios_2025 cm USING \(cve_mun\)/);
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
   });
 
   it("rejects invalid entidad with 400 / validation.entidad", async () => {
@@ -901,6 +919,10 @@ describe("GET /analytics/risk-summary", () => {
     const liveSql = liveArgs[liveArgs.length - 1] ?? "";
     expect(liveSql).toMatch(/FROM sesnsp_delitos_municipal\b/);
     expect(liveSql).not.toMatch(/mv_delitos_municipal_yearly/);
+    // Name + population join: municipios_2025 (2,478 keys) so the 9
+    // post-2020 keys carry nom_mun; a revert to censo_municipios fails.
+    expect(liveSql).toMatch(/LEFT JOIN municipios_2025 cm USING \(cve_mun\)/);
+    expect(liveSql).not.toMatch(/\bcenso_municipios\b/);
   });
 
   // Audit W2 (2026-05-05): symmetric malformed-JSON coverage with the other
@@ -1052,7 +1074,8 @@ describe("GET /analytics/risk-trend", () => {
     expect(seriesSql).toMatch(/cve_mun = '14039'/);
     expect(seriesSql).toMatch(/sesnsp_delitos_municipal\b/);
     expect(seriesSql).toMatch(/GROUP BY ano, mes/);
-    expect(seriesSql).toMatch(/FROM censo_municipios/);
+    expect(seriesSql).toMatch(/FROM municipios_2025\b/);
+    expect(seriesSql).not.toMatch(/\bcenso_municipios\b/);
     // Sub-statements are embedded without their terminating semicolons.
     expect(seriesSql.trim().slice(0, -1)).not.toContain(";");
   });
@@ -1203,7 +1226,8 @@ describe("GET /analytics/locust-ageb", () => {
     expect(agebSql).toContain("c.cvegeo >= '14039' AND c.cvegeo < '14040'");
     expect(agebSql).not.toMatch(/LEFT\(c\.cvegeo/);
     expect(agebSql).toMatch(/json_build_object\('agebs', \(SELECT/);
-    expect(agebSql).toMatch(/FROM censo_municipios/);
+    expect(agebSql).toMatch(/FROM municipios_2025\b/);
+    expect(agebSql).not.toMatch(/\bcenso_municipios\b/);
     expect(agebSql).toMatch(/FROM censo_ageb c/);
     expect(agebSql).toMatch(/LEFT JOIN coneval_grs_ageb r/);
     expect(agebSql).toMatch(/ORDER BY t\.cvegeo/);
@@ -1312,6 +1336,10 @@ describe("GET /analytics/mortality-summary", () => {
     expect(sql).not.toMatch(/LEFT\(m\.cve_mun, 2\)/);
     expect(sql).toMatch(/m\.ano = 2023/);
     expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
+    // Name + population join: municipios_2025 (2,478 keys) so the 9
+    // post-2020 keys carry nom_mun; a revert to censo_municipios fails.
+    expect(sql).toMatch(/LEFT JOIN municipios_2025 cm USING \(cve_mun\)/);
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
     // Audit #60: primary-year check against the same MV.
     expect(sql).toMatch(/HAVING SUM\(total_defunciones\) >= 100000/);
     expect(sql).toContain(
@@ -1461,6 +1489,10 @@ describe("GET /analytics/mortality-summary", () => {
     const liveSql = liveArgs[liveArgs.length - 1] ?? "";
     expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
     expect(liveSql).not.toMatch(/mv_mortalidad_municipal_yearly/);
+    // Name + population join: municipios_2025 (2,478 keys) so the 9
+    // post-2020 keys carry nom_mun; a revert to censo_municipios fails.
+    expect(liveSql).toMatch(/LEFT JOIN municipios_2025 cm USING \(cve_mun\)/);
+    expect(liveSql).not.toMatch(/\bcenso_municipios\b/);
     // Audit W3 (2026-05-05): pin the live SQL's filter shape so future
     // edits can't drift from the mat-view's FILTER aggregation. If these
     // diverge, the fallback path returns different numbers than the
@@ -1609,7 +1641,8 @@ describe("GET /analytics/mortality-trend", () => {
     expect(sql).toMatch(/mv_mortalidad_municipal_yearly/);
     expect(sql).toMatch(/json_build_object\('series', \(WITH primary_years/);
     expect(sql).toMatch(/'meta', \(SELECT/);
-    expect(sql).toMatch(/FROM censo_municipios/);
+    expect(sql).toMatch(/FROM municipios_2025\b/);
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
   });
 
   it("serves only primary years, dropping late-registration lag rows (audit #60)", async () => {
@@ -1727,7 +1760,8 @@ describe("GET /analytics/mortality-trend", () => {
     const liveArgs = mockExec.mock.calls[1]?.[1] as string[];
     const liveSql = liveArgs[liveArgs.length - 1] ?? "";
     expect(liveSql).toMatch(/FROM inegi_edr_defunciones_raw\b/);
-    expect(liveSql).toMatch(/FROM censo_municipios/);
+    expect(liveSql).toMatch(/FROM municipios_2025\b/);
+    expect(liveSql).not.toMatch(/\bcenso_municipios\b/);
     expect(liveSql).toMatch(/ent_resid = '09'/);
     expect(liveSql).toMatch(/mun_resid = '007'/);
     // Audit #60: same primary-year floor on the live path.
@@ -5251,7 +5285,7 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
     expect(body.assets.vph_hmicro).toBeNull();
   });
 
-  it("emits FROM censo_municipios + literal cve_mun in WHERE", async () => {
+  it("emits FROM municipios_2025 + literal cve_mun in WHERE", async () => {
     mockExec.mockReturnValue(JSON.stringify([]));
     const app = createServer(CONFIG);
     const res = await app.request("/analytics/municipio-detail?cve_mun=20067", {
@@ -5260,13 +5294,29 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
     expect(res.status).toBe(404);
     const args = mockExec.mock.calls[0]?.[1] as string[] | undefined;
     const sql = args?.[args.length - 1] ?? "";
-    expect(sql).toContain("FROM censo_municipios cm");
+    expect(sql).toContain("FROM municipios_2025 cm");
     expect(sql).toContain("WHERE cm.cve_mun = '20067'");
     // Pin that the muni-only education detail cols are SELECTed (drift
     // guard: a future SELECT-list cleanup must not silently drop them).
     expect(sql).toContain("p15pri_in");
     expect(sql).toContain("p15sec_co");
     expect(sql).toContain("vph_hmicro");
+  });
+
+  // EIC recon §3: the 9 municipios created after Censo 2020 (24059 Villa de
+  // Pozos, ...) 404'd while the driver was censo_municipios. Pin the exact
+  // relation: a revert to censo_municipios fails here.
+  it("drives from municipios_2025 (2,478 keys), never censo_municipios", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=24059", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toMatch(/\bFROM municipios_2025 cm\s+LEFT JOIN cnbv_panorama_municipal cp\b/);
+    expect(sql).toContain("WHERE cm.cve_mun = '24059'");
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
   });
 
   it("emits Cache-Control + Vary headers on success", async () => {
@@ -8404,6 +8454,20 @@ describe("GET /analytics/locust-muni", () => {
     // (A `'00'` mention inside a doc-comment is allowed; the SQL itself
     // must not.)
     expect(sql).not.toMatch(/WHERE sector = '00'/);
+  });
+
+  // EIC recon §3: the anchor decides which municipios exist in the payload.
+  // censo_municipios dropped the 9 post-2020 keys (24059 Villa de Pozos:
+  // 2,320 DENUE rows). A revert to censo_municipios fails here.
+  it("anchors on municipios_2025 (2,478 keys), never censo_municipios", async () => {
+    mockExec.mockReturnValue("[]");
+    const app = createServer(CONFIG);
+    await app.request("/analytics/locust-muni?entidad=24", { headers: AUTH });
+    const argList = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = argList[argList.length - 1] ?? "";
+    expect(sql).toMatch(/\bFROM municipios_2025 cm\s+LEFT JOIN denue_agg d ON d\.cve_mun = cm\.cve_mun/);
+    expect(sql).toContain("WHERE cm.entidad = '24'");
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
   });
 
   it("rejects invalid entidad with 400 / validation.entidad", async () => {

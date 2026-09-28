@@ -883,14 +883,14 @@ export function extractRows(
             : Number(popRaw);
       const canNormalize = popCol !== null && Number.isFinite(pop) && pop > 0;
 
-      // Drop rows with no X identifier. These typically arise from a
-      // source row whose cve_mun isn't in the anchor catalog (e.g. INEGI
-      // censo 2020 doesn't yet include post-2020 munis like 02007 San
-      // Felipe, BC — SESNSP reports its crimes separately and the LEFT
-      // JOIN on censo_municipios yields null for nom_mun + pobtot).
-      // Rendering them as empty-name bars under a "per 1k" label is
-      // doubly wrong: the bar has no label AND the value isn't actually
-      // normalized.
+      // Drop rows with no X identifier. These arise from a source row
+      // whose cve_mun isn't in the anchor catalog. The backend joins
+      // municipios_2025 (2,478 keys), so the 9 post-2020 munis (e.g.
+      // 02007 San Felipe, BC) now carry nom_mun, but their pobtot is
+      // NULL (INEGI censo 2020 predates them) — the per-capita rule
+      // below drops those rows when normalizing. Rendering an empty-name
+      // bar under a "per 1k" label is doubly wrong: the bar has no label
+      // AND the value isn't actually normalized.
       const xIsEmpty =
         xv === null ||
         xv === undefined ||

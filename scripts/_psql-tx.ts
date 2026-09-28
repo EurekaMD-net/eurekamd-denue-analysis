@@ -183,6 +183,7 @@ export const CENSO_VIEWS = [
   "censo_municipios",
   "censo_entidades",
   "censo_localidades",
+  "municipios_2025",
 ] as const;
 
 /**
@@ -249,7 +250,10 @@ export function perfMatviewSql(name: string): string {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
-/** migrate-censo-views.sql verbatim: censo_municipios, censo_localidades, censo_entidades. */
+/**
+ * migrate-censo-views.sql verbatim: censo_municipios, censo_localidades,
+ * censo_entidades, municipio_bridge_2025 (seed upsert) and municipios_2025.
+ */
 export function censoViewsSql(): string {
   return readScriptFile("migrate-censo-views.sql");
 }
