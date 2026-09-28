@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { Map as MapInstance } from "maplibre-gl";
 import { MapShell } from "../map/MapShell";
 import { ClusterOverlay } from "../map/ClusterOverlay";
+import { CorridorTool } from "../map/CorridorTool";
+import { CorridorPanel } from "../map/CorridorPanel";
 import { EstablishmentCard } from "../map/EstablishmentCard";
 import { FilterPanel } from "../components/FilterPanel";
 import { BivariateLegend } from "../components/BivariateLegend";
@@ -45,6 +47,28 @@ export function MapMode() {
   const entidad = useUiStore((s) => s.entidad);
   const sector = useUiStore((s) => s.sector);
   const setSector = useUiStore((s) => s.setSector);
+  const corridorOpen = useUiStore((s) => s.corridor.open);
+
+  // Stable identity: MapShell recreates the map when this prop changes.
+  // In corridor draw mode a click is a vertex, not a detail request.
+  const handlePointClick = useCallback((clee: string) => {
+    if (!useUiStore.getState().corridor.drawing) setSelectedClee(clee);
+  }, []);
+
+  // "Corredor" opens the panel in draw mode, seeding the SCIAN prefix
+  // from the active sector filter; closing drops the corridor (ephemeral).
+  const toggleCorridor = () => {
+    const st = useUiStore.getState();
+    if (st.corridor.open) {
+      st.resetCorridor();
+      return;
+    }
+    st.patchCorridor({
+      open: true,
+      drawing: true,
+      ...(st.sector ? { clasePrefix: st.sector } : {}),
+    });
+  };
 
   const selectedBundle = useMemo<ScianBundle | null>(
     () =>
@@ -289,6 +313,20 @@ export function MapMode() {
           <BasemapToggle current={basemap} set={setBasemap} />
           <span className="h-4 w-px bg-slate-800" />
           <FilterStatus entidad={entidad} sector={sector} />
+          <span className="h-4 w-px bg-slate-800" />
+          <button
+            type="button"
+            onClick={toggleCorridor}
+            aria-pressed={corridorOpen}
+            title="Densidad de unidades económicas a lo largo de una calle o trazo"
+            className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+              corridorOpen
+                ? "border-amber-500 bg-amber-600 text-amber-50"
+                : "border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            }`}
+          >
+            Corredor
+          </button>
           <div className="flex-1" />
           <span className="font-mono text-[10px] text-slate-600">
             {entidad || sector
@@ -300,10 +338,12 @@ export function MapMode() {
           <MapShell
             basemap={basemap}
             onMapLoad={setMap}
-            onPointClick={setSelectedClee}
+            onPointClick={handlePointClick}
             sectorOverride={bundleSectorOverride}
           />
           <ClusterOverlay map={map} />
+          <CorridorTool map={map} />
+          {corridorOpen && <CorridorPanel map={map} />}
           <EstablishmentCard
             clee={selectedClee}
             onClose={() => setSelectedClee(null)}

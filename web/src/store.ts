@@ -4,8 +4,35 @@ import type { QueryClient } from "@tanstack/react-query";
 import { supabase } from "./lib/supabase";
 import { clearAllThreadIndexes } from "./lib/sage-threads-store";
 import { removeStoredSupabaseSession } from "./lib/auth-storage";
+import type { CorridorState, Position } from "./api/corridor-types";
 
 export type Mode = "map" | "locust";
+
+/**
+ * Corridor slice start state. Literal values (not imported constants) so
+ * the index chunk never pulls in api/corridor-types' zod schemas; a test
+ * pins them to BUFFER_DEFAULT_M / FARMACIAS_PREFIX.
+ */
+export const INITIAL_CORRIDOR: CorridorState = {
+  open: false,
+  drawing: false,
+  points: [],
+  streetLines: null,
+  streetName: null,
+  bufferM: 100,
+  clasePrefix: "4641",
+  result: null,
+  status: "idle",
+  error: null,
+  streetQuery: "",
+  streetMatches: [],
+  streetTruncated: false,
+  streetStatus: "idle",
+  streetMessage: null,
+};
+
+/** Mirrors MAX_VERTICES in api/corridor-types (API cap). */
+const CORRIDOR_MAX_POINTS = 5000;
 
 export interface UiState {
   /**
@@ -61,6 +88,18 @@ export interface UiState {
 
   sector: string | null;
   setSector: (scian: string | null) => void;
+
+  /** Corridor-density tool (MapMode). Ephemeral: not URL-synced. */
+  corridor: CorridorState;
+  patchCorridor: (patch: Partial<CorridorState>) => void;
+  /** Append a drawn vertex; switches the corridor back to a drawn line. */
+  addCorridorPoint: (p: Position) => void;
+  popCorridorPoint: () => void;
+  /** Load a street match as the corridor (replaces drawn points). */
+  setCorridorStreet: (name: string, lines: Position[][]) => void;
+  /** Drop the geometry and its result; keeps panel settings. */
+  clearCorridor: () => void;
+  resetCorridor: () => void;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -97,8 +136,9 @@ export const useUiStore = create<UiState>((set, get) => ({
       }
     }
     get().abortRegistry.clear();
-    // 3. Drop the session in the store so LoginGate re-shows.
-    set({ session: null });
+    // 3. Drop the session in the store so LoginGate re-shows. The corridor
+    //    result is the previous user's data too.
+    set({ session: null, corridor: INITIAL_CORRIDOR });
     // 4. Forget the Sage question history so the next person on a shared
     //    browser cannot read it from localStorage. Audit #197.
     clearAllThreadIndexes();
@@ -141,4 +181,50 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   sector: null,
   setSector: (scian) => set({ sector: scian === "" ? null : scian }),
+
+  corridor: INITIAL_CORRIDOR,
+  patchCorridor: (patch) => set((s) => ({ corridor: { ...s.corridor, ...patch } })),
+  addCorridorPoint: (p) =>
+    set((s) => {
+      const c = s.corridor;
+      const base = c.streetLines ? [] : c.points;
+      if (base.length >= CORRIDOR_MAX_POINTS) return {};
+      return {
+        corridor: {
+          ...c,
+          points: [...base, p],
+          streetLines: null,
+          streetName: null,
+        },
+      };
+    }),
+  popCorridorPoint: () =>
+    set((s) =>
+      s.corridor.points.length === 0
+        ? {}
+        : { corridor: { ...s.corridor, points: s.corridor.points.slice(0, -1) } },
+    ),
+  setCorridorStreet: (name, lines) =>
+    set((s) => ({
+      corridor: {
+        ...s.corridor,
+        points: [],
+        streetLines: lines,
+        streetName: name,
+        drawing: false,
+      },
+    })),
+  clearCorridor: () =>
+    set((s) => ({
+      corridor: {
+        ...s.corridor,
+        points: [],
+        streetLines: null,
+        streetName: null,
+        result: null,
+        status: "idle",
+        error: null,
+      },
+    })),
+  resetCorridor: () => set({ corridor: INITIAL_CORRIDOR }),
 }));

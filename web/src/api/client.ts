@@ -17,6 +17,8 @@ export class ApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly code?: string,
+    /** Seconds from a numeric Retry-After header, when the response had one. */
+    public readonly retryAfterS?: number,
   ) {
     super(message);
     this.name = "ApiError";
@@ -143,10 +145,12 @@ export async function apiFetch(
     } catch {
       // non-JSON error body — fall back to statusText
     }
+    const retryAfter = Number(res.headers.get("Retry-After") ?? NaN);
     throw new ApiError(
       body.error ?? res.statusText ?? `HTTP ${res.status}`,
       res.status,
       body.code,
+      Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : undefined,
     );
   }
   return res;
