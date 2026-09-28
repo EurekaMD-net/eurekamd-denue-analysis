@@ -154,8 +154,8 @@ Segunda corrida nacional con `ops/denue-refresh.sh` (unidad systemd transitoria,
 | Métrica | Valor | Notas |
 | --- | --- | --- |
 | Registros extraídos/cargados 05/2026 | **6,138,075** | `data/state/pipeline-state.json`; +40,394 vs 11/2025. Tlaxcala 24,711 → 99,366 (la corrida de mayo quedó corta ahí) |
-| Filas en Supabase (antes de la limpieza) | 7,284,769 | 6,138,075 de esta edición + 1,146,694 CLEE que ya no existen en 05/2026 |
-| CLEE obsoletos | 1,146,694 (18.8 %) | INEGI **re-asigna el CLEE** entre ediciones (~93 % tienen el mismo `denue_id` en una fila nueva); no es churn real. Limpieza: `ops/denue-stale-cleanup.sh report → backup → apply` (operador). Detalle en [`docs/DENUE-REFRESH.md`](docs/DENUE-REFRESH.md) |
+| Filas en Supabase | **6,138,075** (tras la limpieza del 2026-09-28) | Antes de la limpieza: 7,284,769 = 6,138,075 de esta edición + 1,146,694 CLEE que ya no existen en 05/2026 |
+| CLEE obsoletos | 1,146,694 (18.8 %) | INEGI **re-asigna el CLEE** entre ediciones (~93 % tienen el mismo `denue_id` en una fila nueva); no es churn real. Limpieza ejecutada 2026-09-28 03:55 UTC con `ops/denue-stale-cleanup.sh` (32 transacciones con aserción de conteo, VACUUM, mat-views; respaldo `data/state/denue-stale-2026-09.rows.csv.gz`). Detalle en [`docs/DENUE-REFRESH.md`](docs/DENUE-REFRESH.md) |
 | Post-pasos | geom → backfill-ageb → VACUUM → mat-views | 19:33–19:59 UTC; `geom` null = 0, `ageb` null = 18 filas nuevas |
 
 ### Validación end-to-end (2026-05-04)
