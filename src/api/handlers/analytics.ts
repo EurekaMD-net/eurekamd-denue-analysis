@@ -30,7 +30,7 @@
  *     fallback to sesnsp_delitos_municipal aggregation.
  *
  *   GET /analytics/risk-trend?cve_mun=NNNNN
- *     Monthly SESNSP time series (~135 points 2015-01..2026-03) for one
+ *     Monthly SESNSP time series (~140 points 2015-01..2026-08) for one
  *     municipio. Reads sesnsp_delitos_municipal directly via cve_mun btree.
  *
  * Caching: national queries are extremely static (max-age=3600 = 1 hour).

@@ -359,10 +359,10 @@ Operador descargó los archivos a través del navegador y los pasó a `raw/` y `
 - **Loader:** `scripts/load-sesnsp.ts` (~370 L, 15 mocked tests).
 - **Scope:** sólo **Delitos Municipal**. Los otros tres datasets (Delitos Estatal + Víctimas Estatal/Municipal) se descartaron 2026-05-05 — Estatal es agregable desde Municipal y la segmentación demográfica de Víctimas no está en roadmap. Re-habilitar es agregar una entrada en `RNID_VARIANTS`; el resto del scaffolding (DDL/MV condicional con `hasMunicipio`/`hasDemographics`) se preserva.
 - **Inputs:** uno o más archivos en `raw/sesnsp/` cuyo nombre comience con `RNID-Delitos_Municipal`:
-  - `RNID-Delitos_Municipal-2026-mar2026.zip` (año actual, ~2 MB)
+  - `RNID-Delitos_Municipal-2026-ago2026.zip` (año actual, ~2 MB; desde 2026-09 SESNSP publica vía SharePoint, UTF-8 con BOM, y los meses no publicados vienen como `0`). El nombre canónico `-YYYY-<mes>YYYY.zip` (`ene`…`dic`) define el corte: el loader exige que los meses posteriores estén vacíos o en `0` y los pone en NULL antes de construir las MVs (2026-09-28). El ZIP anterior (`mar2026`) está en `raw/_retired/sesnsp/`.
   - `RNID-Delitos_Municipal-Historical-2015-2025.csv` (histórico 2015-2025, ~362 MB; ya extraído del ZIP que ship'eó SESNSP — el CSV interno está en una subcarpeta dentro del archivo original, así que el operador tuvo que extraerlo a mano)
   - El loader detecta el caso accent-en-CSV-name (descubierto en las variantes Víctimas que ya no usamos) consultando el índice del ZIP en vez de asumir `.zip → .csv`.
-- **Pipeline por archivo:** `unzip -p` → `iconv WINDOWS-1252 → UTF-8` → reescribir header a snake_case (vía `HEADER_MAP` con keys ya normalizadas — incluye `año`, `cve._municipio`, `bien_jurídico_afectado`, `sexo`, `rango_de_edad`) → normalizar line endings CRLF→LF → `docker cp` → `\copy`.
+- **Pipeline por archivo:** `unzip -p` → detección de encoding por archivo (muestra de 4 MB; UTF-8 válido pasa sin conversión, si no `iconv WINDOWS-1252 → UTF-8`; muestra vacía = error) → reescribir header a snake_case (vía `HEADER_MAP` con keys ya normalizadas — incluye `año`, `cve._municipio`, `bien_jurídico_afectado`, `sexo`, `rango_de_edad`) → normalizar line endings CRLF→LF → `docker cp` → `\copy`.
 - **Scaffolding para Víctimas preservado** (no usado actualmente): `RnidVariant.hasDemographics` añade `Sexo` + `Rango de edad` al DDL/MV. Reactivar = una sola entrada nueva en `RNID_VARIANTS`.
 - **MV long-format `sesnsp_delitos_municipal`:** unpivot de las 12 columnas mensuales vía `CROSS JOIN LATERAL (VALUES ...)`. Deriva `cve_mun = LPAD(cve_municipio, 5, '0')` — SESNSP serializa `entidad+municipio` sin zero-pad de la entidad (AGS municipio 001 ship'ea como `1001`, no `01001`). Índices: `(cve_mun)`, `(ano, mes)`, `(subtipo_delito)`.
 - **Multi-input por variante:** `findVariantInputs(dir, basename)` retorna todos los `<basename>*.{zip,csv}` en orden alfabético. La variante `RNID-Delitos_Municipal` recibe DOS archivos — el ZIP del año actual + un CSV histórico 2015–2025 — que se cargan en la misma raw table tras un único DROP+CREATE.
@@ -373,7 +373,8 @@ Operador descargó los archivos a través del navegador y los pasó a `raw/` y `
   | ---------------------- | --------: | ---------: |
   | RNID-Delitos_Municipal | 2,849,134 | 31,614,348 |
 
-- **Cobertura temporal:** **2015–2026 Mar** (12 años, ~22.2 M delitos eventos totales). Distribución anual de eventos (suma de la columna `count`):
+- **Cobertura temporal:** **2015–2026 Ago** (12 años, ~23.1 M delitos eventos totales; carga 2026-09-28, long-form 33,045,048 filas). Distribución anual de eventos (suma de la columna `count`):
+- **Diferido (auditoría R2 2026-09-28):** (a) la limpieza del sample `encoding-probe.sample` no está cubierta por test (vive en el tempDir de la carga, que se borra al final) — trigger: cualquier cambio en `detectEncoding`; (b) un ZIP con mes equivocado en el nombre (`dic` con datos hasta agosto) carga meses en cero sin aviso — trigger: primer archivo de diciembre; (c) mensajes: "empty or unreadable sample" también para un CSV sólo-header, y la línea "later months … are blanked" se imprime para `dic` aunque no corte nada.
   - 2015: 1.66M • 2016: 1.76M • 2017: 1.94M • 2018: 1.99M • 2019: 2.07M • 2020: 1.84M (efecto pandémico) • 2021: 2.04M • 2022: 2.14M • 2023: 2.17M • 2024: 2.09M • 2025: 2.02M • 2026 Q1: 0.48M
   - Filas long-form saltan de 2.27M (2015–2016) a ~2.91M (2017+) por la introducción de subtipos/modalidades adicionales en la nueva metodología SESNSP.
 

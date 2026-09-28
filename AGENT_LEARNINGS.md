@@ -86,3 +86,9 @@
 - **Mistake:** after the merge I handed the operator five copy-paste DB/restart lines the session itself could run; the user's correction: "Stop giving me anything you could be doing" → when the user says merge/restart/apply, run it and verify; hand back only what needs a browser, a phone, or credentials the session cannot hold.
 - **Mistake:** the live probe guessed `/health` on a guessed port (404) → read `ops/denue-analyzer.service` / the Caddyfile for the real port (3030) and hit a real route first.
 - **Better:** the post-load proof is one read-only line covering the new views (year/month range), the untouched MVs (`periodo`), `has_table_privilege` per role, and the ledger row; then the ledger write via `record-dataset-version.ts --apply`.
+
+## 2026-09-28 — SESNSP ene–ago 2026 load (loader change 842dbfb)
+- **Mistake:** planned the SESNSP refresh as "drop the file, re-run the loader" from the freshness doc → the new edition had changed encoding (UTF-8 BOM vs WINDOWS-1252) and sentinel (`0` instead of empty for unpublished months). The check that caught it: `file -` on the first MB + a csv parse counting empty/zero/other per month column, BEFORE any DB call.
+- **Avoid:** trusting a source's format to be stable across editions — a new publisher channel (SharePoint) means a new export path; verify bytes against every assumption the loader hardcodes (encoding, sentinels, header, line endings).
+- **Better:** derive data cutoffs from the canonical file name the loader already enforces, assert the assumption in SQL inside the load transaction (DO block, rollback on violation), and pin SQL predicates with tests that evaluate them — substring tests left `IF n = 0` → `IF false` alive (auditor mutation check).
+- **Better:** anonymous SharePoint share links redirect to a Microsoft login; do not retry with UAs — record the link in the doc and hand it to the operator.

@@ -11,7 +11,7 @@ the OSM finding (section 3) was re-checked directly.
 | Priority | Dataset | Loaded | Available now | Action |
 | --- | --- | --- | --- | --- |
 | ~~P0~~ DONE 09-28 | OSM road aggregates | **reloaded 2026-09-28 from the local May 24 extract** (81,451 AGEBs; the table had been absent) | Geofabrik 2026-09-27 (646 MB) | The May load had succeeded; most likely the May 24 integration test dropped it 8 min later (unqualified `DROP` under a scratch `search_path`, see section 3; fixed 09-28). A fresh Geofabrik pull still needs operator approval |
-| P1 | SESNSP incidencia | through 2026-03 | enero–agosto 2026 (published 09-18, SharePoint) | Manual browser download, rename, re-run loader |
+| ~~P1~~ done 09-28 | SESNSP incidencia | 2015–2026 ago (33,045,048 long-form rows; loaded 2026-09-28 21:5x UTC) | enero–agosto 2026 (published 09-18, SharePoint) | Loaded 2026-09-28 after a loader change (`842dbfb`: per-input encoding detection, month cutoff from the ZIP name). Next drop: browser download, save under the canonical name, run the loader, then re-run `scripts/api-role.sql`. Delitos municipal link (resolved 09-28; anonymous fetch redirects to a Microsoft login, so browser only): `https://sspcgob-my.sharepoint.com/:u:/g/personal/cni_sspc_gob_mx/IQAUYyl5NobOT4SHGj0O54aJATRtcR7qsQmNHWj_EOOzP-M?e=Eb940N` → save as `raw/sesnsp/RNID-Delitos_Municipal-2026-ago2026.zip` |
 | P1 | CLUES | 2026-04 | 2026-08 (26.5 MB xlsx, 09-23) | xlsx→csv, re-run loader |
 | P1 | COFEPRIS farmacias | PDF 1020177 (licences to 2025-07) | PDF 1079227 dated 2026-05-15 | PDF→csv, geocode, loader; fix URL in loader header |
 | ~~P2~~ done 09-28 | SEDATU financiamientos | 2025 full year + 2026 ene–jun (`_2026` views, 146,537 rows; MVs still read 2025) | same | Loaded 2026-09-28 20:4x UTC via `--year=2026`; promote with `--mv-source-year=2026` once the full year is published (`docs/SNIIV-2026-H1.md`) |
@@ -117,8 +117,8 @@ the OSM finding (section 3) was re-checked directly.
 ## 4. Suggested order
 
 1. ~~OSM: diagnose + retry from local files (no download).~~ Done 09-28.
-2. SESNSP ene–ago 2026, CLUES 2026-08, COFEPRIS 2026-05: three loader
-   re-runs with manual pre-steps; no code change except the COFEPRIS URL.
+2. ~~SESNSP ene–ago 2026~~ (done 09-28; needed a loader change: UTF-8 input + zero-padded unpublished months), CLUES 2026-08, COFEPRIS 2026-05: loader
+   re-runs with manual pre-steps; no code change expected except the COFEPRIS URL.
 3. ~~Parametrise the SEDATU and CNBV loaders by year; load 2026 H1 next to
    2025.~~ Done 09-28: `--year` / `--mv-source-year`, MVs stay on the latest
    complete year (`docs/SNIIV-2026-H1.md`).
