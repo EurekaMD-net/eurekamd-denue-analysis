@@ -226,6 +226,31 @@ describe("GET /analytics/layers/values — query execution (audit P05/P08)", () 
     expect(mockExec).not.toHaveBeenCalled();
   });
 
+  // EIC recon §3: the muni key universe decides which municipios can carry
+  // values. censo_municipios dropped the 9 post-2020 keys (24059 Villa de
+  // Pozos, ...). A revert to censo_municipios fails the exact-relation match.
+  it("sources the muni key universe from municipios_2025, never censo_municipios", async () => {
+    mockExec.mockReturnValue("{}");
+    const app = createServer(CONFIG);
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=pobreza_pct&entidad=24",
+      { headers: AUTH },
+    );
+    expect(lastSql()).toContain(
+      "keys AS (SELECT DISTINCT cve_mun AS k FROM municipios_2025 WHERE LEFT(cve_mun, 2) = '24')",
+    );
+    expect(lastSql()).not.toMatch(/\bcenso_municipios\b/);
+    mockExec.mockClear();
+    await app.request(
+      "/analytics/layers/values?grain=muni&layers=irs_indice",
+      { headers: AUTH },
+    );
+    expect(lastSql()).toContain(
+      "keys AS (SELECT DISTINCT cve_mun AS k FROM municipios_2025)",
+    );
+    expect(lastSql()).not.toMatch(/\bcenso_municipios\b/);
+  });
+
   it("sources the AGEB key universe from cve_ent, no DISTINCT scan (#102)", async () => {
     mockExec.mockReturnValue("{}");
     const app = createServer(CONFIG);

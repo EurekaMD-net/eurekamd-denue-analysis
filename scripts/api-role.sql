@@ -61,6 +61,7 @@ BEGIN
     'inegi_edr_defunciones_raw',
     'calibrators_enigh_state',
     'calibrators_enoe_state',
+    'municipio_bridge_2025',
     -- materialized views
     'ce2024_municipal',
     'clues',
@@ -92,6 +93,7 @@ BEGIN
     'coneval_grs_ageb',
     'coneval_irs_municipal',
     'coneval_pobreza_municipal',
+    'municipios_2025',
     'sinba_morbidity_municipal'
   ]
   LOOP

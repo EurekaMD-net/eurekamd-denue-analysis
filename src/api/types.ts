@@ -1214,7 +1214,8 @@ export interface LocalityDetailResult {
 /**
  * Full demographic surface for a single municipio. Same nested category
  * shape as `LocalityDetailResult` but at muni grain — backed by
- * `censo_municipios` (one row per muni, all 287 ITER cols → ~50 cast).
+ * `municipios_2025` (`censo_municipios`, one row per muni, all 287 ITER cols
+ * → ~50 cast, plus the 9 post-2020 municipios with every census field NULL).
  *
  * Adds vs LocalityDetailResult: education detail breaks primaria/secundaria
  * incompleta vs completa, civil status, disability summary. Drops:

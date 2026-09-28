@@ -320,15 +320,18 @@ ${whereClause}
 // Base CTE that anchors the LEFT JOIN. Without this, sparse first
 // layers (e.g. cofepris_farmacias_by_municipio only covers munis with
 // licensed pharmacies) would drop munis that have values in subsequent
-// layers but not the first (R1 W7-perf).
+// layers but not the first (R1 W7-perf). The muni universe is
+// municipios_2025 (2,478 keys): censo_municipios lacks the 9 municipios
+// created after Censo 2020, whose DENUE / CLUES / SESNSP values the layers
+// already carry (docs/EIC-2025-RECON-2026-09-28.md §3).
 function baseCteForGrain(
   grain: LayerGrain,
   entidad: string | undefined,
 ): string {
   if (grain === "muni") {
     return entidad
-      ? `keys AS (SELECT DISTINCT cve_mun AS k FROM censo_municipios WHERE LEFT(cve_mun, 2) = '${entidad}')`
-      : `keys AS (SELECT DISTINCT cve_mun AS k FROM censo_municipios)`;
+      ? `keys AS (SELECT DISTINCT cve_mun AS k FROM municipios_2025 WHERE LEFT(cve_mun, 2) = '${entidad}')`
+      : `keys AS (SELECT DISTINCT cve_mun AS k FROM municipios_2025)`;
   }
   // AGEB: use ageb_polygons as the canonical universe. parseQuery requires
   // entidad for this grain (audit #25). Audit #102: filter on cve_ent and

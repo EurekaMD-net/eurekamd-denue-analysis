@@ -413,6 +413,9 @@ Read-only views available to Sage SQL (denue_sage role).
 #   AND cve_mun NOT LIKE '%999' AND cve_mun NOT LIKE '%998'.
 
 censo_municipios(cve_mun, entidad, mun, nom_mun, nom_ent, pobtot, pobfem, pobmas, p_60ymas, p_15ymas, p_18ymas, pea, pocupada, graproes, tvivhab, tvivpar, vph_inter, vph_autom, phog_ind, pob_afro, psinder, pder_imss, pder_iste, pder_segp, pafil_ipriv)
+municipios_2025(cve_mun, entidad, mun, nom_mun, nom_ent, is_new_2025, parent_cve_mun_2020, <every censo_municipios column>)
+  -- Canonical municipio universe: 2,478 keys (DENUE, CLUES, SESNSP, CE 2024 use them) = censo_municipios' 2,469 + 9 created 2019–2024 (is_new_2025). The 9 carry NULL census fields until EIC 2025 lands; parent_cve_mun_2020 (text[]) = their 2020 parent keys. List/count municipios from this, not censo_municipios.
+municipio_bridge_2025(cve_mun_2025, nom_mun_2025, cve_mun_2020_parent, nom_mun_2020_parent, decreto)
 coneval_pobreza_municipal(cve_mun, clave_entidad, entidad_federativa, municipio, poblacion, pobreza_pct, pobreza_personas, pobreza_extrema_pct, pobreza_moderada_pct, vulnerable_carencias_pct, vulnerable_ingreso_pct, no_pobre_no_vul_pct, carencia_rezago_edu_pct, carencia_acceso_salud_pct, carencia_seg_social_pct, carencia_calidad_vivienda_pct, carencia_serv_basicos_pct, carencia_alimentacion_pct, pob_lp_ingreso_pct)
 coneval_irs_municipal(cve_mun, cve_ent, entidad, municipio, pob_total, analfabeta_15ymas_pct, no_asisten_escuela_6a14_pct, edu_basica_incompleta_pct, sin_derechohab_salud_pct, viv_piso_tierra_pct, viv_sin_excusado_pct, viv_sin_agua_pct, viv_sin_drenaje_pct, viv_sin_electricidad_pct, irs_indice, irs_grado, irs_lugar_nacional)
 sinba_morbidity_municipal(cve_mun, anio, casos_dm2_promedio, casos_hta_promedio, casos_obesidad_promedio, clues_reportando)

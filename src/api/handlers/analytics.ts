@@ -532,7 +532,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.establecimientos DESC) FROM (
     i.irs_grado,
     i.irs_indice
   FROM e_counts e
-  LEFT JOIN censo_municipios cm ON cm.cve_mun = e.cve_mun
+  LEFT JOIN municipios_2025 cm ON cm.cve_mun = e.cve_mun
   LEFT JOIN clues_counts cc ON cc.cve_mun = e.cve_mun
   LEFT JOIN coneval_pobreza_municipal p ON p.cve_mun = e.cve_mun
   LEFT JOIN coneval_irs_municipal i ON i.cve_mun = e.cve_mun
@@ -644,8 +644,9 @@ export async function topSectorsByEntidadHandler(
 // /analytics/risk-summary?entidad=NN[&ano=YYYY&baseline_ano=YYYY]
 //
 // Per-municipio risk profile for one state. Reads mv_delitos_municipal_yearly
-// (~28k rows total, ~50-500 rows per state) joined to censo_municipios for
-// population normalization. Returns one row per municipio with current-year
+// (~28k rows total, ~50-500 rows per state) joined to municipios_2025 for
+// name + population normalization (the 9 post-2020 municipios get their
+// name; population, and so the per-1k rate, stays NULL). Returns one row per municipio with current-year
 // totals across high-signal subtipos plus a percent-change vs `baseline_ano`.
 //
 // Defaults anchor to the latest fully-reported year in the data (2025) to
@@ -683,7 +684,7 @@ WITH cur AS (
   WHERE ${entidadCveMunRangeSql("cve_mun", entidad)} AND ano = ${currentAno}
     -- Audit C1-coherence round-1 closure 2026-05-10: SESNSP publishes
     -- catch-all rows where MUN3 = '998' (federal-grain) or '999'
-    -- (state-grain "no especificado"). They have no censo_municipios
+    -- (state-grain "no especificado"). They have no municipios_2025
     -- match and surface as ghost rows with municipio=null but non-null
     -- delito counts. Filter them out at the CTE.
     AND cve_mun !~ '99[89]$'
@@ -719,7 +720,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
     END                                                AS delitos_change_pct
   FROM cur
   LEFT JOIN baseline b USING (cve_mun)
-  LEFT JOIN censo_municipios cm USING (cve_mun)
+  LEFT JOIN municipios_2025 cm USING (cve_mun)
 ) t;
 `;
 }
@@ -785,7 +786,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_delitos DESC NULLS LAST) FROM (
     END                                                AS delitos_change_pct
   FROM cur
   LEFT JOIN baseline b USING (cve_mun)
-  LEFT JOIN censo_municipios cm USING (cve_mun)
+  LEFT JOIN municipios_2025 cm USING (cve_mun)
 ) t;
 `;
 }
@@ -925,7 +926,7 @@ function municipioMetaSql(cveMun: string): string {
   return `
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT nom_mun AS municipio, pobtot AS poblacion
-  FROM censo_municipios
+  FROM municipios_2025
   WHERE cve_mun = '${cveMun}'
 ) t;
 `;
@@ -1182,7 +1183,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
       ELSE NULL
     END                                                AS tasa_infantil_per_1k
   FROM mv_mortalidad_municipal_yearly m
-  LEFT JOIN censo_municipios cm USING (cve_mun)
+  LEFT JOIN municipios_2025 cm USING (cve_mun)
   WHERE ${entidadCveMunRangeSql("m.cve_mun", entidad)} AND m.ano = ${ano}
 ) t
   )
@@ -1239,7 +1240,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.total_defunciones DESC NULLS LAST) FRO
       ELSE NULL
     END                                                AS tasa_infantil_per_1k
   FROM muni m
-  LEFT JOIN censo_municipios cm USING (cve_mun)
+  LEFT JOIN municipios_2025 cm USING (cve_mun)
 ) t
   )
 );
@@ -1394,7 +1395,7 @@ function mortalityTrendMetaSql(cveMun: string): string {
   return `
 SELECT json_agg(row_to_json(t)) FROM (
   SELECT nom_mun AS municipio, pobtot AS poblacion
-  FROM censo_municipios
+  FROM municipios_2025
   WHERE cve_mun = '${cveMun}'
 ) t;
 `;
@@ -3756,10 +3757,10 @@ SELECT json_agg(row_to_json(t)) FROM (
 /**
  * SELECT column list for the LEFT JOIN against `cnbv_panorama_municipal`.
  * All 76 view cols aliased with a `cp_` prefix to avoid collisions with the
- * censo_municipios cols in the same SELECT list.
+ * municipios_2025 cols in the same SELECT list.
  *
  * Grouped by family (matches view order). Defined as a string template
- * fragment so it composes into the existing `SELECT ... FROM censo_municipios
+ * fragment so it composes into the existing `SELECT ... FROM municipios_2025
  * LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = ...` pattern.
  */
 const CNBV_MUNI_COLS = `
@@ -4506,11 +4507,13 @@ function viviendaFinanciamientosFromRow(
  * GET /analytics/municipio-detail?cve_mun=NNNNN
  *
  * Single-municipio demographic surface — same nested-category shape as
- * /analytics/locality-detail but at muni grain. Backed by the v0.2.10
- * `censo_municipios` view (~50 cast cols from the 287-col ITER raw).
+ * /analytics/locality-detail but at muni grain. Driven by `municipios_2025`
+ * (the v0.2.10 `censo_municipios` view, ~50 cast cols from the 287-col ITER
+ * raw, plus the 9 municipios created 2019–2024).
  *
- * Returns 404 when the cve_mun isn't found in censo_iter (typo or
- * pre-2020 muni that didn't exist in 2020 census). Returns 200 with the
+ * Returns 404 when the cve_mun isn't one of the 2,478 2025 keys (typo or a
+ * dissolved muni). The 9 post-2020 municipios (e.g. 24059) return 200 with
+ * every census field NULL until EIC 2025 lands. Returns 200 with the
  * full nested structure otherwise — muni-grain almost never hits INEGI's
  * 'N/D' suppression sentinel (only locality rows do), so most fields
  * come back populated.
@@ -4555,7 +4558,7 @@ SELECT json_agg(row_to_json(t)) FROM (
     ${SICT_MUNI_COLS},
     ${SEDATU_MUNI_COLS},
     ${CNBV_CREDITO_MUNI_COLS}
-  FROM censo_municipios cm
+  FROM municipios_2025 cm
   LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
   LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun
   LEFT JOIN sedatu_financing_by_municipio sf ON sf.cve_mun = cm.cve_mun
@@ -4868,7 +4871,10 @@ SELECT json_agg(row_to_json(t)) FROM (
 //
 // Wide muni-grain row aggregator. One LEFT-JOIN-anchored row per muni,
 // pulling pre-aggregated columns from every source view/matview we have
-// at muni grain. Powers Locust mode: declaring a field via
+// at muni grain. The anchor is municipios_2025 (2,478 keys), so the 9
+// municipios created after Censo 2020 (24059 Villa de Pozos, ...) keep
+// their DENUE / CLUES / CE rows with NULL census fields instead of
+// dropping out (docs/EIC-2025-RECON-2026-09-28.md §3). Powers Locust mode: declaring a field via
 // `endpoints["locust-muni"]: <col>` makes it joinable with every other
 // field on this payload.
 //
@@ -4996,7 +5002,7 @@ SELECT json_agg(row_to_json(t) ORDER BY t.denue_establecimientos DESC NULLS LAST
     cn.pct_femenino AS cnbv_pct_femenino,
     sed.monto_total AS sedatu_monto_total,
     sed.acciones_total AS sedatu_acciones_total
-  FROM censo_municipios cm
+  FROM municipios_2025 cm
   LEFT JOIN denue_agg d ON d.cve_mun = cm.cve_mun
   LEFT JOIN clues_agg c ON c.cve_mun = cm.cve_mun
   LEFT JOIN coneval_pobreza_municipal p ON p.cve_mun = cm.cve_mun
