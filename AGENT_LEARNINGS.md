@@ -109,3 +109,11 @@
 - **Mistake:** in the `supabase/postgres:15.8.1.085` throwaway, `SET ROLE denue_sage` as `postgres` failed ("permission denied to set role"): `postgres` is not a superuser in that image, and `-U supabase_admin` asks for a password (peer auth also refuses `-U denue_sage`) → `GRANT <role> TO postgres;` first, then `SET ROLE <role>` to prove a grant.
 - **Avoid:** a view that another view depends on inside a loader's explicit-drop list: `DROP VIEW censo_entidades` fails once `municipios_2025` reads it. Every new dependent goes first in `load-censo.ts`'s drop list and into `CENSO_VIEWS`; the throwaway reload without that line reproduced the failure.
 - **Better:** when a migration must reuse DDL that a loader also re-runs, keep the canonical section in the loader's SQL file between `>>>`/`<<<` markers and have a test assert the migration's copy is byte-identical (psql fed over stdin cannot `\i` a host file).
+
+## 2026-09-29 — MG 2025 polygons alongside MG 2020 (step 3)
+
+- **Mistake (avoided by the implementer's throwaway test, worth keeping):** the brief specified `psql --single-transaction` for a 546 MB streamed PGDUMP → under `-1` psql COMMITS whatever it has read when stdin ends, so a loader killed mid-COPY commits a truncated table with exit 0 (proved: 2 rows committed). The check: kill the producer mid-stream on a throwaway and assert the table does not exist. Rule: for streamed loads emit `BEGIN;` yourself and write `COMMIT;` only after the in-transaction assertion block; never `-1`.
+- **Avoid:** running a grants script from a checkout that predates the tables it must list (`api-role.sql` starts with `REVOKE ALL ON ALL TABLES … FROM denue_api`, so main's copy strips grants the branch added) — the apply order is: load from the branch worktree → api-role from the branch → ledger → merge → api-role from main → restart. Same class as the 027-before-restart rule.
+- **Avoid:** a coordinator-written verification query with `EXCEPT … AND false UNION ALL` improvisation: it printed all 2,478 rows into the transcript. Write the anti-join once as `NOT EXISTS` and reuse the loader's own assertion numbers as the primary evidence.
+- **Better:** a `--force` reload of a table a live handler reads holds ACCESS EXCLUSIVE for the whole load window; document it as an outage window on the flag itself, not only in the brief.
+
