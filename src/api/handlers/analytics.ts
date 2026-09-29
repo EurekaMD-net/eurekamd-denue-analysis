@@ -4513,7 +4513,9 @@ function viviendaFinanciamientosFromRow(
  *
  * Returns 404 when the cve_mun isn't one of the 2,478 2025 keys (typo or a
  * dissolved muni). The 9 post-2020 municipios (e.g. 24059) return 200 with
- * every census field NULL until EIC 2025 lands. Returns 200 with the
+ * every Censo 2020 field NULL; their 2025 population comes in
+ * `population_2025` (EIC 2025 + margin of error, private dwellings only).
+ * Returns 200 with the
  * full nested structure otherwise — muni-grain almost never hits INEGI's
  * 'N/D' suppression sentinel (only locality rows do), so most fields
  * come back populated.
@@ -4557,12 +4559,25 @@ SELECT json_agg(row_to_json(t)) FROM (
     ${CNBV_MUNI_COLS},
     ${SICT_MUNI_COLS},
     ${SEDATU_MUNI_COLS},
-    ${CNBV_CREDITO_MUNI_COLS}
+    ${CNBV_CREDITO_MUNI_COLS},
+    e.pobtot AS pobtot_2025, e.pobfem AS pobfem_2025, e.pobmas AS pobmas_2025,
+    e.enumeracion_completa, e.muestra_insuficiente,
+    em.pobtot_se, em.pobtot_li90, em.pobtot_ls90, em.pobtot_cv
   FROM municipios_2025 cm
   LEFT JOIN cnbv_panorama_municipal cp ON cp.cve_mun = cm.cve_mun
   LEFT JOIN sict_traffic_by_municipio sv ON sv.cve_mun = cm.cve_mun
   LEFT JOIN sedatu_financing_by_municipio sf ON sf.cve_mun = cm.cve_mun
   LEFT JOIN cnbv_credito_by_municipio cc ON cc.cve_mun = cm.cve_mun
+  LEFT JOIN eic_2025_municipio e ON e.cve_mun = cm.cve_mun
+  LEFT JOIN LATERAL (
+    SELECT
+      max(m.pobtot) FILTER (WHERE m.medida = 'se')   AS pobtot_se,
+      max(m.pobtot) FILTER (WHERE m.medida = 'li90') AS pobtot_li90,
+      max(m.pobtot) FILTER (WHERE m.medida = 'ls90') AS pobtot_ls90,
+      max(m.pobtot) FILTER (WHERE m.medida = 'cv')   AS pobtot_cv
+    FROM eic_2025_municipio_moe m
+    WHERE m.cve_mun = cm.cve_mun
+  ) em ON true
   WHERE cm.cve_mun = '${cveMun}'
 ) t;
 `;
@@ -4600,6 +4615,7 @@ SELECT json_agg(row_to_json(t)) FROM (
       tvivhab: num(r.tvivhab),
       tvivpar: num(r.tvivpar),
     },
+    population_2025: population2025FromRow(r),
     religion: {
       pcatolica: num(r.pcatolica),
       pro_crieva: num(r.pro_crieva),
@@ -4673,6 +4689,36 @@ SELECT json_agg(row_to_json(t)) FROM (
   c.header("Cache-Control", "private, max-age=3600");
   c.header("Vary", "Authorization, X-Api-Key");
   return c.json(result);
+}
+
+/**
+ * Marshal the EIC 2025 LEFT JOIN (`eic_2025_municipio` + the pivoted
+ * `eic_2025_municipio_moe` pobtot rows) into `population_2025`, OR return
+ * `null` when the join missed. Miss signal: `enumeracion_completa IS NULL`.
+ * `pobtot_2025` is populated on every current row, but `enumeracion_completa`
+ * is structurally non-null (the view derives it from `nom_mun` with a
+ * regex), so it is the robust join-miss signal.
+ */
+function population2025FromRow(
+  r: Record<string, unknown>,
+): MunicipioDetailResult["population_2025"] {
+  const flag = (v: unknown): boolean | null =>
+    v === null || v === undefined ? null : v === true;
+  if (flag(r.enumeracion_completa) === null) return null;
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
+  return {
+    source: "EIC 2025",
+    pobtot: num(r.pobtot_2025),
+    pobfem: num(r.pobfem_2025),
+    pobmas: num(r.pobmas_2025),
+    pobtot_se: num(r.pobtot_se),
+    pobtot_li90: num(r.pobtot_li90),
+    pobtot_ls90: num(r.pobtot_ls90),
+    pobtot_cv: num(r.pobtot_cv),
+    enumeracion_completa: flag(r.enumeracion_completa),
+    muestra_insuficiente: flag(r.muestra_insuficiente),
+  };
 }
 
 /**

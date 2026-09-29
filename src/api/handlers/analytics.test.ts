@@ -5319,6 +5319,146 @@ describe("GET /analytics/municipio-detail (v0.2.10)", () => {
     expect(sql).not.toMatch(/\bcenso_municipios\b/);
   });
 
+  // EIC 2025: population_2025 sibling block (pobtot 2025 + MOE). The Censo
+  // 2020 `population` block stays untouched.
+  it("joins eic_2025_municipio + the 4 pivoted moe medidas", async () => {
+    mockExec.mockReturnValue(JSON.stringify([]));
+    const app = createServer(CONFIG);
+    await app.request("/analytics/municipio-detail?cve_mun=12001", {
+      headers: AUTH,
+    });
+    const args = mockExec.mock.calls[0]?.[1] as string[];
+    const sql = args[args.length - 1] ?? "";
+    expect(sql).toMatch(
+      /LEFT JOIN eic_2025_municipio e ON e\.cve_mun = cm\.cve_mun/,
+    );
+    expect(sql).toContain("FROM eic_2025_municipio_moe m");
+    expect(sql).toContain("WHERE m.cve_mun = cm.cve_mun");
+    for (const medida of ["se", "li90", "ls90", "cv"]) {
+      expect(sql).toContain(`m.medida = '${medida}'`);
+      expect(sql).toMatch(
+        new RegExp(
+          `FILTER \\(WHERE m\\.medida = '${medida}'\\)\\s+AS pobtot_${medida}\\b`,
+        ),
+      );
+    }
+    expect(sql).toContain("e.pobtot AS pobtot_2025");
+    expect(sql).toContain("e.enumeracion_completa, e.muestra_insuficiente");
+    expect(sql).not.toMatch(/\bcenso_municipios\b/);
+  });
+
+  it("maps EIC 2025 values into population_2025, Censo population unchanged", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "12001",
+          entidad: "12",
+          mun: "001",
+          nom_mun: "Acapulco de Juárez",
+          nom_ent: "Guerrero",
+          pobtot: "779566",
+          pobfem: "405000",
+          pobtot_2025: 767454,
+          pobfem_2025: 403384,
+          pobmas_2025: 364070,
+          pobtot_se: 43116.78,
+          pobtot_li90: 696413.11,
+          pobtot_ls90: 838494.89,
+          pobtot_cv: 5.62,
+          enumeracion_completa: false,
+          muestra_insuficiente: false,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=12001", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.population.pobtot).toBe(779566);
+    expect(body.population.pobfem).toBe(405000);
+    expect(body.population_2025).toEqual({
+      source: "EIC 2025",
+      pobtot: 767454,
+      pobfem: 403384,
+      pobmas: 364070,
+      pobtot_se: 43116.78,
+      pobtot_li90: 696413.11,
+      pobtot_ls90: 838494.89,
+      pobtot_cv: 5.62,
+      enumeracion_completa: false,
+      muestra_insuficiente: false,
+    });
+  });
+
+  it("keeps population_2025 for a sample-too-small (**) municipio with NULL indicators", async () => {
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "07125",
+          entidad: "07",
+          mun: "125",
+          nom_mun: "Honduras de la Sierra",
+          nom_ent: "Chiapas",
+          pobtot: "11650",
+          pobtot_2025: null,
+          pobfem_2025: null,
+          pobmas_2025: null,
+          pobtot_se: null,
+          pobtot_li90: null,
+          pobtot_ls90: null,
+          pobtot_cv: null,
+          enumeracion_completa: false,
+          muestra_insuficiente: true,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=07125", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.population.pobtot).toBe(11650);
+    expect(body.population_2025).not.toBeNull();
+    expect(body.population_2025?.pobtot).toBeNull();
+    expect(body.population_2025?.pobtot_cv).toBeNull();
+    expect(body.population_2025?.muestra_insuficiente).toBe(true);
+    expect(body.population_2025?.enumeracion_completa).toBe(false);
+  });
+
+  it("returns population_2025: null when the EIC join missed", async () => {
+    // 09015 has an EIC row live; the miss is synthetic (a fake key cannot pass CVE_MUN_RE).
+    mockExec.mockReturnValue(
+      JSON.stringify([
+        {
+          cve_mun: "09015",
+          entidad: "09",
+          mun: "015",
+          nom_mun: "Cuauhtémoc",
+          nom_ent: "Ciudad de México",
+          pobtot: "545884",
+          pobtot_2025: null,
+          pobfem_2025: null,
+          pobmas_2025: null,
+          pobtot_se: null,
+          pobtot_li90: null,
+          pobtot_ls90: null,
+          pobtot_cv: null,
+          enumeracion_completa: null,
+          muestra_insuficiente: null,
+        },
+      ]),
+    );
+    const app = createServer(CONFIG);
+    const res = await app.request("/analytics/municipio-detail?cve_mun=09015", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as MunicipioDetailResult;
+    expect(body.population.pobtot).toBe(545884);
+    expect(body.population_2025).toBeNull();
+  });
+
   it("emits Cache-Control + Vary headers on success", async () => {
     mockExec.mockReturnValue(
       JSON.stringify([

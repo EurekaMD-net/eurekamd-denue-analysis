@@ -1253,6 +1253,39 @@ export interface MunicipioDetailResult {
     tvivhab: number | null;
     tvivpar: number | null;
   };
+  /**
+   * INEGI Encuesta Intercensal 2025 (`eic_2025_municipio` + pobtot rows of
+   * `eic_2025_municipio_moe`). A SAMPLE SURVEY, sibling of the Censo 2020
+   * `population` block (which is unchanged).
+   *
+   * - `pobtot` / `pobfem` / `pobmas` count people in PRIVATE DWELLINGS ONLY:
+   *   not comparable 1:1 with `population.pobtot` (Censo counts all
+   *   dwellings, incl. collective).
+   * - `pobtot_se` = standard error; `pobtot_li90` / `pobtot_ls90` = the 90 %
+   *   confidence interval; `pobtot_cv` = coefficient of variation as a
+   *   PERCENTAGE (e.g. 4.95 = 4.95 %; > 15 % = low precision).
+   * - `enumeracion_completa` = fully enumerated municipio (`*`, MOE exactly
+   *   0).
+   * - `muestra_insuficiente` = sample too small (`**`); indicator columns
+   *   may be NULL. On `**` municipios `pobtot` is populated with
+   *   `pobtot_se` = 0, `pobtot_cv` = 0 and `pobtot_li90` = `pobtot_ls90` =
+   *   `pobtot` (source behaviour, verified on all 7).
+   *
+   * `null` when the municipio has no EIC row (should not happen for the
+   * 2,478 keys; the shape stays honest).
+   */
+  population_2025: {
+    source: "EIC 2025";
+    pobtot: number | null;
+    pobfem: number | null;
+    pobmas: number | null;
+    pobtot_se: number | null;
+    pobtot_li90: number | null;
+    pobtot_ls90: number | null;
+    pobtot_cv: number | null;
+    enumeracion_completa: boolean | null;
+    muestra_insuficiente: boolean | null;
+  } | null;
   religion: {
     pcatolica: number | null;
     pro_crieva: number | null;
