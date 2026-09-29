@@ -77,8 +77,9 @@
  *   RAW_HEADER_COLS (\copy maps by position) and every row's `ano` must equal
  *   --year (scripts/_sniiv-csv.ts). Every relation the run (re)creates gets
  *   postLoadGrants (strip anon / authenticated / trustr_app, re-grant the
- *   denue_sage SELECT that sage-role.sql allowlists). An MV rebuild still drops
- *   the denue_api SELECT: re-run scripts/api-role.sql after one.
+ *   denue_sage / denue_api SELECT that this checkout's sage-role.sql /
+ *   api-role.sql allowlist). Re-run scripts/api-role.sql after an MV rebuild
+ *   only if the MV is missing from that allowlist.
  *   Source URL for a year: https://sniiv.sedatu.gob.mx/api/ReporteAPI/GetDocumentoAnio/7/<YYYY>/1
  *
  * Usage:

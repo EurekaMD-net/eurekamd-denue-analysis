@@ -25,11 +25,12 @@
  *   python3 scripts/cofepris-pdf-to-csv.py raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf raw/cofepris/cofepris_1079227_2026-05.csv
  *   python3 scripts/cofepris-geocode.py raw/cofepris/cofepris_1079227_2026-05.csv raw/cofepris/cofepris_1079227_2026-05_geocoded.csv
  *   npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=raw/cofepris/cofepris_1079227_2026-05_geocoded.csv [--force]
- *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # only if needed, see below
  *
- * The last step is required after every load: the reload drops and recreates
- * both views, and postLoadGrants restores only denue_sage's SELECT, so the
- * API role (denue_api) loses access to them until api-role.sql is re-run.
+ * The reload drops and recreates both views; postLoadGrants restores
+ * denue_sage and denue_api from this checkout's sage-role.sql /
+ * api-role.sql. Re-run api-role.sql only if a view is missing from that
+ * allowlist, or the API role (denue_api) loses access to it.
  */
 
 import { execFileSync } from "node:child_process";
@@ -410,7 +411,7 @@ if (import.meta.url === `file://${process.argv[1]}` /* run directly */) {
         "  python3 scripts/cofepris-pdf-to-csv.py raw/cofepris/cofepris_licencias_farmacias_1079227_2026-05.pdf raw/cofepris/cofepris_1079227_2026-05.csv",
         "  python3 scripts/cofepris-geocode.py raw/cofepris/cofepris_1079227_2026-05.csv raw/cofepris/cofepris_1079227_2026-05_geocoded.csv",
         "  npx tsx --env-file=.env scripts/load-cofepris.ts --csv-path=raw/cofepris/cofepris_1079227_2026-05_geocoded.csv",
-        "  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views",
+        "  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # only if a recreated view is missing from its allowlist (postLoadGrants restores denue_sage and denue_api)",
       ].join("\n") + "\n",
     );
     process.exit(2);

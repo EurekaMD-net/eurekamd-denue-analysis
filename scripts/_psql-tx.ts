@@ -285,17 +285,42 @@ function sageAllowlist(): Set<string> {
 }
 
 /**
+ * Relations api-role.sql allowlists for denue_api SELECT: the FIRST
+ * `FOREACH r IN ARRAY ARRAY[...]` only. The second loop (sage_threads,
+ * sage_turns_audit) grants read/write on tables no loader recreates, so it
+ * must never feed a plain SELECT grant here.
+ */
+function apiAllowlist(): Set<string> {
+  const sql = readScriptFile("api-role.sql").replace(/--[^\n]*/g, "");
+  const loop = /FOREACH\s+\w+\s+IN\s+ARRAY\s+ARRAY\s*\[([^\]]*)\]/.exec(sql);
+  const names = [...(loop?.[1] ?? "").matchAll(/'([a-z_][a-z0-9_]*)'/g)].map(
+    (m) => m[1] as string,
+  );
+  if (names.length < 20) {
+    throw new Error(
+      `_psql-tx: parsed ${names.length} relations from api-role.sql's SELECT allowlist (expected >= 20); its FOREACH ... ARRAY[...] shape changed, fix apiAllowlist()`,
+    );
+  }
+  return new Set(names);
+}
+
+/**
  * Grants for relations the load (re)created: a recreated relation inherits
- * the schema's default privileges, so strip them (P02 hygiene) and restore
- * the denue_sage SELECT when sage-role.sql allowlists the relation. With
- * `schema`, every statement names `schema.relation` (allowlist match stays on
- * the bare name).
+ * the schema's default privileges, so strip them (P02 hygiene), then restore
+ * the denue_sage SELECT when sage-role.sql allowlists the relation and the
+ * denue_api SELECT when api-role.sql's SELECT loop allowlists it (both files
+ * read from this checkout at runtime). With `schema`, every statement names
+ * `schema.relation` (allowlist match stays on the bare name). The roles
+ * denue_sage and denue_api must exist (scripts/sage-role.sql +
+ * scripts/api-role.sql run once), otherwise the loader's transaction fails on
+ * a fresh database.
  */
 export function postLoadGrants(
   relations: readonly string[],
   schema?: string,
 ): string {
   const sage = sageAllowlist();
+  const api = apiAllowlist();
   if (schema !== undefined) assertIdent(schema);
   return relations
     .map((r) => {
@@ -303,6 +328,7 @@ export function postLoadGrants(
       const q = schema === undefined ? r : `${schema}.${r}`;
       const lines = [`REVOKE ALL ON ${q} FROM anon, authenticated, trustr_app;`];
       if (sage.has(r)) lines.push(`GRANT SELECT ON ${q} TO denue_sage;`);
+      if (api.has(r)) lines.push(`GRANT SELECT ON ${q} TO denue_api;`);
       return lines.join("\n");
     })
     .join("\n");

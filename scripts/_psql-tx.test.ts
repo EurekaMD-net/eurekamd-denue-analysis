@@ -275,6 +275,97 @@ describe("postLoadGrants", () => {
     // Raw tables are never on the Sage allowlist.
     expect(sql).not.toContain("GRANT SELECT ON coneval_irs_municipal_raw");
   });
+
+  const grantsFor = (sql: string, q: string): string[] =>
+    sql.split("\n").filter((l) => l.includes(` ON ${q} `));
+
+  it("restores denue_api for relations api-role.sql's SELECT loop allowlists", () => {
+    const sql = postLoadGrants([
+      "eic_2025_municipio", // sage + api
+      "inegi_edr_defunciones_raw", // api only
+      "osm_ageb_aggregates", // sage only
+      "coneval_irs_municipal_raw", // neither
+    ]);
+    expect(grantsFor(sql, "eic_2025_municipio")).toEqual([
+      "REVOKE ALL ON eic_2025_municipio FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON eic_2025_municipio TO denue_sage;",
+      "GRANT SELECT ON eic_2025_municipio TO denue_api;",
+    ]);
+    expect(grantsFor(sql, "inegi_edr_defunciones_raw")).toEqual([
+      "REVOKE ALL ON inegi_edr_defunciones_raw FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON inegi_edr_defunciones_raw TO denue_api;",
+    ]);
+    expect(grantsFor(sql, "osm_ageb_aggregates")).toEqual([
+      "REVOKE ALL ON osm_ageb_aggregates FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON osm_ageb_aggregates TO denue_sage;",
+    ]);
+    expect(grantsFor(sql, "coneval_irs_municipal_raw")).toEqual([
+      "REVOKE ALL ON coneval_irs_municipal_raw FROM anon, authenticated, trustr_app;",
+    ]);
+  });
+
+  it("never grants the Sage thread tables (api-role.sql's second, read/write loop)", () => {
+    const sql = postLoadGrants(["sage_threads", "sage_turns_audit"]);
+    expect(readFileSync(join(HERE, "api-role.sql"), "utf-8")).toContain("'sage_threads'");
+    expect(sql).not.toContain("GRANT");
+  });
+
+  it("qualifies the denue_api grant with the schema too", () => {
+    expect(postLoadGrants(["coneval_irs_municipal"], "staging")).toBe(
+      [
+        "REVOKE ALL ON staging.coneval_irs_municipal FROM anon, authenticated, trustr_app;",
+        "GRANT SELECT ON staging.coneval_irs_municipal TO denue_sage;",
+        "GRANT SELECT ON staging.coneval_irs_municipal TO denue_api;",
+      ].join("\n"),
+    );
+  });
+
+  /** _psql-tx loaded with `apiRoleSql` standing in for api-role.sql. */
+  async function withApiRoleSql<T>(
+    apiRoleSql: string,
+    fn: (mod: typeof import("./_psql-tx.js")) => T,
+  ): Promise<T> {
+    const real = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.resetModules();
+    vi.doMock("node:fs", () => ({
+      ...real,
+      readFileSync: (p: string, enc: BufferEncoding) =>
+        String(p).endsWith("api-role.sql") ? apiRoleSql : real.readFileSync(p, enc),
+    }));
+    try {
+      return fn(await import("./_psql-tx.js"));
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+  }
+
+  it("throws instead of silently emptying the denue_api allowlist when api-role.sql changes shape", async () => {
+    await withApiRoleSql(
+      "FOREACH r IN ARRAY ARRAY['establecimientos', 'clues'] LOOP END LOOP;",
+      (mod) =>
+        expect(() => mod.postLoadGrants(["clues"])).toThrow(
+          /parsed 2 relations from api-role.sql's SELECT allowlist/,
+        ),
+    );
+  });
+
+  it("ignores names inside -- comments in the allowlist array", async () => {
+    const real = Array.from({ length: 20 }, (_, i) => `    'rel_${i}',`).join("\n");
+    const fixture = [
+      "FOREACH r IN ARRAY ARRAY[",
+      "    -- 'commented_out',",
+      real,
+      "    'clues'",
+      "  ]",
+      "LOOP END LOOP;",
+    ].join("\n");
+    await withApiRoleSql(fixture, (mod) => {
+      const sql = mod.postLoadGrants(["commented_out", "rel_0"]);
+      expect(sql).not.toContain("GRANT SELECT ON commented_out TO denue_api;");
+      expect(sql).toContain("GRANT SELECT ON rel_0 TO denue_api;");
+    });
+  });
 });
 
 describe("refresh-matviews.sh (audit #115)", () => {

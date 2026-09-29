@@ -9,13 +9,13 @@
  *   #   https://www.inegi.org.mx/contenidos/programas/ccpv/2020/datosabiertos/iter/iter_00_cpv2020_csv.zip
  *   # Extract conjunto_de_datos_iter_00CSV20.csv somewhere, then:
  *   npx tsx --env-file=.env scripts/load-censo.ts --csv=/opt/data/iter/.../conjunto_de_datos_iter_00CSV20.csv
- *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # only if needed, see below
  *
- * The last step is required after every load: the reload drops and recreates
- * the censo views and municipios_2025, and postLoadGrants restores only
- * denue_sage's SELECT, so the API role (denue_api) loses access to them
- * (/analytics/municipio-detail, locust-muni, ... answer 502) until
- * api-role.sql is re-run.
+ * The reload drops and recreates the censo views and municipios_2025;
+ * postLoadGrants restores denue_sage and denue_api from this checkout's
+ * sage-role.sql / api-role.sql. Re-run api-role.sql only if a recreated
+ * relation is missing from that allowlist, or the API role (denue_api) loses
+ * access to it (/analytics/municipio-detail, locust-muni, ... answer 502).
  *
  * Behavior (ONE psql transaction — a failure leaves the DB untouched):
  *  1. Reads CSV header → CREATE TABLE censo_iter_staging (col1 TEXT, ...)
@@ -255,7 +255,7 @@ if (isMain) {
     console.error(
       [
         "Usage: npx tsx scripts/load-censo.ts --csv=/path/to/conjunto_de_datos_iter_00CSV20.csv",
-        "Then:  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views",
+        "Then:  docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # only if a recreated view is missing from its allowlist (postLoadGrants restores denue_sage and denue_api)",
       ].join("\n"),
     );
     process.exit(1);
@@ -270,7 +270,7 @@ if (isMain) {
         `[load-censo] ✓ ${r.rows_loaded.toLocaleString()} ITER rows, ${r.municipios_count.toLocaleString()} municipios in ${(r.duration_ms / 1000).toFixed(1)}s`,
       );
       console.log(
-        "[load-censo] next: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # re-grant denue_api on the recreated views (postLoadGrants restores only denue_sage)",
+        "[load-censo] next: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   # only if a recreated view is missing from its allowlist (postLoadGrants restores denue_sage and denue_api from this checkout's sage-role.sql / api-role.sql)",
       );
       process.exit(0);
     })
