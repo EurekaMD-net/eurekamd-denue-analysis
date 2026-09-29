@@ -124,8 +124,8 @@ the OSM finding (section 3) was re-checked directly.
    complete year (`docs/SNIIV-2026-H1.md`).
 4. ~~EIC 2025 municipal layer~~ DONE 09-29: all three steps of ruling (b)
    are live (step 1 bridge `1cdc4af`, step 3 MG 2025 polygons `513da75`,
-   step 2 EIC loader `a4e6270`). Open follow-ups: no handler reads the EIC
-   views yet (municipio-detail could expose `pobtot_2025` + MOE); the 24
+   step 2 EIC loader `a4e6270`; first consumer municipio-detail
+   `population_2025` + MOE `acc946f`). Open follow-ups: the 24
    stray DENUE `area_geo` codes; `postLoadGrants` restores only
    `denue_sage`, so every reload needs `api-role.sql` re-run. History:
    `docs/EIC-2025-RECON-2026-09-28.md` (sources curl-able, 9 new municipios +

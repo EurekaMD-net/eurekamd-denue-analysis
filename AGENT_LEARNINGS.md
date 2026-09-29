@@ -125,3 +125,9 @@
 - **Better:** a loader's assertion block that ties the municipio sum to the national row AND to the sum of the 32 entidad rows catches a truncated COPY, an encoding slip in ESTIMADOR (moe count), and a filter drift in one NOTICE; 13 injected mutations each failed their own message with nothing committed.
 - **Better:** `postLoadGrants` restores only `denue_sage`; every loader prints the api-role re-run hint, and the merge order stays load → api-role (branch) → ledger → merge → api-role (main) → restart. Systemic fix (restore `denue_api` for allowlisted relations) is an open follow-up, not folded inline.
 
+
+## 2026-09-29 — municipio-detail `population_2025` (first EIC consumer)
+
+- **Mistake:** the new nested block was appended as the LAST key of the result literal; Sage's `buildDigest` keeps flattened keys in order under a 4 KB cap, so the narrative never saw it although the catalog advertised it → the check: for any new field on a wide single-record endpoint, run the real handler row through `buildDigest` and assert the key survives; place the block next to its sibling, not at the end.
+- **Avoid:** a rationale comment that asserts a data property ("pobtot can be NULL on `**` rows") without a live `COUNT(*) FILTER` behind it; 0/2,478 were NULL. State the structural reason (the flag derives from `nom_mun`, never null) instead.
+- **Better:** mutation-test the SQL-shape test by deleting the columns the mapper's null-signal depends on; a test that only pins the headline column lets a regression null the whole block while staying green.

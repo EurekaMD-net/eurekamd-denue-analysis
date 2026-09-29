@@ -195,8 +195,13 @@ Apply order: load → `api-role.sql` (the load recreates the relations and
 `raw/eic2025/conjunto_de_datos_eic2025_105_csv.zip` under the repo root and
 accepts an absolute path. `scripts/migrations/029-eic2025-grants.sql`
 re-applies the grants (anon / authenticated / trustr_app none; `denue_sage`
-and `denue_api` SELECT) idempotently for a grants audit. No service restart
-is needed: no handler reads the EIC relations yet; restart only when a
-handler change that reads them ships.
+and `denue_api` SELECT) idempotently for a grants audit. A reload needs no
+service restart: the one consumer reads the views live on every request
+(response cached 1 h per key).
 
-First consumer: `GET /analytics/municipio-detail` `population_2025` (pobtot/pobfem/pobmas 2025 + pobtot se/li90/ls90/cv + `*`/`**` flags; one `LEFT JOIN` + one `LATERAL` over the moe view); shipping it needs the service restart above.
+First consumer (live 2026-09-29, `acc946f`): `GET /analytics/municipio-detail`
+`population_2025` (pobtot/pobfem/pobmas 2025 + pobtot se/li90/ls90/cv +
+`*`/`**` flags; one `LEFT JOIN` + one `LATERAL` over the moe view, +11 ms
+planning). `enumeracion_completa` is the join-miss signal (structurally
+non-null); on `**` municipios pobtot is populated with se = cv = 0 and
+li90 = ls90 = pobtot.
