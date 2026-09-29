@@ -187,6 +187,20 @@ export const CENSO_VIEWS = [
 ] as const;
 
 /**
+ * EIC 2025 municipal views, defined only in migrate-eic2025-views.sql and
+ * recreated by load-eic2025.ts (drop order = reverse: the parity view reads
+ * eic_2025_municipio). They read eic_2025_municipio_raw only, never a
+ * CENSO_VIEWS relation, so a Censo reload never has to drop them. Not part
+ * of assertRelationsExist's default list: other loaders must not fail on a
+ * database where EIC is not loaded yet.
+ */
+export const EIC_VIEWS = [
+  "eic_2025_municipio",
+  "eic_2025_municipio_moe",
+  "eic_2025_municipio_censo_parity",
+] as const;
+
+/**
  * Fail loud when any analytics MV / view is missing after a load. The MV
  * handlers silently fall back to live aggregation (100x slower) and the
  * censo_localidades consumers error outright, so a missing relation must

@@ -10,6 +10,7 @@ import {
   assertRelationsExist,
   CENSO_VIEWS,
   censoViewsSql,
+  EIC_VIEWS,
   copyFromStdinScript,
   existingRowCount,
   perfMatviewSql,
@@ -242,6 +243,22 @@ describe("censoViewsSql", () => {
     expect(sql).toMatch(/CREATE OR REPLACE VIEW censo_municipios AS/);
     expect(sql).toMatch(/CREATE OR REPLACE VIEW censo_localidades AS/);
     expect(sql).toMatch(/CREATE OR REPLACE VIEW censo_entidades AS/);
+  });
+});
+
+describe("EIC_VIEWS", () => {
+  it("lists the three EIC 2025 views, parent first, and stays out of the default existence check", () => {
+    expect([...EIC_VIEWS]).toEqual([
+      "eic_2025_municipio",
+      "eic_2025_municipio_moe",
+      "eic_2025_municipio_censo_parity",
+    ]);
+    // Other loaders call assertRelationsExist() with the default list; a DB
+    // without EIC loaded must not fail them.
+    mockExec.mockReturnValue("");
+    assertRelationsExist("supabase-db");
+    const sql = (mockExec.mock.calls[0]?.[1] as string[]).at(-1) ?? "";
+    for (const v of EIC_VIEWS) expect(sql).not.toContain(`'${v}'`);
   });
 });
 

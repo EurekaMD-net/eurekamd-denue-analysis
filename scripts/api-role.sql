@@ -64,6 +64,7 @@ BEGIN
     'calibrators_enigh_state',
     'calibrators_enoe_state',
     'municipio_bridge_2025',
+    'eic_2025_municipio_raw',
     -- materialized views
     'ce2024_municipal',
     'clues',
@@ -95,6 +96,9 @@ BEGIN
     'coneval_grs_ageb',
     'coneval_irs_municipal',
     'coneval_pobreza_municipal',
+    'eic_2025_municipio',
+    'eic_2025_municipio_censo_parity',
+    'eic_2025_municipio_moe',
     'municipios_2025',
     'sinba_morbidity_municipal'
   ]
