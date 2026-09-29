@@ -14,13 +14,21 @@ const { mockExists, mockMkdtemp, mockReadFile, mockRm, mockWriteFile } =
     mockRm: vi.fn(),
     mockWriteFile: vi.fn(),
   }));
-vi.mock("node:fs", () => ({
-  existsSync: mockExists,
-  mkdtempSync: mockMkdtemp,
-  readFileSync: mockReadFile,
-  rmSync: mockRm,
-  writeFileSync: mockWriteFile,
-}));
+// .sql / .sh reads go to the real files: _psql-tx's postLoadGrants reads
+// sage-role.sql / api-role.sql for the allowlists. CSV reads stay mocked.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    existsSync: mockExists,
+    mkdtempSync: mockMkdtemp,
+    readFileSync: (p: unknown, ...rest: unknown[]) =>
+      typeof p === "string" && /\.(sql|sh)$/.test(p)
+        ? actual.readFileSync(p, "utf-8")
+        : mockReadFile(p, ...rest),
+    rmSync: mockRm,
+    writeFileSync: mockWriteFile,
+  };
+});
 
 import {
   loadSictDatosViales,
@@ -458,6 +466,24 @@ describe("DDL invariants", () => {
     expect(idxMuni).toBeGreaterThan(0);
     expect(idxEstado).toBeGreaterThan(idxMuni);
     expect(idxCommit).toBeGreaterThan(idxEstado);
+  });
+
+  it("VIEWS_DDL_TRANSACTION restores grants on the recreated view + MVs before COMMIT", () => {
+    const grants = [
+      "REVOKE ALL ON sict_estaciones_viales FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON sict_estaciones_viales TO denue_sage;",
+      "REVOKE ALL ON sict_traffic_by_municipio FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON sict_traffic_by_municipio TO denue_sage;",
+      "GRANT SELECT ON sict_traffic_by_municipio TO denue_api;",
+      "REVOKE ALL ON sict_traffic_by_estado FROM anon, authenticated, trustr_app;",
+      "GRANT SELECT ON sict_traffic_by_estado TO denue_sage;",
+      "GRANT SELECT ON sict_traffic_by_estado TO denue_api;",
+    ].join("\n");
+    const at = VIEWS_DDL_TRANSACTION.indexOf(grants);
+    expect(at).toBeGreaterThan(
+      VIEWS_DDL_TRANSACTION.indexOf("CREATE MATERIALIZED VIEW sict_traffic_by_estado AS"),
+    );
+    expect(at).toBeLessThan(VIEWS_DDL_TRANSACTION.lastIndexOf("COMMIT;"));
   });
 
   it("POST_LOAD_VERIFY_SQL counts both grain MVs", () => {

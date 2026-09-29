@@ -6,7 +6,7 @@
  * Usage:
  *   npx tsx scripts/load-eic2025.ts --dry-run [--zip=<path>]
  *   npx tsx scripts/load-eic2025.ts --apply [--zip=<path>]
- *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   (only if a relation is missing from its allowlist)
  *   npx tsx scripts/record-dataset-version.ts --dataset=eic_2025 ... --apply   (line printed at the end)
  *
  *   --zip      conjunto_de_datos_eic2025_105_csv.zip (default
@@ -33,9 +33,11 @@
  *      new 2025 keys). Any failure rolls everything back.
  *   6. assertRelationsExist; the container temp file is removed in `finally`.
  *
- * The loader does NOT write the dataset_versions ledger and does not grant
- * denue_api (postLoadGrants restores only denue_sage): run api-role.sql, then
- * the ledger line it prints. No service restart is needed for the load.
+ * The loader does NOT write the dataset_versions ledger; postLoadGrants
+ * restores denue_sage and denue_api from this checkout's sage-role.sql /
+ * api-role.sql (re-run api-role.sql only if a relation is missing from that
+ * allowlist). Run the ledger line it prints. No service restart is needed
+ * for the load.
  */
 
 import { execFileSync } from "node:child_process";
@@ -634,7 +636,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const raw = countOf(container, `SELECT count(*) FROM ${RAW_TABLE};`);
   const mun = countOf(container, `SELECT count(*) FROM ${EIC_VIEWS[0]};`);
   log(`committed: ${RAW_TABLE} ${raw.toLocaleString()} rows, ${EIC_VIEWS[0]} ${mun.toLocaleString()} municipios (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-  log(`next: ${API_ROLE_LINE}   # re-grant denue_api (postLoadGrants restores only denue_sage)`);
+  log(`next (only if a relation is missing from api-role.sql's allowlist; postLoadGrants restores denue_sage and denue_api): ${API_ROLE_LINE}`);
   log(`then: ${LEDGER_LINE}`);
 }
 

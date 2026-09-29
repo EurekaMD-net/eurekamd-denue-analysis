@@ -264,8 +264,9 @@ describe("buildVariantReloadSql (audit #144)", () => {
     expect(swap).toBeLessThan(longMv);
     expect(longMv).toBeLessThan(yearly);
     expect(sql).toContain("GRANT SELECT ON mv_delitos_municipal_yearly TO denue_sage;");
-    // The 31.6M-row long MV stays off the Sage allowlist.
-    expect(sql).not.toContain("GRANT SELECT ON sesnsp_delitos_municipal TO");
+    // The 31.6M-row long MV stays off the Sage allowlist; the API still reads it.
+    expect(sql).not.toContain("GRANT SELECT ON sesnsp_delitos_municipal TO denue_sage;");
+    expect(sql).toContain("GRANT SELECT ON sesnsp_delitos_municipal TO denue_api;");
   });
 });
 

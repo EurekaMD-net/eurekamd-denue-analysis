@@ -8,7 +8,7 @@
  * Usage:
  *   npx tsx scripts/load-mg2025-polygons.ts --dry-run [--zip=<abs path>] [--layers=mun,ageb]
  *   npx tsx scripts/load-mg2025-polygons.ts [--zip=<abs path>] [--layers=mun,ageb] [--force]
- *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+ *   docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql   (only if needed, see "Grants")
  *
  *   --zip      the INEGI bundle 794551163061_s.zip (default
  *              raw/mg2025/794551163061_s.zip); its sha256 is checked first.
@@ -42,13 +42,12 @@
  *      assertion on counts, keys, geometry type, SRID, validity and encoding.
  *   4. `COMMIT;` is written only after every layer streamed cleanly.
  *
- * Grants after the merge: the loader grants denue_api itself, but
- * scripts/api-role.sql REVOKEs everything from denue_api and re-grants only
- * its own list. Until this branch is merged, main's copy (run by
- * ops/deploy-audit-refactor.sh:102 and the load-censo / load-cofepris hints)
- * lacks the 2025 tables and drops their grant. After the merge and before the
- * service restart, re-run main's api-role.sql (or migration 028) so the grant
- * is proven on main's copy.
+ * Grants: the loader grants denue_api itself, so re-run api-role.sql only if
+ * the 2025 tables are missing from its allowlist. When you do, run it from a
+ * checkout whose allowlist lists them: scripts/api-role.sql REVOKEs
+ * everything from denue_api and re-grants only its own list, so an older copy
+ * (run by ops/deploy-audit-refactor.sh:102 or by hand) drops their grant;
+ * re-run a checkout that lists them (or migration 028) to restore it.
  *
  * Why an explicit BEGIN/COMMIT and not `psql --single-transaction`: with
  * `-1`, psql COMMITs whatever it has read when its input ends. A loader that
@@ -734,8 +733,7 @@ async function main(): Promise<void> {
   const counts = rowCounts(container, args.layers);
   for (const spec of args.layers) log(`${spec.table}: ${counts.get(spec.table)?.toLocaleString()} rows committed`);
   log(`done in ${secs(t0)} (${total.toLocaleString()} rows)`);
-  log(`next: ${API_ROLE_LINE}   # from this branch's checkout (main's copy revokes the 2025 grants until the merge)`);
-  log(`after the merge, before the service restart: re-run it from main (or scripts/migrations/028-mg2025-polygons-grants.sql) to prove the grant on main's copy`);
+  log(`next (only if the 2025 tables are missing from api-role.sql's allowlist; the loader grants denue_api itself): ${API_ROLE_LINE}   # from a checkout whose allowlist lists them (an older copy revokes the 2025 grants; restore with scripts/migrations/028-mg2025-polygons-grants.sql)`);
   if (args.layers.length === LAYER_ORDER.length) log(`then: ${ledgerCommand(total)}`);
   else log("ledger: record MG 2025 once BOTH layers are loaded (--rows = mun + ageb)");
 }

@@ -23,6 +23,11 @@
  *      - Per-estado aggregates with the SAME formula as muni MV (re-applied
  *        from station-level rows; not rolled up from muni MV — averaging
  *        muni-percentages across estados drifts the weighted composition).
+ *   6. postLoadGrants on the recreated view + both MVs (strip anon /
+ *      authenticated / trustr_app, re-grant the denue_sage / denue_api
+ *      SELECT that this checkout's sage-role.sql / api-role.sql allowlist),
+ *      in the same transaction. Re-run scripts/api-role.sql only if an MV is
+ *      missing from that allowlist.
  *
  * Usage:
  *   npx tsx --env-file=.env scripts/load-sict-datos-viales.ts \
@@ -40,7 +45,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { argv } from "node:process";
-import { copyFromStdinScript, runPsqlScript } from "./_psql-tx.js";
+import { copyFromStdinScript, postLoadGrants, runPsqlScript } from "./_psql-tx.js";
 
 interface Args {
   csv: string;
@@ -393,6 +398,8 @@ ${TRAFFIC_BY_MUNI_DDL}
 \\echo [load-sict] building traffic-by-estado MV + indexes...
 
 ${TRAFFIC_BY_ESTADO_DDL}
+
+${postLoadGrants(["sict_estaciones_viales", "sict_traffic_by_municipio", "sict_traffic_by_estado"])}
 
 COMMIT;
 `.trim();
