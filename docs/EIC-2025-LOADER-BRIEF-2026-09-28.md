@@ -125,7 +125,7 @@ joins. D = direct absolute; R = `PCN_X × base / 100` rounded; — = none.
 
 1. `--zip=` (default the raw path); sha256 vs `SHA256SUMS`; `PK` magic bytes
    (INEGI decoy-200); `assertSafePath` + container regex as `load-clues.ts`.
-2. Extract via `unzip -p` with positional `/bin/sh -c` args (`load-ce2024.ts:152-160,300-318`).
+2. Extract via `unzip -p` called directly with an argv array (`execFileSync("unzip", ["-p", zip, member])`, no shell; the zip path is absolute and cannot start with `-`).
 3. Encoding: host-side `iconv -f ISO-8859-1 -t UTF-8` (`load-sinba.ts:35-43,97`)
    or `\copy … ENCODING 'LATIN1'`; guard: fail on U+FFFD or if
    `Error estándar` is missing after decoding.
@@ -167,3 +167,34 @@ the 9.
   19025 1.46, 22011 1.41. Any "growth" column carries the universe caveat.
 - Source quirks: `PNC_P6A14AN*` typo, `PCN_PcSSyRecAc` mixed case, one
   quoted comma name, NOM_MUN > 50 chars, PHOG_* decimals.
+
+## 7. Loader (implemented)
+
+`scripts/load-eic2025.ts` (+ `scripts/migrate-eic2025-views.sql`, the only
+definition of the three views; `EIC_VIEWS` in `scripts/_psql-tx.ts`).
+Without `--apply` it is a dry run: every source check (sha256 pin +
+`SHA256SUMS`, `PK` magic, ISO-8859-1 decode guards, header = `EIC2025_HEADER`
+= dictionary mnemonics, 13,880 rows × 349 fields, the §5 totals) and the SQL
+printed; nothing reaches psql. `--apply` runs the same checks, then one
+transaction whose closing DO block re-checks §5 in the database (raw 13,880;
+2,478 rows = keys; moe 9,912; `pobtot IS NULL` 0; `SUM(pobtot)` 130,393,389 =
+national row = 32 entidad rows; 12001; the 9 new keys; `**` 7; `*` 750; keys = `municipios_2025` both
+ways, read in the DO block only when that view exists, so no view dependency).
+Any failure rolls back and leaves the previous load in place.
+
+```
+npx tsx scripts/load-eic2025.ts --dry-run
+npx tsx scripts/load-eic2025.ts --apply
+docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f - < scripts/api-role.sql
+npx tsx scripts/record-dataset-version.ts --dataset=eic_2025 --edition=2025 --source="INEGI EIC 2025 datos abiertos (conjunto_de_datos_eic2025_105, pub. 2026-09-22)" --rows=13880 --apply
+```
+
+Apply order: load → `api-role.sql` (the load recreates the relations and
+`postLoadGrants` restores only `denue_sage`, so `denue_api` needs the re-run)
+→ ledger (the loader never writes `dataset_versions`). `--zip=` defaults to
+`raw/eic2025/conjunto_de_datos_eic2025_105_csv.zip` under the repo root and
+accepts an absolute path. `scripts/migrations/029-eic2025-grants.sql`
+re-applies the grants (anon / authenticated / trustr_app none; `denue_sage`
+and `denue_api` SELECT) idempotently for a grants audit. No service restart
+is needed: no handler reads the EIC relations yet; restart only when a
+handler change that reads them ships.

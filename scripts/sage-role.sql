@@ -170,6 +170,22 @@ BEGIN
   IF to_regclass('public.municipios_2025') IS NOT NULL THEN
     GRANT SELECT ON municipios_2025 TO denue_sage;
   END IF;
+  -- EIC 2025 municipal estimates (scripts/load-eic2025.ts,
+  -- migrate-eic2025-views.sql), absent until the first load. The raw table
+  -- is the one *_raw exception to the "no raw tables" rule above: 13,880
+  -- rows of published INEGI statistics, no microdata.
+  IF to_regclass('public.eic_2025_municipio_raw') IS NOT NULL THEN
+    GRANT SELECT ON eic_2025_municipio_raw TO denue_sage;
+  END IF;
+  IF to_regclass('public.eic_2025_municipio') IS NOT NULL THEN
+    GRANT SELECT ON eic_2025_municipio TO denue_sage;
+  END IF;
+  IF to_regclass('public.eic_2025_municipio_moe') IS NOT NULL THEN
+    GRANT SELECT ON eic_2025_municipio_moe TO denue_sage;
+  END IF;
+  IF to_regclass('public.eic_2025_municipio_censo_parity') IS NOT NULL THEN
+    GRANT SELECT ON eic_2025_municipio_censo_parity TO denue_sage;
+  END IF;
 END$$;
 
 -- Analytical views (no expensive base joins).

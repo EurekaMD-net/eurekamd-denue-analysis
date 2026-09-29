@@ -88,6 +88,17 @@ describe("scripts/api-role.sql", () => {
     }
   });
 
+  it("grants SELECT on the EIC 2025 raw table and its three views", () => {
+    for (const t of [
+      "eic_2025_municipio_raw",
+      "eic_2025_municipio",
+      "eic_2025_municipio_moe",
+      "eic_2025_municipio_censo_parity",
+    ]) {
+      expect(allow.has(t), t).toBe(true);
+    }
+  });
+
   it("grants SELECT on every layers-values registry source", () => {
     const froms = Object.values(MAP_LAYER_REGISTRY).map((d) => d.from);
     expect(froms.length).toBeGreaterThan(0);
