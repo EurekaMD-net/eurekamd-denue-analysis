@@ -119,16 +119,21 @@ json:
    of the process that loaded rows, which a resume can miss.)
 2. `ageb_backfill`: `scripts/backfill-ageb.ts --entidad=01..32`, one at a time. It fills only
    rows where `ageb IS NULL`.
-3. `vacuum`: `VACUUM (ANALYZE, PARALLEL 0) public.establecimientos`. `PARALLEL 0` is required
+3. `area_geo_rekey`: `scripts/rekey-stray-area-geo.sql`. Rows whose `area_geo` is not a
+   `municipios_2025` key get the `cvegeo` of the MG 2025 polygon that contains their `geom`, and
+   `entidad` becomes its first 2 characters. The upsert rewrites both columns from the source on
+   every load, so this step re-fixes them each run. It needs `geom`, so it runs after `geometry`. Rows it cannot resolve are counted in a NOTICE and
+   left untouched. A later run finds 0 stray rows.
+4. `vacuum`: `VACUUM (ANALYZE, PARALLEL 0) public.establecimientos`. `PARALLEL 0` is required
    because supabase-db has only 64 MB of `/dev/shm`.
-4. `matviews`: `scripts/refresh-matviews.sh`.
-5. `finished_at` is written, then `denue-matview-refresh.timer` is started again if `start`
+5. `matviews`: `scripts/refresh-matviews.sh`.
+6. `finished_at` is written, then `denue-matview-refresh.timer` is started again if `start`
    stopped it.
 
 ## Next morning
 
 1. Run `bash ops/denue-refresh.sh status`. Expect the unit inactive, `estados done: 32/32`, and
-   all four post-steps plus `finished_at` set. If the unit is inactive but the run is not
+   all five post-steps plus `finished_at` set. If the unit is inactive but the run is not
    finished, check the log tail and `journalctl -u denue-refresh -n 50`, then run `resume`.
 2. Run `bash ops/denue-refresh.sh stale-report` (read-only). It prints stale candidates per
    entidad, the total, and its percentage of the baseline, and writes the CLEE list to
@@ -254,6 +259,13 @@ npx tsx scripts/record-dataset-version.ts --dataset=denue --edition=<MM/YYYY> \
   "changed-or-new" (`updated_at`) are informational only.
 - **Stale rows are reported, never deleted.** Removing them is a separate operator decision,
   made with `ops/denue-stale-cleanup.sh` (see [Stale-row cleanup](#stale-row-cleanup)).
+- **Bogus CLEE prefixes.** `area_geo` comes from the source `AreaGeo` or, failing that, CLEE
+  chars 1-5, and `entidad` from CLEE chars 1-2. INEGI sometimes ships a CLEE whose prefix is not
+  a municipio (05/2026: 16 codes, 24 rows, e.g. Irapuato as `01067`, Acapulco de Juárez as
+  `50991`; 4 of them sit in another entidad). The `area_geo_rekey` post-step re-keys those rows
+  from the MG 2025 polygon that contains them and touches only `area_geo` and `entidad`, never
+  `municipio` or `raw_json`. A row with no `geom`, no containing polygon or more than one is
+  reported in the NOTICE count, never guessed.
 - **Moved establishments keep their old `ageb`.** The geometry step corrects `geom`, but
   `backfill-ageb` fills only NULL values.
 - **No row records its edition.** The API returns an empty `fecha_alta`. The loaded edition is

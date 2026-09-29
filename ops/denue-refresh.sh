@@ -244,6 +244,7 @@ phase_worker() {
   # Post-steps: each is recorded in the baseline json and skipped on a later resume.
   post_step geometry     step_geometry
   post_step ageb_backfill step_ageb
+  post_step area_geo_rekey step_area_geo_rekey
   post_step vacuum       step_vacuum
   post_step matviews     "$REPO/scripts/refresh-matviews.sh"
   base_set --arg t "$(date -u +%FT%TZ)" '.finished_at = $t'
@@ -288,6 +289,9 @@ step_ageb() {
   local e
   for e in $(seq -w 1 32); do "${TSX[@]}" scripts/backfill-ageb.ts --entidad="$e"; done
 }
+# Bogus CLEE prefixes: re-keys area_geo (+ entidad) that is not a municipios_2025 key from the containing MG 2025
+# polygon (needs geom, so after step_geometry); unresolved rows are counted, never guessed.
+step_area_geo_rekey() { "${PSQL[@]}" -f - < "$REPO/scripts/rekey-stray-area-geo.sql"; }
 # PARALLEL 0 is required here (supabase-db /dev/shm = 64 MB). cost_delay 2ms = autovacuum's pace, so
 # the manual VACUUM (default cost_delay 0 = unthrottled IO) does not starve the shared box.
 step_vacuum() {
