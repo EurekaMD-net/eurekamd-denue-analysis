@@ -448,10 +448,11 @@ Run the SQL checks read-only:
 
 ### Standing rules after this deploy
 
-- Re-run `scripts/api-role.sql` after any loader reload that drops and
-  recreates a view or MV the API reads. Loader `postLoadGrants` restores
-  only `denue_sage`, not `denue_api`, so the affected endpoints return 502
-  until it runs (P31).
+- ~~Re-run `scripts/api-role.sql` after any loader reload that drops and
+  recreates a view or MV the API reads.~~ Superseded 2026-09-29: loader
+  `postLoadGrants` now restores `denue_api` as well as `denue_sage` from
+  this checkout's allowlists. Re-run `api-role.sql` only for a relation
+  missing from its allowlist (the endpoints return 502 until then, P31).
 - The SINBA and Censo loaders now recreate their dependents in their own
   transaction: `mv_sinba_morbidity_municipal` (185a993) and the three censo
   views from `migrate-censo-views.sql`. Earlier lane notes said to re-run

@@ -10,7 +10,7 @@
 - `stopAutoRefresh()` in auth-js also removes the visibility listener and nothing restarts it on re-login; pair it with `startAutoRefresh()` or don't call it.
 - The shared `supabase-db` is production load for EVERY caller, including a qa-auditor: worst-case / adversarial / heavy probes go to a throwaway (`docker run postgis`, `osgeo` under `prlimit`) or a scaled input, never the live instance; every DB brief carries `SET statement_timeout` + `SET work_mem`, "do not raise either", and "the first timeout IS the finding". `statement_timeout` does not bound memory (09-28 OOM-kill).
 - User-supplied input that reaches an expensive function gets bounds on THAT function's cost drivers (shape, self-intersection, spread — not just size), constants derived from the live worst case (`COUNT(*)` on the densest cell, not an average), a gate on the quantity actually feared (candidate rows), and — for anything that spawns a process or writes to disk on a miss — a queue cap, per-item size refusal and disk budget in the PLAN, not the audit.
-- A DDL change to a materialized view ships with its checked-in rebuild script: REFRESH keeps the stored definition, and DROP/CREATE loses the `denue_api` grant because `postLoadGrants` restores only `denue_sage` (re-run `scripts/api-role.sql` after any MV rebuild).
+- A DDL change to a materialized view ships with its checked-in rebuild script: REFRESH keeps the stored definition, and DROP/CREATE loses the `denue_api` grant; since 2026-09-29 `postLoadGrants` restores both `denue_sage` and `denue_api` from this checkout's `sage-role.sql` / `api-role.sql`, so a relation missing from those allowlists is the remaining hazard (add it, or re-run `scripts/api-role.sql`).
 
 ## 2026-09-27 — Multi-agent audit + refactor (DENUE_RECON)
 
@@ -123,7 +123,7 @@
 - **Avoid:** a "parity" view that multiplies every `PCN_*` by POBTOT; EIC percentage families have their own bases (VIVPARHAB_C, PDER_SS, P_12YMAS, P_15YMAS, P_3YMAS, speakers, P_5YMAS). Read the dictionary's denominator column per family before deriving one absolute.
 - **Avoid:** a typed view over a survey that depends on `municipios_2025`/`censo_*`: `load-censo.ts` drops that view without CASCADE, so the dependent breaks every Censo reload. Key-universe checks go in a guarded DO block inside the loader (a read, not a dependency); joins happen in handlers.
 - **Better:** a loader's assertion block that ties the municipio sum to the national row AND to the sum of the 32 entidad rows catches a truncated COPY, an encoding slip in ESTIMADOR (moe count), and a filter drift in one NOTICE; 13 injected mutations each failed their own message with nothing committed.
-- **Better:** `postLoadGrants` restores only `denue_sage`; every loader prints the api-role re-run hint, and the merge order stays load → api-role (branch) → ledger → merge → api-role (main) → restart. Systemic fix (restore `denue_api` for allowlisted relations) is an open follow-up, not folded inline.
+- **Better:** `postLoadGrants` restores only `denue_sage`; every loader prints the api-role re-run hint, and the merge order stays load → api-role (branch) → ledger → merge → api-role (main) → restart. Systemic fix (restore `denue_api` for allowlisted relations) shipped later the same day; the by-hand rule now applies only to relations absent from the allowlists.
 
 
 ## 2026-09-29 — municipio-detail `population_2025` (first EIC consumer)
@@ -131,3 +131,10 @@
 - **Mistake:** the new nested block was appended as the LAST key of the result literal; Sage's `buildDigest` keeps flattened keys in order under a 4 KB cap, so the narrative never saw it although the catalog advertised it → the check: for any new field on a wide single-record endpoint, run the real handler row through `buildDigest` and assert the key survives; place the block next to its sibling, not at the end.
 - **Avoid:** a rationale comment that asserts a data property ("pobtot can be NULL on `**` rows") without a live `COUNT(*) FILTER` behind it; 0/2,478 were NULL. State the structural reason (the flag derives from `nom_mun`, never null) instead.
 - **Better:** mutation-test the SQL-shape test by deleting the columns the mapper's null-signal depends on; a test that only pins the headline column lets a regression null the whole block while staying green.
+
+## 2026-09-29 — DENUE open items: stray area_geo re-key + postLoadGrants denue_api
+
+- **Mistake:** the re-key brief fixed `area_geo` only; qa found 4 rows whose `entidad` (derived from the same bogus CLEE prefix) would now list a named foreign municipio under the wrong state → the check: when re-keying one derived column, grep the loader for every column derived from the same source substring and move them together.
+- **Avoid:** a full-table anti-join on `establecimientos` to find stray keys (timed out at 15 s); discover keys with `DISTINCT area_geo` (index-only) and anti-join that small set, then select rows by `= ANY`.
+- **Better:** a one-off data fix that a refresh would revert belongs in the pipeline as a post-step, proven on a throwaway with a rolled-back mutation, backed up (`data/state/*.pre.csv`), applied once, and re-run to prove the no-op.
+- **Better:** the grep-sweep rule found a third loader (SICT) with the same missing-grant class while fixing `postLoadGrants`; sweep every `DROP ... CREATE` site for the class before calling the fix done.
