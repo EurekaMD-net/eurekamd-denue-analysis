@@ -125,8 +125,11 @@ the OSM finding (section 3) was re-checked directly.
 4. EIC 2025 municipal layer (new loader; decide the 2,478→2,469 key bridge
    together with the MG 2025 question). Recon done 09-28:
    `docs/EIC-2025-RECON-2026-09-28.md` (sources curl-able, 9 new municipios +
-   parents, 4,950 DENUE rows already orphaned today; ruling pending on
-   option a/b/c, recommendation = b staged).
+   parents, 4,950 DENUE rows already orphaned today). Ruling 09-28: (b)
+   staged + MG 2025 pull approved. Step 1 bridge LIVE (`beacbba`, migration
+   027, `municipios_2025` = 2,478 keys, orphans 4,950→24). Step 2 loader
+   brief: `docs/EIC-2025-LOADER-BRIEF-2026-09-28.md`; step 3 polygons brief:
+   `docs/MG-2025-LOAD-BRIEF-2026-09-28.md` (zip on disk, 2.9 GB).
 5. DENUE 05/2026 loaded 2026-09-27 and stale rows cleaned 2026-09-28. After 2026-11-25: DENUE 11/2026 re-extract (~11 h of API paging);
    after ~Nov 2026: EDR 2025 definitive with `--append` + MV refresh.
 6. Aeropuertos: rule on March-only vs latest-month semantics, then reload.
