@@ -117,7 +117,7 @@ describe("prewarm", () => {
     expect(failed).toBe(2); // 99999 unknown + 09016 failed; the lock is a skip
     expect(log).toContain("09015 hot (skip)");
     expect(log.some((m) => m.startsWith("09014 skip: extracción de 09014 en curso"))).toBe(true);
-    expect(err).toContain("99999 no existe en mun_polygons");
+    expect(err).toContain("99999 no existe en mun_polygons_2025");
     expect(err.some((m) => m.startsWith("09016 FAILED: osmium export falló"))).toBe(true);
   });
 });

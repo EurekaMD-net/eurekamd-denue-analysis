@@ -47,6 +47,8 @@ SET statement_timeout = 0;
 
 -- #120: refuse to build a UNIQUE index over duplicated or NULL keys (the
 -- CONCURRENTLY build would fail halfway and leave an INVALID index behind).
+-- MG 2020 tables only: the MG 2025 editions (*_polygons_2025) get their
+-- <t>_cvegeo_uq inside scripts/load-mg2025-polygons.ts's load transaction.
 DO $$
 DECLARE
   t text;

@@ -287,24 +287,28 @@ export function sweepStaleTemps(cacheDir = CACHE_DIR, now = Date.now()): string[
   return removed;
 }
 
-/** Municipio bbox from mun_polygons (read-only), or null when the cvegeo is unknown. */
+/**
+ * Municipio bbox from mun_polygons_2025 (MG 2025, read-only), or null when
+ * the cvegeo is unknown. MG 2025 keys are a superset of MG 2020's
+ * (mun_polygons) plus the 9 municipios created since 2020.
+ */
 export async function fetchMunBbox(
   cveMun: string,
   opts: RunSqlOptions,
 ): Promise<Bbox | null> {
   if (!CVE_MUN_RE.test(cveMun)) throw new Error(`cve_mun inválido "${cveMun}"`);
-  const sql = `SELECT json_agg(json_build_object('minLon', ST_XMin(e), 'minLat', ST_YMin(e), 'maxLon', ST_XMax(e), 'maxLat', ST_YMax(e))) FROM (SELECT ST_Extent(geom) AS e FROM mun_polygons WHERE cvegeo = '${cveMun}') t WHERE e IS NOT NULL;`;
+  const sql = `SELECT json_agg(json_build_object('minLon', ST_XMin(e), 'minLat', ST_YMin(e), 'maxLon', ST_XMax(e), 'maxLat', ST_YMax(e))) FROM (SELECT ST_Extent(geom) AS e FROM mun_polygons_2025 WHERE cvegeo = '${cveMun}') t WHERE e IS NOT NULL;`;
   const rows = await runJson<Bbox[] | null>(sql, { ...opts, readOnly: true });
   return rows && rows.length > 0 ? rows[0]! : null;
 }
 
-/** 5-digit cvegeo list of an estado, from mun_polygons (read-only). */
+/** 5-digit cvegeo list of an estado, from mun_polygons_2025 (MG 2025, read-only). */
 export async function listEstadoMunicipios(
   cveEnt: string,
   opts: RunSqlOptions,
 ): Promise<string[]> {
   if (!/^\d{2}$/.test(cveEnt)) throw new Error(`estado inválido "${cveEnt}"`);
-  const sql = `SELECT json_agg(cvegeo ORDER BY cvegeo) FROM mun_polygons WHERE cvegeo LIKE '${cveEnt}%';`;
+  const sql = `SELECT json_agg(cvegeo ORDER BY cvegeo) FROM mun_polygons_2025 WHERE cvegeo LIKE '${cveEnt}%';`;
   const rows = await runJson<string[] | null>(sql, { ...opts, readOnly: true });
   return (rows ?? []).filter((c) => CVE_MUN_RE.test(c));
 }

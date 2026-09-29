@@ -38,6 +38,9 @@ ALTER TABLE ageb_polygons OWNER TO postgres;
 ALTER TABLE mun_polygons OWNER TO postgres;
 ALTER TABLE ent_polygons OWNER TO postgres;
 ALTER TABLE loc_polygons OWNER TO postgres;
+-- MG 2025 editions (scripts/load-mg2025-polygons.ts); absent before that load.
+ALTER TABLE IF EXISTS mun_polygons_2025 OWNER TO postgres;
+ALTER TABLE IF EXISTS ageb_polygons_2025 OWNER TO postgres;
 
 -- #111 #112 #113: no anon / authenticated / trustr_app rights on DENUE relations.
 DO $$
@@ -46,6 +49,7 @@ DECLARE
 BEGIN
   FOREACH r IN ARRAY ARRAY[
     'ageb_polygons', 'mun_polygons', 'ent_polygons', 'loc_polygons',
+    'ageb_polygons_2025', 'mun_polygons_2025',
     'establecimientos', 'establecimientos_geo',
     'mv_coverage', 'mv_sector_summary', 'mv_estrato_por_entidad',
     'mv_national_treemap', 'mv_sector_grade_matrix',

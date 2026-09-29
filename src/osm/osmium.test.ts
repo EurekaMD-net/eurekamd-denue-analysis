@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+const { mockRunJson } = vi.hoisted(() => ({ mockRunJson: vi.fn() }));
+vi.mock("../api/db/psql-runner.js", () => ({ runJson: mockRunJson }));
 import {
   existsSync,
   mkdtempSync,
@@ -19,8 +22,10 @@ import {
   cachePaths,
   checkCacheBudget,
   extractMunicipioRoads,
+  fetchMunBbox,
   isBboxTooLarge,
   isCacheHot,
+  listEstadoMunicipios,
   lockPath,
   padBbox,
   paddedBboxAreaDeg2,
@@ -330,5 +335,36 @@ describe("sweepStaleTemps", () => {
 
   it("is a no-op when the cache dir does not exist", () => {
     expect(sweepStaleTemps(join(dir, "nope"))).toEqual([]);
+  });
+});
+
+// MG 2025 bridge step 3: the municipio key list and bbox come from the MG 2025
+// edition (a superset of MG 2020's keys), so the 9 municipios created since
+// 2020 stop answering 404 on /analytics/street-geometry.
+describe("municipio lookups read mun_polygons_2025", () => {
+  const OPTS = { container: "supabase-db" };
+  beforeEach(() => mockRunJson.mockReset());
+
+  it("fetchMunBbox reads the MG 2025 table read-only", async () => {
+    mockRunJson.mockResolvedValueOnce([BBOX]);
+    await expect(fetchMunBbox("12083", OPTS)).resolves.toEqual(BBOX);
+    const [sql, opts] = mockRunJson.mock.calls[0]!;
+    expect(sql).toContain("FROM mun_polygons_2025 WHERE cvegeo = '12083'");
+    expect(sql).not.toMatch(/\bmun_polygons\b(?!_2025)/);
+    expect(opts).toEqual({ container: "supabase-db", readOnly: true });
+  });
+
+  it("fetchMunBbox returns null for an unknown cvegeo", async () => {
+    mockRunJson.mockResolvedValueOnce(null);
+    await expect(fetchMunBbox("99999", OPTS)).resolves.toBeNull();
+  });
+
+  it("listEstadoMunicipios reads the MG 2025 table read-only", async () => {
+    mockRunJson.mockResolvedValueOnce(["12082", "12083", "bad"]);
+    await expect(listEstadoMunicipios("12", OPTS)).resolves.toEqual(["12082", "12083"]);
+    const [sql, opts] = mockRunJson.mock.calls[0]!;
+    expect(sql).toContain("FROM mun_polygons_2025 WHERE cvegeo LIKE '12%'");
+    expect(sql).not.toMatch(/\bmun_polygons\b(?!_2025)/);
+    expect(opts).toEqual({ container: "supabase-db", readOnly: true });
   });
 });

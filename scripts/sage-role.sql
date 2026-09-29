@@ -261,6 +261,13 @@ BEGIN
   IF to_regclass('public.sedatu_financiamientos_raw_2026') IS NOT NULL THEN
     REVOKE ALL ON sedatu_financiamientos_raw_2026 FROM denue_sage;
   END IF;
+  -- MG 2025 polygons (scripts/load-mg2025-polygons.ts), next to the 2020 ones.
+  IF to_regclass('public.ageb_polygons_2025') IS NOT NULL THEN
+    REVOKE ALL ON ageb_polygons_2025 FROM denue_sage;
+  END IF;
+  IF to_regclass('public.mun_polygons_2025') IS NOT NULL THEN
+    REVOKE ALL ON mun_polygons_2025 FROM denue_sage;
+  END IF;
 END$$;
 
 COMMIT;

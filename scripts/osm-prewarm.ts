@@ -18,7 +18,7 @@
  * Municipios whose lock is held by a running extraction (the API or
  * another prewarm) are logged and skipped.
  *
- * Reads mun_polygons read-only as the postgres role (operator tool, like
+ * Reads mun_polygons_2025 read-only as the postgres role (operator tool, like
  * the scripts/load-* loaders), so it needs no denue_api grant. Never
  * downloads anything.
  */
@@ -86,7 +86,7 @@ export async function prewarm(
     }
     const bbox = await deps.fetchMunBbox(cve);
     if (bbox === null) {
-      deps.error(`${cve} no existe en mun_polygons`);
+      deps.error(`${cve} no existe en mun_polygons_2025`);
       failed++;
       continue;
     }

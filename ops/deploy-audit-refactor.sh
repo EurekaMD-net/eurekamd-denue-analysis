@@ -256,7 +256,7 @@ phase_verify() {
   echo "summary MVs: $("${PSQL_RO[@]}" "SELECT to_regclass('mv_sector_summary')||' '||to_regclass('mv_estrato_por_entidad')||' rows='||(SELECT count(*) FROM mv_sector_summary)")"
   echo "sinba MV: $("${PSQL_RO[@]}" "SELECT to_regclass('mv_sinba_morbidity_municipal')")"
   echo "P14 mislabeled farmacias (224 before, 0 after 014): $("${PSQL_RO[@]}" "SELECT count(*) FROM establecimientos WHERE entidad='09' AND clase_actividad_id='464111' AND clase_actividad NOT ILIKE '%farmacia%'")"
-  echo "P02 leaked grants (expect 0): $("${PSQL_RO[@]}" "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee IN ('anon','authenticated','trustr_app') AND table_name IN ('ageb_polygons','mun_polygons','ent_polygons','loc_polygons','establecimientos','establecimientos_geo','mv_coverage')")"
+  echo "P02 leaked grants (expect 0): $("${PSQL_RO[@]}" "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee IN ('anon','authenticated','trustr_app') AND table_name IN ('ageb_polygons','mun_polygons','ent_polygons','loc_polygons','ageb_polygons_2025','mun_polygons_2025','establecimientos','establecimientos_geo','mv_coverage')")"
   echo "role timeouts:"; "${PSQL_RO[@]}" "SELECT rolname||' '||coalesce(array_to_string(rolconfig,','),'-') FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role')"
   echo "trgm index valid: $("${PSQL_RO[@]}" "SELECT coalesce((SELECT indisvalid::text FROM pg_index WHERE indexrelid=to_regclass('idx_estab_nombre_trgm')),'missing (009 held)')")"
   log "web build artefacts"
