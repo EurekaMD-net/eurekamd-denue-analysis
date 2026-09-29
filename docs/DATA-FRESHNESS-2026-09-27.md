@@ -19,7 +19,7 @@ the OSM finding (section 3) was re-checked directly.
 | P2 | Encuesta Intercensal 2025 | not loaded (new) | released 2026-09-22, state + municipio | New loader; 2,478 municipios vs 2,469 keys |
 | ~~P3~~ DONE 09-27 | DENUE | **05/2026 loaded 2026-09-27** (6,138,075; was 11/2025, 6,097,681) | **11/2026 due 2026-11-25** | `ops/denue-refresh.sh` (11 h). Stale cleanup done 2026-09-28 03:55 UTC: 1,146,694 re-keyed/departed CLEE rows removed, count = extraction (see `docs/DENUE-REFRESH.md`) |
 | P3 | Aeropuertos | March-of-year 2006–2026 | AFAC through July 2026 | Semantics decision first (March-only pivot) |
-| P3 | Marco Geoestadístico | MG 2020 | MG 2025 (2.9 GB, 2025-12-15; 2,478 municipios) | Load alongside 2020, not replace; key bridge needed |
+| P3 | Marco Geoestadístico | MG 2020 | MG 2025 (2.9 GB, 2025-12-15; 2,478 municipios) | Load alongside 2020, not replace; key bridge done (027). Zip downloaded 2026-09-28; loader `scripts/load-mg2025-polygons.ts` (→ `mun_polygons_2025` + `ageb_polygons_2025`) exists, **not loaded yet** (sequence in `docs/MG-2025-LOAD-BRIEF-2026-09-28.md` §Loader) |
 | watch | EDR defunciones | 2024 definitive | 2025 preliminary (Aug 2026); definitive ~Nov 2026 | `--append` 2025 when the open-data zip appears |
 | watch | ENOE | 2025 Q1–Q4 | 2026 Q2 | Wait for full-year 2026 (~Feb 2027) |
 | watch | CNBV Panorama | 2025 edition (data 2024) | 2026 edition not published | Re-check ~Dec 2026 |

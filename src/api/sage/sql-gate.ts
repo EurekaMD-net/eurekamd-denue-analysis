@@ -145,6 +145,8 @@ const FORBIDDEN_RELATIONS = [
   "ent_polygons",
   "mun_polygons",
   "loc_polygons",
+  "ageb_polygons_2025",
+  "mun_polygons_2025",
 ];
 
 // Year-suffixed raw tables of the SNIIV loaders (load-sedatu-financiamientos.ts,

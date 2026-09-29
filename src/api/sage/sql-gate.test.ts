@@ -324,6 +324,16 @@ describe("preCheckSql", () => {
     }
   });
 
+  it("rejects the MG 2025 polygon tables like the 2020 ones", () => {
+    for (const sql of [
+      "SELECT count(*) FROM mun_polygons_2025",
+      "SELECT cvegeo FROM public.ageb_polygons_2025 LIMIT 1",
+      'SELECT 1 FROM "MUN_POLYGONS_2025"',
+    ]) {
+      expect(preCheckSql(sql)?.code, sql).toBe("SQL_FORBIDDEN_TABLE");
+    }
+  });
+
   it("rejects forbidden relations when quoted or schema-qualified", () => {
     expect(preCheckSql('SELECT 1 FROM "Establecimientos"')?.code).toBe(
       "SQL_FORBIDDEN_TABLE",

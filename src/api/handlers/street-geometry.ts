@@ -4,7 +4,7 @@
  * Street geometry (GeoJSON MultiLineString per named street) from the
  * per-municipio OSM road extract cached on disk (src/osm/osmium.ts).
  *
- *   cve_mun — 5-digit INEGI municipio key; must exist in mun_polygons
+ *   cve_mun — 5-digit INEGI municipio key; must exist in mun_polygons_2025
  *   q       — no control characters; 4..80 chars once normalised
  *             (normalizeName: accents stripped, whitespace collapsed)
  *
@@ -19,7 +19,7 @@
  *                503 osm.cache_budget     — < 5 GB free or > 20 GB cached; re-checked
  *                                           when the queued job starts (reported once
  *                                           to the next caller)
- *                404 municipio.not_found  — cvegeo not in mun_polygons
+ *                404 municipio.not_found  — cvegeo not in mun_polygons_2025
  *                409 osm.bbox_too_large   — padded bbox > 1 deg² (prewarm via CLI --force)
  * Extraction failed → 502 osm.extract_failed once (stderr tail logged
  *              server-side only); the next request starts a fresh attempt.

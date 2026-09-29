@@ -82,6 +82,12 @@ describe("scripts/api-role.sql", () => {
     expect(missing).toEqual([]);
   });
 
+  it("grants SELECT on both MG 2025 polygon tables next to the 2020 ones", () => {
+    for (const t of ["mun_polygons", "ageb_polygons", "mun_polygons_2025", "ageb_polygons_2025"]) {
+      expect(allow.has(t), t).toBe(true);
+    }
+  });
+
   it("grants SELECT on every layers-values registry source", () => {
     const froms = Object.values(MAP_LAYER_REGISTRY).map((d) => d.from);
     expect(froms.length).toBeGreaterThan(0);

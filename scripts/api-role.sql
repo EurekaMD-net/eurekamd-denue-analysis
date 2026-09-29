@@ -57,6 +57,8 @@ BEGIN
     'establecimientos',
     'ageb_polygons',
     'mun_polygons',
+    'mun_polygons_2025',
+    'ageb_polygons_2025',
     'censo_iter',
     'inegi_edr_defunciones_raw',
     'calibrators_enigh_state',

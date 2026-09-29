@@ -55,6 +55,14 @@ describe("002-grants-lockdown.sql", () => {
     }
   });
 
+  it("covers the MG 2025 polygon tables, guarded for instances without them", () => {
+    const rels = revokedRelations();
+    for (const t of ["ageb_polygons_2025", "mun_polygons_2025"]) {
+      expect(rels.has(t), t).toBe(true);
+      expect(MIGRATION).toContain(`ALTER TABLE IF EXISTS ${t} OWNER TO postgres;`);
+    }
+  });
+
   it("never touches whole-schema grants (other apps share public)", () => {
     expect(MIGRATION).not.toMatch(/^\s*[^-\s].*ALL TABLES IN SCHEMA/im);
     expect(MIGRATION).not.toMatch(/^\s*ALTER DEFAULT PRIVILEGES/im);

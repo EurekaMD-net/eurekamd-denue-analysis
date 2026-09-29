@@ -9,6 +9,8 @@
 #   - EDR loader (load-edr.ts)       → mv_mortalidad_municipal_yearly
 #   - CONEVAL/CLUES reloads          → mv_sector_grade_matrix, mv_national_treemap
 #   - SICT loader OR mun_polygons reload → sict_traffic_by_municipio + sict_traffic_by_estado
+#     (an MG 2025 load, scripts/load-mg2025-polygons.ts → mun_polygons_2025,
+#     does NOT trigger them: SICT stays spatially joined to MG 2020)
 #   - SEDATU loader (load-sedatu-financiamientos.ts) → sedatu_financing_by_municipio + sedatu_financing_by_estado
 #   - CNBV loader (load-cnbv-credito.ts) → cnbv_credito_by_municipio + cnbv_credito_by_estado
 #   - SINBA loader (load-sinba.ts)   → mv_sinba_morbidity_municipal (the

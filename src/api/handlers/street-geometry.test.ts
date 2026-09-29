@@ -185,7 +185,7 @@ describe("GET /analytics/street-geometry — cold cache", () => {
     await vi.waitFor(() => expect(extract).toHaveBeenCalledTimes(1));
   });
 
-  it("404 municipio.not_found when mun_polygons has no such cvegeo", async () => {
+  it("404 municipio.not_found when mun_polygons_2025 has no such cvegeo", async () => {
     const { deps, get } = setup({ fetchMunBbox: vi.fn(async () => null) });
     const res = await get("cve_mun=99999&q=reforma");
     expect(res.status).toBe(404);
