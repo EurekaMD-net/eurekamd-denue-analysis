@@ -16,7 +16,7 @@ the OSM finding (section 3) was re-checked directly.
 | ~~P1~~ done 09-28 | COFEPRIS farmacias | PDF 1079227 (3,066 licences, 2,866 Vigente, to 2026-04-27; loaded 2026-09-28 22:49 UTC) | PDF 1079227 dated 2026-05-15 | `gob.mx/cms/uploads/attachment/file/1079227/...pdf` downloads with plain curl (superseded editions 404: keep each PDF under `raw/cofepris/`). Needed a code change (`145aa3b`): the 2026-05 edition appends 3 constancia columns (17-col rows) and prints dates as `d-mmm.-yy`; the parser now checks the header on every page, validates dates, canonicalizes `estatus` case, fixes CPs (`54680,`, CDMX 4-digit) and the `Michioacán` typo. Pipeline: `cofepris-pdf-to-csv.py` → `cofepris-geocode.py` → `load-cofepris.ts --csv-path= --force` → re-run `scripts/api-role.sql` → ledger. 93.0% geocoded (2,231 precise / 621 modal / 214 none). Source quirks (not fixed): 34 licence numbers on 68 rows with different establishments; 8 licences whose 2-digit prefix differs from the entidad; all 3 constancia columns read `No aplica`. |
 | ~~P2~~ done 09-28 | SEDATU financiamientos | 2025 full year + 2026 ene–jun (`_2026` views, 146,537 rows; MVs still read 2025) | same | Loaded 2026-09-28 20:4x UTC via `--year=2026`; promote with `--mv-source-year=2026` once the full year is published (`docs/SNIIV-2026-H1.md`) |
 | ~~P2~~ done 09-28 | CNBV crédito vivienda | 2025 full year + 2026 ene–jun (`_2026` views, 45,048 rows; MVs still read 2025) | same | Loaded 2026-09-28 20:4x UTC via `--year=2026`; same promotion path as SEDATU |
-| P2 | Encuesta Intercensal 2025 | not loaded (new) | released 2026-09-22, state + municipio | New loader; 2,478 municipios vs 2,469 keys |
+| ~~P2~~ | Encuesta Intercensal 2025 | **2025 (loaded 2026-09-29)** | released 2026-09-22, state + municipio | DONE 09-29: `scripts/load-eic2025.ts` (merge `a4e6270`) → `eic_2025_municipio_raw` 13,880 + views `eic_2025_municipio` 2,478 / `_moe` 9,912 / `_censo_parity`; ledger `eic_2025 | 2025`; `municipios_2025` stays Censo 2020, join on cve_mun for 2025 figures (`docs/EIC-2025-LOADER-BRIEF-2026-09-28.md` §7) |
 | ~~P3~~ DONE 09-27 | DENUE | **05/2026 loaded 2026-09-27** (6,138,075; was 11/2025, 6,097,681) | **11/2026 due 2026-11-25** | `ops/denue-refresh.sh` (11 h). Stale cleanup done 2026-09-28 03:55 UTC: 1,146,694 re-keyed/departed CLEE rows removed, count = extraction (see `docs/DENUE-REFRESH.md`) |
 | P3 | Aeropuertos | March-of-year 2006–2026 | AFAC through July 2026 | Semantics decision first (March-only pivot) |
 | ~~P3~~ | Marco Geoestadístico | MG 2020 **+ MG 2025 (loaded 2026-09-29)** | MG 2025 (2.9 GB, 2025-12-15; 2,478 municipios) | DONE 09-29: `mun_polygons_2025` (2,478) + `ageb_polygons_2025` (82,283) live alongside 2020 via `scripts/load-mg2025-polygons.ts` (merge `513da75`); ledger `marco_geoestadistico | MG 2025` = 84,761; only street-geometry / osm-prewarm read 2025, every AGEB-keyed consumer stays on 2020 (`docs/MG-2025-LOAD-BRIEF-2026-09-28.md`) |
@@ -122,8 +122,12 @@ the OSM finding (section 3) was re-checked directly.
 3. ~~Parametrise the SEDATU and CNBV loaders by year; load 2026 H1 next to
    2025.~~ Done 09-28: `--year` / `--mv-source-year`, MVs stay on the latest
    complete year (`docs/SNIIV-2026-H1.md`).
-4. EIC 2025 municipal layer (new loader; decide the 2,478→2,469 key bridge
-   together with the MG 2025 question). Recon done 09-28:
+4. ~~EIC 2025 municipal layer~~ DONE 09-29: all three steps of ruling (b)
+   are live (step 1 bridge `1cdc4af`, step 3 MG 2025 polygons `513da75`,
+   step 2 EIC loader `a4e6270`). Open follow-ups: no handler reads the EIC
+   views yet (municipio-detail could expose `pobtot_2025` + MOE); the 24
+   stray DENUE `area_geo` codes; `postLoadGrants` restores only
+   `denue_sage`, so every reload needs `api-role.sql` re-run. History:
    `docs/EIC-2025-RECON-2026-09-28.md` (sources curl-able, 9 new municipios +
    parents, 4,950 DENUE rows already orphaned today). Ruling 09-28: (b)
    staged + MG 2025 pull approved. Step 1 bridge LIVE (`beacbba`, migration

@@ -117,3 +117,11 @@
 - **Avoid:** a coordinator-written verification query with `EXCEPT … AND false UNION ALL` improvisation: it printed all 2,478 rows into the transcript. Write the anti-join once as `NOT EXISTS` and reuse the loader's own assertion numbers as the primary evidence.
 - **Better:** a `--force` reload of a table a live handler reads holds ACCESS EXCLUSIVE for the whole load window; document it as an outage window on the flag itself, not only in the brief.
 
+## 2026-09-29 — EIC 2025 municipal loader (step 2, closes ruling b)
+
+- **Mistake:** the recon doc listed GRAPROES among "absolute counts", `*` = 747 and 13 renames; the CSV read gave an average, 750 (3 of the 9 new keys are fully enumerated) and 20 renames (7 accent fixes) → the check: derive every count from the file with one script before writing a recon table; a number typed from a skim is a claim.
+- **Avoid:** a "parity" view that multiplies every `PCN_*` by POBTOT; EIC percentage families have their own bases (VIVPARHAB_C, PDER_SS, P_12YMAS, P_15YMAS, P_3YMAS, speakers, P_5YMAS). Read the dictionary's denominator column per family before deriving one absolute.
+- **Avoid:** a typed view over a survey that depends on `municipios_2025`/`censo_*`: `load-censo.ts` drops that view without CASCADE, so the dependent breaks every Censo reload. Key-universe checks go in a guarded DO block inside the loader (a read, not a dependency); joins happen in handlers.
+- **Better:** a loader's assertion block that ties the municipio sum to the national row AND to the sum of the 32 entidad rows catches a truncated COPY, an encoding slip in ESTIMADOR (moe count), and a filter drift in one NOTICE; 13 injected mutations each failed their own message with nothing committed.
+- **Better:** `postLoadGrants` restores only `denue_sage`; every loader prints the api-role re-run hint, and the merge order stays load → api-role (branch) → ledger → merge → api-role (main) → restart. Systemic fix (restore `denue_api` for allowlisted relations) is an open follow-up, not folded inline.
+
