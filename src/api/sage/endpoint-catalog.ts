@@ -349,7 +349,7 @@ export const SAGE_ENDPOINT_CATALOG: EndpointSpec[] = [
   {
     name: "municipio-detail",
     description:
-      "Detalle completo de un municipio: 14 capas joineadas (censo, pobreza, rezago, CLUES, COFEPRIS, SESNSP, EDR, SINBA, CE2024, SEDATU, CNBV Panorama, CNBV Crédito).",
+      "Detalle completo de un municipio: capas joineadas (censo, pobreza, rezago, CLUES, COFEPRIS, SESNSP, EDR, SINBA, CE2024, SICT (datos viales), SEDATU, CNBV Panorama, CNBV Crédito, EIC 2025 (`population_2025`: pobtot 2025 + MOE, viviendas particulares)).",
     params_schema: {
       type: "object",
       properties: { cve_mun: { type: "string" } },

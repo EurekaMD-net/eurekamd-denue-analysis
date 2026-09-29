@@ -198,3 +198,5 @@ re-applies the grants (anon / authenticated / trustr_app none; `denue_sage`
 and `denue_api` SELECT) idempotently for a grants audit. No service restart
 is needed: no handler reads the EIC relations yet; restart only when a
 handler change that reads them ships.
+
+First consumer: `GET /analytics/municipio-detail` `population_2025` (pobtot/pobfem/pobmas 2025 + pobtot se/li90/ls90/cv + `*`/`**` flags; one `LEFT JOIN` + one `LATERAL` over the moe view); shipping it needs the service restart above.
